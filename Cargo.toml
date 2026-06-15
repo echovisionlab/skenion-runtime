@@ -1,0 +1,12 @@
+[package]
+name = "skenion-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Skenion native runtime"
+license = "Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.17"

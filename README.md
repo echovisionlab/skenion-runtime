@@ -1,8 +1,32 @@
 # Skenion Runtime
 
-Rust native runtime for graph compilation, scheduling, rendering, preview, output, plugin hosting, control, and telemetry.
+Rust native runtime for graph compilation, scheduling, rendering, preview,
+output, plugin hosting, control, and telemetry.
 
 Runtime internals live in a Cargo workspace until external consumers justify extraction.
+
+## Initial Surface
+
+The first runtime surface is a contract loader, not the renderer.
+
+It can validate:
+
+- Skenion Node Definition Manifest v0.1 JSON files
+- Skenion Graph Document v0.1 JSON files
+- duplicate node and port ids
+- edge endpoint existence
+- output-to-input edge direction
+- `flow + dataKind` compatibility
+- input-only `activation`
+- unsupported node permissions
+
+```sh
+cargo run -- validate-node path/to/node-definition.json
+cargo run -- validate-graph path/to/graph.json
+```
+
+This loader is intentionally conservative. Video, audio, GPU, and resource
+conversions must appear as explicit converter nodes in saved graph documents.
 
 ## Status
 
