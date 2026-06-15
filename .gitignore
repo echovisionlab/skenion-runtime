@@ -1,4 +1,5 @@
 /target
+/.deps
 .DS_Store
 .env
 .env.*

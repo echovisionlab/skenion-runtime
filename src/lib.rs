@@ -6,6 +6,7 @@ mod registry;
 mod scheduler;
 mod serve;
 mod server;
+mod session;
 mod validation;
 mod visual;
 
@@ -29,7 +30,10 @@ pub use serve::serve_runtime;
 pub use server::{
     DEFAULT_HOST, DEFAULT_PORT, DiagnosticSeverity, HealthResponse, ProjectRequest,
     RUNTIME_API_VERSION, RunProjectRequest, RuntimeApiResponse, RuntimeDiagnostic,
-    RuntimeInfoResponse, runtime_router,
+    RuntimeInfoResponse, RuntimeServerState, runtime_router, runtime_router_with_state,
+};
+pub use session::{
+    RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot, SessionRunRequest,
 };
 pub use validation::{
     ValidationError, ValidationReport, compatible_data_types, type_label, validate_graph_document,

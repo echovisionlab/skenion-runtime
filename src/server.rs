@@ -1,5 +1,8 @@
+use std::sync::{Arc, RwLock};
+
 use axum::{
     Json, Router,
+    extract::State,
     http::{HeaderValue, Method, header::CONTENT_TYPE},
     routing::{get, post},
 };
@@ -8,7 +11,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, NodeDefinition, NodeRegistry,
-    build_execution_plan, run_dummy_execution, validate_project,
+    RuntimeSession, SessionRunRequest, build_execution_plan, run_dummy_execution, validate_project,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -69,13 +72,36 @@ pub enum DiagnosticSeverity {
     Error,
 }
 
+#[derive(Clone)]
+pub struct RuntimeServerState {
+    pub session: Arc<RwLock<RuntimeSession>>,
+}
+
+impl Default for RuntimeServerState {
+    fn default() -> Self {
+        Self {
+            session: Arc::new(RwLock::new(RuntimeSession::default())),
+        }
+    }
+}
+
 pub fn runtime_router() -> Router {
+    runtime_router_with_state(RuntimeServerState::default())
+}
+
+pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v0/runtime/info", get(runtime_info))
         .route("/v0/validate", post(validate_project_endpoint))
         .route("/v0/plan", post(plan_project_endpoint))
         .route("/v0/run", post(run_project_endpoint))
+        .route("/v0/session", get(session_snapshot).delete(clear_session))
+        .route("/v0/session/load", post(load_session))
+        .route("/v0/session/validate", post(validate_session))
+        .route("/v0/session/plan", post(plan_session))
+        .route("/v0/session/run", post(run_session))
+        .with_state(state)
         .layer(cors_layer())
 }
 
@@ -92,7 +118,16 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
         name: "skenion-runtime",
         version: env!("CARGO_PKG_VERSION"),
         api_version: RUNTIME_API_VERSION,
-        capabilities: vec!["project.validate", "project.plan", "dummy.run"],
+        capabilities: vec![
+            "project.validate",
+            "project.plan",
+            "dummy.run",
+            "session.load",
+            "session.validate",
+            "session.plan",
+            "session.run",
+            "session.clear",
+        ],
     })
 }
 
@@ -147,6 +182,68 @@ async fn run_project_endpoint(Json(request): Json<RunProjectRequest>) -> Json<Ru
     })
 }
 
+async fn session_snapshot(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let session = state
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.response(true, session.snapshot().diagnostics, None))
+}
+
+async fn load_session(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<ProjectRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.load_project(request))
+}
+
+async fn validate_session(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.validate_current())
+}
+
+async fn plan_session(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.plan_current())
+}
+
+async fn run_session(
+    State(state): State<RuntimeServerState>,
+    Json(request): Json<SessionRunRequest>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.run_current(request.frames.unwrap_or(1)))
+}
+
+async fn clear_session(
+    State(state): State<RuntimeServerState>,
+) -> Json<crate::RuntimeSessionResponse> {
+    let mut session = state
+        .session
+        .write()
+        .expect("runtime session lock should not be poisoned");
+    Json(session.clear())
+}
+
 impl RuntimeApiResponse {
     fn ok() -> Self {
         Self {
@@ -168,7 +265,7 @@ impl RuntimeApiResponse {
 }
 
 impl RuntimeDiagnostic {
-    fn error(message: impl Into<String>) -> Self {
+    pub(crate) fn error(message: impl Into<String>) -> Self {
         Self {
             severity: DiagnosticSeverity::Error,
             message: message.into(),
@@ -184,7 +281,9 @@ fn validate_project_request(
     validate_graph_with_registry(graph, &registry)
 }
 
-fn registry_from_nodes(nodes: Vec<NodeDefinition>) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
+pub(crate) fn registry_from_nodes(
+    nodes: Vec<NodeDefinition>,
+) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
     let mut registry = NodeRegistry::new();
     let mut diagnostics = Vec::new();
 
@@ -201,7 +300,7 @@ fn registry_from_nodes(nodes: Vec<NodeDefinition>) -> Result<NodeRegistry, Vec<R
     }
 }
 
-fn validate_graph_with_registry(
+pub(crate) fn validate_graph_with_registry(
     graph: &GraphDocument,
     registry: &NodeRegistry,
 ) -> Result<(), Vec<RuntimeDiagnostic>> {
@@ -222,7 +321,7 @@ fn cors_layer() -> CorsLayer {
                 Ok("http://127.0.0.1:5173" | "http://localhost:5173")
             )
         }))
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::DELETE, Method::GET, Method::POST])
         .allow_headers([CONTENT_TYPE])
 }
 
@@ -260,6 +359,7 @@ mod tests {
         assert_eq!(response["capabilities"][0], "project.validate");
         assert_eq!(response["capabilities"][1], "project.plan");
         assert_eq!(response["capabilities"][2], "dummy.run");
+        assert_eq!(response["capabilities"][3], "session.load");
     }
 
     #[tokio::test]
@@ -447,8 +547,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_endpoint_returns_empty_state() {
+        let response = get_json("/v0/session").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["loaded"], false);
+        assert_eq!(response["graphId"], Value::Null);
+        assert_eq!(response["graphRevision"], Value::Null);
+        assert_eq!(response["sessionRevision"], 0);
+        assert_eq!(response["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(response["plan"], Value::Null);
+        assert_eq!(response["report"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn session_load_stores_valid_project() {
+        let app = runtime_router();
+        let response = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["loaded"], true);
+        assert_eq!(response["graphId"], "minimal-value");
+        assert_eq!(response["graphRevision"], "1");
+        assert_eq!(response["sessionRevision"], 1);
+        assert_eq!(response["plan"]["graphId"], "minimal-value");
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["loaded"], true);
+        assert_eq!(snapshot["plan"]["nodes"][0]["nodeId"], "value_1");
+    }
+
+    #[tokio::test]
+    async fn invalid_session_load_does_not_replace_existing_session() {
+        let app = runtime_router();
+        let loaded = post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        let mut invalid = sample_project();
+        invalid["nodes"] = json!([]);
+
+        let response = post_json_with(app.clone(), "/v0/session/load", invalid).await;
+
+        assert_eq!(loaded["sessionRevision"], 1);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["loaded"], true);
+        assert_eq!(response["graphId"], "minimal-value");
+        assert_eq!(response["sessionRevision"], 1);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing node definition")
+        );
+
+        let snapshot = get_json_with(app, "/v0/session").await;
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["loaded"], true);
+        assert_eq!(snapshot["graphId"], "minimal-value");
+        assert_eq!(snapshot["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn session_validate_plan_and_run_use_loaded_project() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let validation = post_empty_with(app.clone(), "/v0/session/validate").await;
+        assert_eq!(validation["ok"], true);
+        assert_eq!(validation["diagnostics"].as_array().unwrap().len(), 0);
+
+        let plan = post_empty_with(app.clone(), "/v0/session/plan").await;
+        assert_eq!(plan["ok"], true);
+        assert_eq!(plan["plan"]["graphId"], "minimal-value");
+
+        let run = post_json_with(app, "/v0/session/run", json!({ "frames": 2 })).await;
+        assert_eq!(run["ok"], true);
+        assert_eq!(run["report"]["frameCount"], 2);
+        assert_eq!(
+            run["report"]["frames"][0]["executedNodes"][0]["status"],
+            "simulated"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_run_fails_without_loaded_project() {
+        let response = post_json("/v0/session/run", json!({ "frames": 2 })).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["loaded"], false);
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no project loaded in runtime session")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_clear_removes_loaded_project() {
+        let app = runtime_router();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = delete_json_with(app, "/v0/session").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["loaded"], false);
+        assert_eq!(response["graphId"], Value::Null);
+        assert_eq!(response["sessionRevision"], 2);
+        assert_eq!(response["plan"], Value::Null);
+    }
+
     async fn get_json(path: &str) -> Value {
-        let response = runtime_router()
+        get_json_with(runtime_router(), path).await
+    }
+
+    async fn get_json_with(app: Router, path: &str) -> Value {
+        let response = app
             .oneshot(
                 Request::builder()
                     .uri(path)
@@ -462,13 +675,47 @@ mod tests {
     }
 
     async fn post_json(path: &str, payload: Value) -> Value {
-        let response = runtime_router()
+        post_json_with(runtime_router(), path, payload).await
+    }
+
+    async fn post_json_with(app: Router, path: &str, payload: Value) -> Value {
+        let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(path)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(payload.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response.into_body()).await
+    }
+
+    async fn post_empty_with(app: Router, path: &str) -> Value {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response.into_body()).await
+    }
+
+    async fn delete_json_with(app: Router, path: &str) -> Value {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(path)
+                    .body(Body::empty())
                     .expect("request should build"),
             )
             .await
