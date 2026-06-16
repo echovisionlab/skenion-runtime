@@ -9,6 +9,7 @@ mod scheduler;
 mod serve;
 mod server;
 mod session;
+mod telemetry;
 mod validation;
 mod visual;
 
@@ -47,6 +48,13 @@ pub use server::{
 pub use session::{
     RuntimePatchResponse, RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot,
     SessionRunRequest,
+};
+pub use telemetry::{
+    PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,
+    PreviewTelemetryWriter, RuntimeTelemetryPreview, RuntimeTelemetryProcess,
+    RuntimeTelemetryRender, RuntimeTelemetrySession, RuntimeTelemetrySnapshot, TELEMETRY_SCHEMA,
+    TELEMETRY_SCHEMA_VERSION, preview_telemetry_path, read_preview_telemetry, unix_ms_timestamp,
+    write_preview_telemetry_heartbeat,
 };
 pub use validation::{
     ValidationError, ValidationReport, apply_graph_patch, compatible_data_types,
