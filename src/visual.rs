@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    path::Path,
     process::{Child, Command},
     time::{Duration, Instant},
 };
@@ -35,6 +36,7 @@ pub fn run_preview_window(
 
 pub(crate) fn spawn_preview_document_handle(
     document: &PreviewDocument,
+    telemetry_path: &Path,
 ) -> Result<Box<dyn PreviewHandle>, String> {
     let document_path = write_preview_document(document)?;
     let child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
@@ -42,6 +44,8 @@ pub(crate) fn spawn_preview_document_handle(
         .arg("--document")
         .arg(document_path)
         .arg("--until-close")
+        .arg("--telemetry")
+        .arg(telemetry_path)
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(Box::new(ChildPreviewHandle { child }))

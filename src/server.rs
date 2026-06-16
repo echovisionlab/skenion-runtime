@@ -1,19 +1,25 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    convert::Infallible,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
     body::Bytes,
     extract::State,
     http::{HeaderValue, Method, header::CONTENT_TYPE},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
-    PreviewManager, RuntimePreviewStartRequest, RuntimeSession, SessionRunRequest,
-    build_execution_plan, run_dummy_execution, validate_project,
+    PreviewManager, RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot,
+    SessionRunRequest, build_execution_plan, run_dummy_execution, validate_project,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -61,23 +67,26 @@ pub struct RuntimeApiResponse {
     pub report: Option<DummyExecutionReport>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {
     Error,
+    Warning,
+    Info,
 }
 
 #[derive(Clone)]
 pub struct RuntimeServerState {
     pub session: Arc<RwLock<RuntimeSession>>,
     pub preview: Arc<Mutex<PreviewManager>>,
+    pub started_at: Instant,
 }
 
 impl Default for RuntimeServerState {
@@ -85,6 +94,7 @@ impl Default for RuntimeServerState {
         Self {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
             preview: Arc::new(Mutex::new(PreviewManager::from_env())),
+            started_at: Instant::now(),
         }
     }
 }
@@ -113,6 +123,11 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/preview/start", post(start_preview))
         .route("/v0/session/preview/stop", post(stop_preview))
         .route("/v0/session/preview/restart", post(restart_preview))
+        .route("/v0/session/telemetry", get(session_telemetry))
+        .route(
+            "/v0/session/telemetry/stream",
+            get(session_telemetry_stream),
+        )
         .with_state(state)
         .layer(cors_layer())
 }
@@ -147,6 +162,8 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.preview.start",
             "session.preview.stop",
             "session.preview.restart",
+            "session.telemetry",
+            "session.telemetry.stream",
         ],
     })
 }
@@ -416,6 +433,49 @@ async fn stop_preview(
     Json(preview.stop(snapshot))
 }
 
+async fn session_telemetry(
+    State(state): State<RuntimeServerState>,
+) -> Json<RuntimeTelemetrySnapshot> {
+    Json(telemetry_snapshot(&state))
+}
+
+async fn session_telemetry_stream(
+    State(state): State<RuntimeServerState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_millis(1000))).map(move |_| {
+            let event = Event::default()
+                .event("telemetry")
+                .json_data(telemetry_snapshot(&state))
+                .expect("telemetry snapshot should serialize");
+            Ok(event)
+        });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn telemetry_snapshot(state: &RuntimeServerState) -> RuntimeTelemetrySnapshot {
+    let snapshot = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.snapshot()
+    };
+    let mut preview = state
+        .preview
+        .lock()
+        .expect("runtime preview lock should not be poisoned");
+    preview.telemetry(
+        snapshot,
+        state
+            .started_at
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    )
+}
+
 impl RuntimeApiResponse {
     fn ok() -> Self {
         Self {
@@ -440,6 +500,13 @@ impl RuntimeDiagnostic {
     pub(crate) fn error(message: impl Into<String>) -> Self {
         Self {
             severity: DiagnosticSeverity::Error,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn warning(message: impl Into<String>) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
             message: message.into(),
         }
     }
@@ -575,6 +642,20 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|capability| capability == "session.preview.start")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.telemetry")
+        );
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "session.telemetry.stream")
         );
     }
 
@@ -1140,6 +1221,102 @@ mod tests {
         assert_eq!(preview["stale"], false);
     }
 
+    #[tokio::test]
+    async fn telemetry_endpoint_reports_empty_session() {
+        let response =
+            get_json_with(runtime_router_with_dry_preview(), "/v0/session/telemetry").await;
+
+        assert_eq!(response["schema"], "skenion.runtime.telemetry");
+        assert_eq!(response["schemaVersion"], "0.1.0");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["session"]["loaded"], false);
+        assert_eq!(response["preview"]["state"], "stopped");
+        assert_eq!(response["render"]["active"], false);
+        assert_eq!(
+            response["process"]["runtimeVersion"],
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_endpoint_reports_loaded_session_without_preview() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+
+        let response = get_json_with(app, "/v0/session/telemetry").await;
+
+        assert_eq!(response["session"]["loaded"], true);
+        assert_eq!(response["session"]["graphId"], "minimal-value");
+        assert_eq!(response["session"]["graphRevision"], "1");
+        assert_eq!(response["session"]["sessionRevision"], 1);
+        assert_eq!(response["preview"]["state"], "stopped");
+        assert_eq!(response["render"]["active"], false);
+    }
+
+    #[tokio::test]
+    async fn telemetry_endpoint_reports_dry_run_preview() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+
+        let response = get_json_with(app, "/v0/session/telemetry").await;
+
+        assert_eq!(response["preview"]["state"], "running");
+        assert_eq!(response["preview"]["stale"], false);
+        assert_eq!(response["render"]["active"], true);
+        assert_eq!(response["render"]["backend"], "dry-run");
+        assert_eq!(response["render"]["renderer"], "none");
+        assert_eq!(response["render"]["framesRendered"], 0);
+    }
+
+    #[tokio::test]
+    async fn telemetry_endpoint_marks_preview_stale_after_patch() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_project()).await;
+        post_empty_with(app.clone(), "/v0/session/preview/start").await;
+        post_json_with(app.clone(), "/v0/session/patch", set_value_patch("1")).await;
+
+        let response = get_json_with(app, "/v0/session/telemetry").await;
+
+        assert_eq!(response["session"]["sessionRevision"], 2);
+        assert_eq!(response["preview"]["state"], "running");
+        assert_eq!(response["preview"]["previewSessionRevision"], 1);
+        assert_eq!(response["preview"]["stale"], true);
+    }
+
+    #[tokio::test]
+    async fn telemetry_stream_endpoint_returns_sse_response() {
+        let response = runtime_router_with_dry_preview()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/session/telemetry/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("telemetry stream should emit")
+            .expect("telemetry stream should have a chunk")
+            .expect("telemetry stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("telemetry stream should be utf8");
+        assert!(text.contains("event: telemetry"));
+        assert!(text.contains("skenion.runtime.telemetry"));
+    }
+
     async fn get_json(path: &str) -> Value {
         get_json_with(runtime_router(), path).await
     }
@@ -1235,6 +1412,7 @@ mod tests {
         runtime_router_with_state(RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            started_at: std::time::Instant::now(),
         })
     }
 

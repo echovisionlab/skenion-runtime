@@ -92,6 +92,9 @@ enum Command {
         /// Path to the prepared preview document JSON.
         #[arg(long)]
         document: PathBuf,
+        /// Path where the preview child should write render telemetry heartbeat JSON.
+        #[arg(long)]
+        telemetry: Option<PathBuf>,
         /// Keep the preview open until the window is closed.
         #[arg(long)]
         until_close: bool,
@@ -205,6 +208,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::PreviewDocument {
             document,
+            telemetry,
             until_close,
             frames,
         } => {
@@ -214,7 +218,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 PreviewFrameLimit::Frames(frames)
             };
-            run_render_preview_window(document, frame_limit)
+            run_render_preview_window(document, frame_limit, telemetry)
         }
         Command::Serve { host, port } => serve_runtime(&host, port).await,
     }

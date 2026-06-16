@@ -1,9 +1,14 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ExecutionPlan, GraphDocument, PreviewDocument, RuntimeDiagnostic, RuntimeSessionSnapshot,
+    RuntimeTelemetrySnapshot,
+    telemetry::{preview_telemetry_path, read_preview_telemetry},
 };
 
 pub(crate) trait PreviewHandle: Send {
@@ -12,7 +17,8 @@ pub(crate) trait PreviewHandle: Send {
     fn stop(&mut self) -> Result<Option<i32>, String>;
 }
 
-pub(crate) type PreviewSpawner = fn(&PreviewDocument) -> Result<Box<dyn PreviewHandle>, String>;
+pub(crate) type PreviewSpawner =
+    fn(&PreviewDocument, &Path) -> Result<Box<dyn PreviewHandle>, String>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewContext {
@@ -23,7 +29,7 @@ pub struct PreviewContext {
     pub plan: ExecutionPlan,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PreviewState {
     Stopped,
@@ -69,6 +75,7 @@ struct PreviewStatus {
     exited_at: Option<String>,
     exit_code: Option<i32>,
     message: Option<String>,
+    telemetry_path: Option<PathBuf>,
 }
 
 pub struct PreviewManager {
@@ -101,6 +108,36 @@ impl PreviewManager {
         self.to_response(true, &snapshot, Vec::new())
     }
 
+    pub fn telemetry(
+        &mut self,
+        snapshot: RuntimeSessionSnapshot,
+        uptime_ms: u64,
+    ) -> RuntimeTelemetrySnapshot {
+        self.poll();
+        let mut diagnostics = Vec::new();
+        let heartbeat = match self.status.telemetry_path.as_deref() {
+            Some(path) => match read_preview_telemetry(path) {
+                Ok(heartbeat) => heartbeat,
+                Err(error) => {
+                    diagnostics.push(RuntimeDiagnostic::warning(format!(
+                        "invalid preview telemetry heartbeat: {error}"
+                    )));
+                    None
+                }
+            },
+            None => None,
+        };
+
+        RuntimeTelemetrySnapshot::from_parts(
+            snapshot.clone(),
+            self.to_response(true, &snapshot, Vec::new()),
+            heartbeat,
+            self.dry_run,
+            uptime_ms,
+            diagnostics,
+        )
+    }
+
     pub fn start(
         &mut self,
         context: Result<PreviewContext, Vec<RuntimeDiagnostic>>,
@@ -130,6 +167,7 @@ impl PreviewManager {
             exited_at: None,
             exit_code: None,
             message: None,
+            telemetry_path: Some(preview_telemetry_path(context.session_revision)),
         };
 
         let document = PreviewDocument::new(
@@ -140,7 +178,12 @@ impl PreviewManager {
         let handle = if self.dry_run {
             Ok(Box::new(DryRunPreviewHandle) as Box<dyn PreviewHandle>)
         } else {
-            (self.spawner)(&document)
+            let telemetry_path = self
+                .status
+                .telemetry_path
+                .as_deref()
+                .expect("preview telemetry path should be prepared before spawning");
+            (self.spawner)(&document, telemetry_path)
         };
 
         match handle {
@@ -295,6 +338,7 @@ impl PreviewStatus {
             exited_at: None,
             exit_code: None,
             message: None,
+            telemetry_path: None,
         }
     }
 }
@@ -333,8 +377,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PlanEdge, PlanNode,
+        ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
+        PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, PreviewTelemetryHeartbeat,
         RuntimeSessionSnapshot, preview_manager::PreviewHandle,
+        telemetry::write_preview_telemetry_heartbeat,
     };
 
     #[test]
@@ -386,6 +432,21 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_telemetry_reports_active_render_without_heartbeat() {
+        let mut manager = PreviewManager::dry_run();
+        manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
+
+        let telemetry = manager.telemetry(loaded_snapshot(1, "1"), 120);
+
+        assert!(telemetry.ok);
+        assert_eq!(telemetry.preview.state, PreviewState::Running);
+        assert!(telemetry.render.active);
+        assert_eq!(telemetry.render.backend.as_deref(), Some("dry-run"));
+        assert_eq!(telemetry.render.renderer.as_deref(), Some("none"));
+        assert_eq!(telemetry.process.uptime_ms, 120);
+    }
+
+    #[test]
     fn start_without_context_returns_diagnostics() {
         let mut manager = PreviewManager::dry_run();
         let response = manager.start(
@@ -415,6 +476,18 @@ mod tests {
         assert_eq!(response.graph_revision.as_deref(), Some("1"));
         assert_eq!(response.preview_session_revision, Some(1));
         assert!(response.stale);
+    }
+
+    #[test]
+    fn telemetry_marks_preview_stale_after_session_revision_changes() {
+        let mut manager = PreviewManager::dry_run();
+        manager.start(Ok(context(1)), loaded_snapshot(1, "1"), false);
+
+        let telemetry = manager.telemetry(loaded_snapshot(2, "2"), 0);
+
+        assert_eq!(telemetry.session.session_revision, 2);
+        assert_eq!(telemetry.preview.preview_session_revision, Some(1));
+        assert!(telemetry.preview.stale);
     }
 
     #[test]
@@ -457,6 +530,39 @@ mod tests {
         assert_eq!(exited.pid, None);
         assert_eq!(exited.exit_code, Some(0));
         assert_eq!(exited.message.as_deref(), Some("preview process exited"));
+    }
+
+    #[test]
+    fn telemetry_reads_native_heartbeat_file() {
+        let mut manager = PreviewManager::with_test_spawner(false, spawn_heartbeat_handle);
+        manager.start(Ok(context(41)), loaded_snapshot(41, "1"), false);
+
+        let telemetry = manager.telemetry(loaded_snapshot(41, "1"), 0);
+
+        assert_eq!(telemetry.render.backend.as_deref(), Some("wgpu"));
+        assert_eq!(telemetry.render.renderer.as_deref(), Some("clear-color"));
+        assert_eq!(telemetry.render.frames_rendered, 3);
+        assert_eq!(telemetry.render.source_node_id.as_deref(), Some("clear_1"));
+    }
+
+    #[test]
+    fn telemetry_reports_invalid_heartbeat_as_warning() {
+        let mut manager = PreviewManager::with_test_spawner(false, spawn_invalid_heartbeat_handle);
+        manager.start(Ok(context(42)), loaded_snapshot(42, "1"), false);
+
+        let telemetry = manager.telemetry(loaded_snapshot(42, "1"), 0);
+
+        assert!(telemetry.ok);
+        assert_eq!(
+            telemetry.diagnostics[0].severity,
+            crate::DiagnosticSeverity::Warning
+        );
+        assert!(
+            telemetry.diagnostics[0]
+                .message
+                .contains("invalid preview telemetry heartbeat")
+        );
+        assert_eq!(telemetry.render.frames_rendered, 0);
     }
 
     #[test]
@@ -523,19 +629,33 @@ mod tests {
         assert!(!request.restart);
     }
 
-    fn spawn_exiting_handle(document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
+    fn spawn_exiting_handle(
+        document: &PreviewDocument,
+        telemetry_path: &Path,
+    ) -> Result<Box<dyn PreviewHandle>, String> {
         assert_eq!(document.plan.graph_id, "minimal-value");
         assert_eq!(document.graph.id, "minimal-value");
         assert_eq!(document.session_revision, 1);
+        assert!(
+            telemetry_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("telemetry")
+        );
         Ok(Box::new(FakePreviewHandle::new(Some(0), None, None)))
     }
 
-    fn spawn_running_handle(_document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
+    fn spawn_running_handle(
+        _document: &PreviewDocument,
+        _telemetry_path: &Path,
+    ) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(None, None, None)))
     }
 
     fn spawn_erroring_handle(
         _document: &PreviewDocument,
+        _telemetry_path: &Path,
     ) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(
             None,
@@ -546,6 +666,7 @@ mod tests {
 
     fn spawn_unstoppable_handle(
         _document: &PreviewDocument,
+        _telemetry_path: &Path,
     ) -> Result<Box<dyn PreviewHandle>, String> {
         Ok(Box::new(FakePreviewHandle::new(
             None,
@@ -554,8 +675,46 @@ mod tests {
         )))
     }
 
-    fn spawn_failure(_document: &PreviewDocument) -> Result<Box<dyn PreviewHandle>, String> {
+    fn spawn_failure(
+        _document: &PreviewDocument,
+        _telemetry_path: &Path,
+    ) -> Result<Box<dyn PreviewHandle>, String> {
         Err("spawn failed".to_owned())
+    }
+
+    fn spawn_heartbeat_handle(
+        document: &PreviewDocument,
+        telemetry_path: &Path,
+    ) -> Result<Box<dyn PreviewHandle>, String> {
+        write_preview_telemetry_heartbeat(
+            telemetry_path,
+            &PreviewTelemetryHeartbeat {
+                schema: PREVIEW_TELEMETRY_SCHEMA.to_owned(),
+                schema_version: PREVIEW_TELEMETRY_SCHEMA_VERSION.to_owned(),
+                timestamp: "unix-ms:1".to_owned(),
+                pid: 42,
+                graph_id: document.graph.id.clone(),
+                graph_revision: document.graph.revision.clone(),
+                session_revision: document.session_revision,
+                renderer: "clear-color".to_owned(),
+                backend: "wgpu".to_owned(),
+                frames_rendered: 3,
+                approx_fps: Some(60.0),
+                last_frame_ms: Some(16.7),
+                last_error: None,
+                source_node_id: Some("clear_1".to_owned()),
+            },
+        )
+        .expect("test heartbeat should write");
+        Ok(Box::new(FakePreviewHandle::new(None, None, None)))
+    }
+
+    fn spawn_invalid_heartbeat_handle(
+        _document: &PreviewDocument,
+        telemetry_path: &Path,
+    ) -> Result<Box<dyn PreviewHandle>, String> {
+        std::fs::write(telemetry_path, b"{").expect("invalid heartbeat should write");
+        Ok(Box::new(FakePreviewHandle::new(None, None, None)))
     }
 
     struct FakePreviewHandle {

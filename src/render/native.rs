@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Instant};
+use std::{error::Error, path::PathBuf, sync::Arc, time::Instant};
 
 use winit::{
     application::ApplicationHandler,
@@ -10,15 +10,17 @@ use winit::{
 use crate::{
     PreviewFrameLimit,
     render::{PreviewDocument, RenderScene, render_scene_from_preview_document},
+    telemetry::PreviewTelemetryWriter,
 };
 
 pub fn run_render_preview_window(
     document: PreviewDocument,
     frame_limit: PreviewFrameLimit,
+    telemetry_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     let scene = render_scene_from_preview_document(&document);
-    let mut app = NativePreviewApp::new(document, scene, frame_limit);
+    let mut app = NativePreviewApp::new(document, scene, frame_limit, telemetry_path);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -28,18 +30,36 @@ struct NativePreviewApp {
     scene: RenderScene,
     window: Option<Arc<Window>>,
     renderer: Option<WgpuClearRenderer>,
+    telemetry: Option<PreviewTelemetryWriter>,
     frame_index: usize,
     frame_limit: PreviewFrameLimit,
     last_redraw: Instant,
 }
 
 impl NativePreviewApp {
-    fn new(document: PreviewDocument, scene: RenderScene, frame_limit: PreviewFrameLimit) -> Self {
+    fn new(
+        document: PreviewDocument,
+        scene: RenderScene,
+        frame_limit: PreviewFrameLimit,
+        telemetry_path: Option<PathBuf>,
+    ) -> Self {
+        let telemetry = telemetry_path.map(|path| {
+            PreviewTelemetryWriter::new(
+                path,
+                document.graph.id.clone(),
+                document.graph.revision.clone(),
+                document.session_revision,
+                "clear-color",
+                "wgpu",
+                scene.source_node_id.clone(),
+            )
+        });
         Self {
             document,
             scene,
             window: None,
             renderer: None,
+            telemetry,
             frame_index: 0,
             frame_limit,
             last_redraw: Instant::now(),
@@ -88,6 +108,9 @@ impl ApplicationHandler for NativePreviewApp {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 eprintln!("failed to create preview window: {error}");
+                if let Some(telemetry) = &mut self.telemetry {
+                    telemetry.record_error(format!("failed to create preview window: {error}"));
+                }
                 event_loop.exit();
                 return;
             }
@@ -101,6 +124,10 @@ impl ApplicationHandler for NativePreviewApp {
             }
             Err(error) => {
                 eprintln!("failed to initialize preview renderer: {error}");
+                if let Some(telemetry) = &mut self.telemetry {
+                    telemetry
+                        .record_error(format!("failed to initialize preview renderer: {error}"));
+                }
                 event_loop.exit();
             }
         }
@@ -129,10 +156,16 @@ impl ApplicationHandler for NativePreviewApp {
             }
             WindowEvent::RedrawRequested => {
                 window.set_title(&self.title());
+                let frame_started = Instant::now();
                 if let Some(renderer) = &mut self.renderer
                     && let Err(error) = renderer.render(&self.scene)
                 {
                     eprintln!("failed to render preview frame: {error}");
+                    if let Some(telemetry) = &mut self.telemetry {
+                        telemetry.record_error(format!("failed to render preview frame: {error}"));
+                    }
+                } else if let Some(telemetry) = &mut self.telemetry {
+                    telemetry.record_frame(frame_started.elapsed().as_secs_f64() * 1000.0);
                 }
                 self.frame_index += 1;
                 if self.should_exit_after_redraw() {
