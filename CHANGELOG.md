@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.11.0...skenion-runtime-v0.12.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** render fullscreen WGSL shader node ([#25](https://github.com/echovisionlab/skenion-runtime/issues/25)) ([847c929](https://github.com/echovisionlab/skenion-runtime/commit/847c9292e836b76cef6159f6190aded969d6de4d))
+
 ## [0.11.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.10.0...skenion-runtime-v0.11.0) (2026-06-16)
 
 
