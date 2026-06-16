@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.6.0...skenion-runtime-v0.7.0) (2026-06-16)
+
+
+### Features
+
+* **runtime:** apply graph patches to sessions ([371c9c8](https://github.com/echovisionlab/skenion-runtime/commit/371c9c83d3d13c0f9c9ccddf9cc018e2220bb8c0))
+
 ## [0.6.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.5.0...skenion-runtime-v0.6.0) (2026-06-15)
 
 
