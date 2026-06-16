@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.12.0...skenion-runtime-v0.13.0) (2026-06-16)
+
+
+### Features
+
+* **render:** select preview scene from render output ([01080ee](https://github.com/echovisionlab/skenion-runtime/commit/01080ee65eb25210dd6b46bd607394d6e8440c3c))
+* **runtime:** validate port edge feedback v0.2 projects ([5ab7da0](https://github.com/echovisionlab/skenion-runtime/commit/5ab7da044cf48bd063789193afe7feedf0eef16d))
+
 ## [0.12.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.11.0...skenion-runtime-v0.12.0) (2026-06-16)
 
 
