@@ -782,6 +782,73 @@ mod tests {
         assert!(generated.source_map.user_source_start_line > 1);
     }
 
+    #[test]
+    fn fullscreen_shader_pipeline_reports_wgsl_validation_errors() {
+        let (device, config) = headless_test_device();
+        let scene = FullscreenShaderScene {
+            language: crate::render::ShaderLanguage::Wgsl,
+            source: "@fragment\nfn fs_main() -> @location(0) vec4<f32> {\n  return vec4<f32>(skenion.missingField, 0.0, 0.0, 1.0);\n}"
+                .to_owned(),
+            source_node_id: "shader_1".to_owned(),
+            uniforms: vec![ShaderUniformBinding {
+                id: "speed".to_owned(),
+                value: ShaderUniformValue::F32(0.5),
+            }],
+            fallback_clear_color: [0.0, 0.0, 0.0, 1.0],
+        };
+
+        let error = match WgpuPreviewMode::fullscreen_shader(&device, &config, &scene) {
+            Ok(_) => panic!("invalid WGSL should fail pipeline validation"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("shader validation failed"));
+        assert!(error.contains("missingField"));
+    }
+
+    fn headless_test_device() -> (wgpu::Device, wgpu::SurfaceConfiguration) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("headless wgpu adapter should be available");
+        let (device, _queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("skenion-preview-test-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            }))
+            .expect("headless wgpu device should be available");
+        let rgba_supported = adapter
+            .get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb)
+            .allowed_usages
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let format = if rgba_supported {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Bgra8UnormSrgb
+        };
+
+        (
+            device,
+            wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: 64,
+                height: 64,
+                present_mode: wgpu::PresentMode::AutoVsync,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: Vec::new(),
+            },
+        )
+    }
+
     fn read_f32(bytes: &[u8], offset: usize) -> f32 {
         f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
