@@ -22,7 +22,9 @@ pub use contract::{
     GraphDocumentV02, GraphNode, GraphNodeV02, GraphPatch, GraphPatchEvent, GraphPatchEventKind,
     GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02, InvertPatchError,
     MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port,
-    PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02, StringOrStrings,
+    PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02,
+    ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderUniform, StringOrStrings,
+    analyze_shader_interface_v01, shader_interface_to_ports_v01,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
@@ -48,8 +50,8 @@ pub use render::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, PREVIEW_DOCUMENT_SCHEMA,
     PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument, RENDER_CLEAR_COLOR_KIND,
     RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
-    ShaderLanguage, render_scene_from_preview_document, run_render_preview_window,
-    write_preview_document,
+    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, render_scene_from_preview_document,
+    run_render_preview_window, write_preview_document,
 };
 pub use scheduler::{
     DummyExecutionReport, DummyFrameReport, DummyNodeExecution, format_dummy_execution_text,

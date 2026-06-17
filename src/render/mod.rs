@@ -11,5 +11,5 @@ pub(crate) use preview_document::{cleanup_stale_preview_temp_files, remove_previ
 pub use scene::{
     ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, RENDER_CLEAR_COLOR_KIND,
     RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
-    ShaderLanguage, render_scene_from_preview_document,
+    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, render_scene_from_preview_document,
 };

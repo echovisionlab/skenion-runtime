@@ -463,7 +463,7 @@ mod tests {
     use super::*;
     use crate::{
         ExecutionGroup, ExecutionModel, GraphDocument, GraphNode, PREVIEW_TELEMETRY_SCHEMA,
-        PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, PreviewTelemetryHeartbeat,
+        PREVIEW_TELEMETRY_SCHEMA_VERSION, PlanEdge, PlanNode, Port, PreviewTelemetryHeartbeat,
         RuntimeSessionSnapshot, preview_manager::PreviewHandle,
         telemetry::write_preview_telemetry_heartbeat,
     };
@@ -1035,7 +1035,7 @@ mod tests {
                 kind: "render.fullscreen-shader".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 params,
-                ports: Vec::new(),
+                ports: shader_ports(shader_source()),
             }],
             edges: Vec::new(),
         }
@@ -1061,43 +1061,16 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"struct SkenionFrame {
-  resolution: vec2<f32>,
-  time: f32,
-  frame: u32,
-  u_value: f32,
-  u_value2: f32,
-  _pad0: vec2<f32>,
-  u_color: vec4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> skenion: SkenionFrame;
-
-struct VertexOut {
-  @builtin(position) position: vec4<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  var positions = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -3.0),
-    vec2<f32>(-1.0,  1.0),
-    vec2<f32>( 3.0,  1.0)
-  );
-
-  var out: VertexOut;
-  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-  return out;
-}
-
+        r#"// @skenion.uniform speed number.f32 default=0.5
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  let mix_value = clamp(skenion.u_value, 0.0, 1.0);
-  let brightness = 0.25 + 0.75 * clamp(skenion.u_value2, 0.0, 1.0);
-  let animated = vec3<f32>(0.2 + mix_value * 0.8, 0.3, 1.0 - mix_value);
-  return vec4<f32>(mix(animated, skenion.u_color.rgb, mix_value) * brightness, skenion.u_color.a);
+  return vec4<f32>(skenion.speed, 0.2, 1.0 - skenion.speed, 1.0);
 }"#
+    }
+
+    fn shader_ports(source: &str) -> Vec<Port> {
+        let analysis = crate::analyze_shader_interface_v01(source);
+        crate::shader_interface_to_ports_v01(&analysis.shader_interface)
     }
 
     fn loaded_snapshot(session_revision: u64, graph_revision: &str) -> RuntimeSessionSnapshot {
