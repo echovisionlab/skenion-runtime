@@ -1,5 +1,6 @@
 use std::{borrow::Cow, error::Error, num::NonZeroU64, path::PathBuf, sync::Arc, time::Instant};
 
+use serde::Serialize;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -14,8 +15,75 @@ use crate::{
         FullscreenShaderScene, PreviewDocument, RenderScene, ShaderUniformBinding,
         ShaderUniformValue, render_scene_from_preview_document,
     },
-    telemetry::PreviewTelemetryWriter,
+    telemetry::{
+        PreviewTelemetryWriter, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSeverity,
+        ShaderDiagnosticSource,
+    },
 };
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedShaderResponse {
+    pub ok: bool,
+    pub node_id: Option<String>,
+    pub language: Option<String>,
+    pub source: Option<String>,
+    pub source_map: Option<GeneratedShaderSourceMap>,
+    pub diagnostics: Vec<ShaderDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedShaderSourceMap {
+    pub user_source_start_line: usize,
+    pub generated_line_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedShaderSource {
+    pub source: String,
+    pub source_map: GeneratedShaderSourceMap,
+}
+
+pub fn generated_shader_response_from_preview_document(
+    document: &PreviewDocument,
+) -> GeneratedShaderResponse {
+    match render_scene_from_preview_document(document) {
+        Ok(RenderScene::FullscreenShader(scene)) => {
+            let generated = generated_fullscreen_shader_module_source(&scene);
+            GeneratedShaderResponse {
+                ok: true,
+                node_id: Some(scene.source_node_id),
+                language: Some("wgsl".to_owned()),
+                source: Some(generated.source),
+                source_map: Some(generated.source_map),
+                diagnostics: Vec::new(),
+            }
+        }
+        Ok(RenderScene::ClearColor(_)) => GeneratedShaderResponse {
+            ok: false,
+            node_id: None,
+            language: None,
+            source: None,
+            source_map: None,
+            diagnostics: vec![ShaderDiagnostic::new(
+                ShaderDiagnosticSeverity::Info,
+                ShaderDiagnosticPhase::WgslGeneration,
+                "no-generated-shader",
+                "current render scene does not use a fullscreen shader",
+                ShaderDiagnosticSource::Runtime,
+            )],
+        },
+        Err(error) => GeneratedShaderResponse {
+            ok: false,
+            node_id: None,
+            language: None,
+            source: None,
+            source_map: None,
+            diagnostics: error.shader_diagnostics(),
+        },
+    }
+}
 
 pub fn run_render_preview_window(
     document: PreviewDocument,
@@ -135,8 +203,16 @@ impl ApplicationHandler for NativePreviewApp {
             Err(error) if matches!(self.scene, RenderScene::FullscreenShader(_)) => {
                 eprintln!("failed to initialize fullscreen shader renderer: {error}");
                 if let Some(telemetry) = &mut self.telemetry {
-                    telemetry.record_error(format!(
-                        "failed to initialize fullscreen shader renderer: {error}"
+                    let phase = if error.contains("shader validation failed") {
+                        ShaderDiagnosticPhase::WgslCompile
+                    } else {
+                        ShaderDiagnosticPhase::RenderPipeline
+                    };
+                    telemetry.record_shader_diagnostic(ShaderDiagnostic::error(
+                        phase,
+                        "fullscreen-shader-initialization-failed",
+                        format!("failed to initialize fullscreen shader renderer: {error}"),
+                        ShaderDiagnosticSource::Generated,
                     ));
                 }
                 let fallback_scene = RenderScene::default();
@@ -539,7 +615,9 @@ fn shader_uniforms(scene: &RenderScene) -> &[ShaderUniformBinding] {
     }
 }
 
-fn fullscreen_shader_module_source(shader_scene: &FullscreenShaderScene) -> String {
+fn generated_fullscreen_shader_module_source(
+    shader_scene: &FullscreenShaderScene,
+) -> GeneratedShaderSource {
     let mut source = String::from(
         "struct SkenionFrame {\n  resolution: vec2<f32>,\n  time: f32,\n  frame: u32,\n",
     );
@@ -551,8 +629,19 @@ fn fullscreen_shader_module_source(shader_scene: &FullscreenShaderScene) -> Stri
         source.push_str(",\n");
     }
     source.push_str("}\n\n@group(0) @binding(0)\nvar<uniform> skenion: SkenionFrame;\n\nfn sk_bool(value: u32) -> bool {\n  return value != 0u;\n}\n\nstruct VertexOut {\n  @builtin(position) position: vec4<f32>,\n}\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {\n  var positions = array<vec2<f32>, 3>(\n    vec2<f32>(-1.0, -3.0),\n    vec2<f32>(-1.0,  1.0),\n    vec2<f32>( 3.0,  1.0)\n  );\n\n  var out: VertexOut;\n  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);\n  return out;\n}\n\n");
+    let user_source_start_line = source.lines().count() + 1;
     source.push_str(&shader_scene.source);
-    source
+    GeneratedShaderSource {
+        source,
+        source_map: GeneratedShaderSourceMap {
+            user_source_start_line,
+            generated_line_offset: user_source_start_line - 1,
+        },
+    }
+}
+
+fn fullscreen_shader_module_source(shader_scene: &FullscreenShaderScene) -> String {
+    generated_fullscreen_shader_module_source(shader_scene).source
 }
 
 fn wgsl_type(value: &ShaderUniformValue) -> &'static str {
@@ -678,13 +767,19 @@ mod tests {
             fallback_clear_color: [0.0, 0.0, 0.0, 1.0],
         };
 
-        let source = fullscreen_shader_module_source(&scene);
+        let generated = generated_fullscreen_shader_module_source(&scene);
+        let source = generated.source;
 
         assert!(source.contains("speed: f32"));
         assert!(source.contains("enabled: u32"));
         assert!(source.contains("fn sk_bool(value: u32) -> bool"));
         assert!(source.contains("fn vs_main"));
         assert!(source.contains("fn fs_main"));
+        assert_eq!(
+            generated.source_map.generated_line_offset + 1,
+            generated.source_map.user_source_start_line
+        );
+        assert!(generated.source_map.user_source_start_line > 1);
     }
 
     fn read_f32(bytes: &[u8], offset: usize) -> f32 {

@@ -2,7 +2,10 @@ mod native;
 mod preview_document;
 mod scene;
 
-pub use native::run_render_preview_window;
+pub use native::{
+    GeneratedShaderResponse, GeneratedShaderSource, GeneratedShaderSourceMap,
+    generated_shader_response_from_preview_document, run_render_preview_window,
+};
 pub use preview_document::{
     PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument,
     write_preview_document,
