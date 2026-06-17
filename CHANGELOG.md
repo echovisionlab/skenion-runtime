@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.14.1...skenion-runtime-v0.15.0) (2026-06-17)
+
+
+### Features
+
+* **runtime:** pass multiple shader uniform inputs ([#38](https://github.com/echovisionlab/skenion-runtime/issues/38)) ([9cf1c81](https://github.com/echovisionlab/skenion-runtime/commit/9cf1c81f9f14f543652a471dec4eed5d06396da4))
+
 ## [0.14.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.14.0...skenion-runtime-v0.14.1) (2026-06-17)
 
 
