@@ -17,12 +17,14 @@ use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GraphDocument, GraphPatch, NodeDefinition, NodeRegistry,
-    PreviewManager, ProjectRequestV02, RunProjectRequestV02, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimePreviewStartRequest, RuntimeSession,
-    RuntimeTelemetrySnapshot, SessionRunRequest, build_execution_plan, build_execution_plan_v02,
-    run_dummy_execution, validate_project, validate_project_v02,
+    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, GraphDocument, GraphPatch,
+    NodeDefinition, NodeRegistry, PreviewDocument, PreviewManager, ProjectRequestV02,
+    RunProjectRequestV02, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimePreviewStartRequest, RuntimeSession, RuntimeTelemetrySnapshot, SessionRunRequest,
+    ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan,
+    build_execution_plan_v02, generated_shader_response_from_preview_document, run_dummy_execution,
+    validate_project, validate_project_v02,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -129,6 +131,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/preview/start", post(start_preview))
         .route("/v0/session/preview/stop", post(stop_preview))
         .route("/v0/session/preview/restart", post(restart_preview))
+        .route("/v0/session/render/generated-shader", get(generated_shader))
         .route("/v0/session/telemetry", get(session_telemetry))
         .route(
             "/v0/session/telemetry/stream",
@@ -173,6 +176,7 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.preview.start",
             "session.preview.stop",
             "session.preview.restart",
+            "session.render.generatedShader",
             "session.telemetry",
             "session.telemetry.stream",
         ],
@@ -526,6 +530,50 @@ async fn stop_preview(
     Json(preview.stop(snapshot))
 }
 
+async fn generated_shader(
+    State(state): State<RuntimeServerState>,
+) -> Json<GeneratedShaderResponse> {
+    let context = {
+        let session = state
+            .session
+            .read()
+            .expect("runtime session lock should not be poisoned");
+        session.preview_context()
+    };
+
+    let response = match context {
+        Ok(context) => {
+            let document = PreviewDocument::with_control_state(
+                context.graph,
+                context.plan,
+                context.control_state,
+                context.session_revision,
+            );
+            generated_shader_response_from_preview_document(&document)
+        }
+        Err(diagnostics) => GeneratedShaderResponse {
+            ok: false,
+            node_id: None,
+            language: None,
+            source: None,
+            source_map: None,
+            diagnostics: diagnostics
+                .into_iter()
+                .map(|diagnostic| {
+                    ShaderDiagnostic::error(
+                        ShaderDiagnosticPhase::SourceSync,
+                        "generated-shader-unavailable",
+                        diagnostic.message,
+                        ShaderDiagnosticSource::Runtime,
+                    )
+                })
+                .collect(),
+        },
+    };
+
+    Json(response)
+}
+
 async fn session_telemetry(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeTelemetrySnapshot> {
@@ -774,6 +822,7 @@ mod tests {
             "session.control.event",
             "session.control.state",
             "session.preview.start",
+            "session.render.generatedShader",
             "session.telemetry",
             "session.telemetry.stream",
         ] {
@@ -1619,6 +1668,8 @@ mod tests {
         assert_eq!(response["session"]["loaded"], false);
         assert_eq!(response["preview"]["state"], "stopped");
         assert_eq!(response["render"]["active"], false);
+        assert_eq!(response["render"]["diagnostics"], json!([]));
+        assert_eq!(response["render"]["generatedSourceAvailable"], false);
         assert_eq!(
             response["process"]["runtimeVersion"],
             env!("CARGO_PKG_VERSION")
@@ -1638,6 +1689,8 @@ mod tests {
         assert_eq!(response["session"]["sessionRevision"], 1);
         assert_eq!(response["preview"]["state"], "stopped");
         assert_eq!(response["render"]["active"], false);
+        assert_eq!(response["render"]["diagnostics"], json!([]));
+        assert_eq!(response["render"]["generatedSourceAvailable"], false);
     }
 
     #[tokio::test]
@@ -1654,6 +1707,8 @@ mod tests {
         assert_eq!(response["render"]["backend"], "dry-run");
         assert_eq!(response["render"]["renderer"], "clear-color");
         assert_eq!(response["render"]["framesRendered"], 0);
+        assert_eq!(response["render"]["diagnostics"], json!([]));
+        assert_eq!(response["render"]["generatedSourceAvailable"], false);
     }
 
     #[tokio::test]
@@ -1669,6 +1724,64 @@ mod tests {
         assert_eq!(response["preview"]["state"], "running");
         assert_eq!(response["preview"]["previewSessionRevision"], 1);
         assert_eq!(response["preview"]["stale"], true);
+    }
+
+    #[tokio::test]
+    async fn generated_shader_endpoint_returns_source_and_source_map() {
+        let app = runtime_router_with_dry_preview();
+        post_json_with(app.clone(), "/v0/session/load", sample_shader_project()).await;
+
+        let response = get_json_with(app, "/v0/session/render/generated-shader").await;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["nodeId"], "shader_1");
+        assert_eq!(response["language"], "wgsl");
+        assert!(
+            response["source"]
+                .as_str()
+                .unwrap()
+                .contains("struct SkenionFrame")
+        );
+        assert!(response["source"].as_str().unwrap().contains("speed: f32"));
+        assert!(response["source"].as_str().unwrap().contains("fn fs_main"));
+        assert!(
+            response["sourceMap"]["userSourceStartLine"]
+                .as_u64()
+                .unwrap()
+                > 1
+        );
+        assert_eq!(response["diagnostics"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn generated_shader_endpoint_reports_session_or_shader_diagnostics() {
+        let empty = get_json_with(
+            runtime_router_with_dry_preview(),
+            "/v0/session/render/generated-shader",
+        )
+        .await;
+        assert_eq!(empty["ok"], false);
+        assert_eq!(empty["diagnostics"][0]["phase"], json!("source-sync"));
+
+        let app = runtime_router_with_dry_preview();
+        let mut project = sample_shader_project();
+        project["graph"]["nodes"][0]["params"]["source"] = json!(
+            "// @skenion.uniform bad vec3\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+        );
+        let loaded = post_json_with(app.clone(), "/v0/session/load", project).await;
+        assert_eq!(loaded["ok"], true);
+
+        let response = get_json_with(app, "/v0/session/render/generated-shader").await;
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["diagnostics"][0]["phase"],
+            json!("interface-analysis")
+        );
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            json!("unsupported-uniform-type")
+        );
+        assert_eq!(response["diagnostics"][0]["line"], json!(1));
     }
 
     #[tokio::test]
@@ -1906,6 +2019,78 @@ mod tests {
             "activation": "latched"
           }
         ])
+    }
+
+    fn sample_shader_project() -> Value {
+        json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "shader-diagnostics",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "shader_1",
+                "kind": "render.fullscreen-shader",
+                "kindVersion": "0.1.0",
+                "params": {
+                  "language": "wgsl",
+                  "source": "// @skenion.uniform speed number.f32 default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
+                },
+                "ports": [
+                  {
+                    "id": "speed",
+                    "direction": "input",
+                    "label": "Speed",
+                    "type": { "flow": "value", "dataKind": "number.f32" },
+                    "required": false,
+                    "default": 0.5,
+                    "activation": "latched"
+                  },
+                  {
+                    "id": "out",
+                    "direction": "output",
+                    "label": "Out",
+                    "type": {
+                      "flow": "resource",
+                      "dataKind": "gpu.texture2d",
+                      "format": "rgba8unorm",
+                      "colorSpace": "srgb"
+                    }
+                  }
+                ]
+              }
+            ],
+            "edges": []
+          },
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.1.0",
+              "id": "render.fullscreen-shader",
+              "version": "0.1.0",
+              "displayName": "Fullscreen Shader",
+              "category": "Render",
+              "ports": [
+                {
+                  "id": "out",
+                  "direction": "output",
+                  "label": "Out",
+                  "type": {
+                    "flow": "resource",
+                    "dataKind": "gpu.texture2d",
+                    "format": "rgba8unorm",
+                    "colorSpace": "srgb"
+                  }
+                }
+              ],
+              "execution": { "model": "gpu_pass" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": []
+            }
+          ]
+        })
     }
 
     fn sample_project_v02() -> Value {

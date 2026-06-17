@@ -23,8 +23,8 @@ pub use contract::{
     GraphPatchHistory, GraphPatchOperation, GraphValidationResultV02, InvertPatchError,
     MergePolicyV02, NodeDefinition, NodeDefinitionV02, NodeExecution, NodeState, NumberRange, Port,
     PortActivation, PortDirection, PortDirectionV02, PortRef, PortSpecV02,
-    ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderUniform, StringOrStrings,
-    analyze_shader_interface_v01, shader_interface_to_ports_v01,
+    ReplaceNodeInterfaceEdgePolicy, ShaderInterface, ShaderInterfaceDiagnostic, ShaderUniform,
+    StringOrStrings, analyze_shader_interface_v01, shader_interface_to_ports_v01,
 };
 pub use control_state::{
     ControlState, RuntimeControlEmission, RuntimeControlEventRequest, RuntimeControlEventResponse,
@@ -47,10 +47,12 @@ pub use project_v02::{
 };
 pub use registry::{NodeDefinitionKey, NodeRegistry, RegistryError, RegistryLoadError};
 pub use render::{
-    ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, PREVIEW_DOCUMENT_SCHEMA,
+    ClearColorScene, DEFAULT_CLEAR_COLOR, FullscreenShaderScene, GeneratedShaderResponse,
+    GeneratedShaderSource, GeneratedShaderSourceMap, PREVIEW_DOCUMENT_SCHEMA,
     PREVIEW_DOCUMENT_SCHEMA_VERSION, PreviewDocument, RENDER_CLEAR_COLOR_KIND,
     RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND, RenderScene, RenderSceneBuildError,
-    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue, render_scene_from_preview_document,
+    ShaderLanguage, ShaderUniformBinding, ShaderUniformValue,
+    generated_shader_response_from_preview_document, render_scene_from_preview_document,
     run_render_preview_window, write_preview_document,
 };
 pub use scheduler::{
@@ -70,7 +72,8 @@ pub use session::{
 pub use telemetry::{
     PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,
     PreviewTelemetryWriter, RuntimeTelemetryPreview, RuntimeTelemetryProcess,
-    RuntimeTelemetryRender, RuntimeTelemetrySession, RuntimeTelemetrySnapshot, TELEMETRY_SCHEMA,
+    RuntimeTelemetryRender, RuntimeTelemetrySession, RuntimeTelemetrySnapshot, ShaderDiagnostic,
+    ShaderDiagnosticPhase, ShaderDiagnosticSeverity, ShaderDiagnosticSource, TELEMETRY_SCHEMA,
     TELEMETRY_SCHEMA_VERSION, preview_telemetry_path, read_preview_telemetry, unix_ms_timestamp,
     write_preview_telemetry_heartbeat,
 };

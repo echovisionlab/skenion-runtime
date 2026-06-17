@@ -8,6 +8,7 @@ pub use skenion_contracts::{
     NodeExecutionV01 as NodeExecution, NodeStateV01 as NodeState, NumberRangeV01 as NumberRange,
     PortActivationV01 as PortActivation, PortDirectionV01 as PortDirection, PortRefV01 as PortRef,
     PortV01 as Port, ReplaceNodeInterfaceEdgePolicyV01 as ReplaceNodeInterfaceEdgePolicy,
+    ShaderInterfaceDiagnosticV01 as ShaderInterfaceDiagnostic,
     ShaderInterfaceV01 as ShaderInterface, ShaderUniformV01 as ShaderUniform,
     StringOrStringsV01 as StringOrStrings, analyze_shader_interface_v01,
     shader_interface_to_ports_v01,

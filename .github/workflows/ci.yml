@@ -135,6 +135,11 @@ jobs:
             else
               echo "dynamic shader interface smoke script is not available on examples main yet"
             fi
+            if [[ -x scripts/smoke-runtime-shader-diagnostics.sh ]]; then
+              SKENION_RUNTIME_URL=http://127.0.0.1:3761 bash scripts/smoke-runtime-shader-diagnostics.sh
+            else
+              echo "shader diagnostics smoke script is not available on examples main yet"
+            fi
           )
 
           curl --fail --silent \

@@ -416,14 +416,23 @@ fn cleanup_stale_preview_files() {
 
 fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
     let scene = render_scene_from_preview_document(document);
-    let (renderer, source_node_id, last_error) = match scene {
-        Ok(scene) => (
-            scene.renderer_label().to_owned(),
-            scene.source_node_id(),
-            None,
-        ),
-        Err(error) => ("clear-color".to_owned(), None, Some(error.to_string())),
-    };
+    let (renderer, source_node_id, last_error, diagnostics, generated_source_available) =
+        match scene {
+            Ok(scene) => (
+                scene.renderer_label().to_owned(),
+                scene.source_node_id(),
+                None,
+                Vec::new(),
+                matches!(scene, crate::RenderScene::FullscreenShader(_)),
+            ),
+            Err(error) => (
+                "clear-color".to_owned(),
+                None,
+                Some(error.to_string()),
+                error.shader_diagnostics(),
+                false,
+            ),
+        };
 
     PreviewTelemetryHeartbeat {
         schema: PREVIEW_TELEMETRY_SCHEMA.to_owned(),
@@ -440,6 +449,8 @@ fn dry_run_heartbeat(document: &PreviewDocument) -> PreviewTelemetryHeartbeat {
         last_frame_ms: None,
         last_error,
         source_node_id,
+        diagnostics,
+        generated_source_available,
     }
 }
 
@@ -579,6 +590,8 @@ mod tests {
         assert_eq!(heartbeat.renderer, "fullscreen-shader");
         assert_eq!(heartbeat.source_node_id.as_deref(), Some("shader_1"));
         assert_eq!(heartbeat.graph_revision, "7");
+        assert!(heartbeat.generated_source_available);
+        assert!(heartbeat.diagnostics.is_empty());
     }
 
     #[test]
@@ -600,6 +613,11 @@ mod tests {
                 .unwrap()
                 .contains("unsupported language glsl")
         );
+        assert_eq!(
+            heartbeat.diagnostics[0].phase,
+            crate::ShaderDiagnosticPhase::SourceSync
+        );
+        assert!(!heartbeat.generated_source_available);
     }
 
     #[test]
@@ -883,6 +901,8 @@ mod tests {
                 last_frame_ms: Some(16.7),
                 last_error: None,
                 source_node_id: Some("clear_1".to_owned()),
+                diagnostics: Vec::new(),
+                generated_source_available: false,
             },
         )
         .expect("test heartbeat should write");

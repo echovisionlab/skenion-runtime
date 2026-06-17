@@ -5,6 +5,7 @@ use crate::render::PreviewDocument;
 use crate::{
     ControlValue, GraphNode, PortDirection, analyze_shader_interface_v01,
     shader_interface_to_ports_v01,
+    telemetry::{ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource},
 };
 
 pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
@@ -72,7 +73,11 @@ pub enum RenderSceneBuildError {
         entrypoint: &'static str,
     },
     #[error("fullscreen shader node {node_id} has invalid interface: {message}")]
-    InvalidShaderInterface { node_id: String, message: String },
+    InvalidShaderInterface {
+        node_id: String,
+        message: String,
+        diagnostics: Vec<ShaderDiagnostic>,
+    },
     #[error("fullscreen shader node {node_id} graph ports do not match shader annotations")]
     ShaderInterfacePortsOutOfSync { node_id: String },
     #[error("render output node {node_id} has no incoming edge to port in")]
@@ -288,6 +293,11 @@ fn fullscreen_shader_scene_from_node(
         return Err(RenderSceneBuildError::InvalidShaderInterface {
             node_id: node.id.clone(),
             message,
+            diagnostics: analysis
+                .diagnostics
+                .iter()
+                .map(shader_analysis_diagnostic)
+                .collect(),
         });
     }
     let expected_ports = shader_interface_to_ports_v01(&analysis.shader_interface);
@@ -312,6 +322,114 @@ fn fullscreen_shader_scene_from_node(
             .collect(),
         fallback_clear_color: DEFAULT_CLEAR_COLOR,
     }))
+}
+
+impl RenderSceneBuildError {
+    pub fn shader_diagnostics(&self) -> Vec<ShaderDiagnostic> {
+        match self {
+            Self::InvalidShaderInterface { diagnostics, .. } => diagnostics.clone(),
+            Self::ShaderInterfacePortsOutOfSync { node_id } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::SourceSync,
+                "shader-interface-ports-out-of-sync",
+                format!(
+                    "fullscreen shader node {node_id} graph ports do not match shader annotations"
+                ),
+                ShaderDiagnosticSource::Runtime,
+            )],
+            Self::MissingShaderEntrypoint {
+                node_id,
+                entrypoint,
+            } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::WgslGeneration,
+                "missing-shader-entrypoint",
+                format!(
+                    "fullscreen shader node {node_id} source is missing {entrypoint} entry point"
+                ),
+                ShaderDiagnosticSource::User,
+            )],
+            Self::ReservedShaderEntrypoint {
+                node_id,
+                entrypoint,
+            } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::WgslGeneration,
+                "reserved-shader-entrypoint",
+                format!(
+                    "fullscreen shader node {node_id} source declares reserved {entrypoint} entry point"
+                ),
+                ShaderDiagnosticSource::User,
+            )],
+            Self::MissingShaderLanguage { node_id } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::SourceSync,
+                "missing-shader-language",
+                format!("fullscreen shader node {node_id} is missing params.language"),
+                ShaderDiagnosticSource::User,
+            )],
+            Self::UnsupportedShaderLanguage { node_id, language } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::SourceSync,
+                "unsupported-shader-language",
+                format!("fullscreen shader node {node_id} uses unsupported language {language}"),
+                ShaderDiagnosticSource::User,
+            )],
+            Self::MissingShaderSource { node_id } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::SourceSync,
+                "missing-shader-source",
+                format!("fullscreen shader node {node_id} is missing non-empty params.source"),
+                ShaderDiagnosticSource::User,
+            )],
+            Self::RenderOutputWithoutInput { node_id } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::RenderPipeline,
+                "render-output-without-input",
+                format!("render output node {node_id} has no incoming edge to port in"),
+                ShaderDiagnosticSource::Runtime,
+            )],
+            Self::MissingRenderOutputSourceNode {
+                output_node_id,
+                source_node_id,
+            } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::RenderPipeline,
+                "missing-render-output-source-node",
+                format!(
+                    "render output node {output_node_id} references missing source node {source_node_id}"
+                ),
+                ShaderDiagnosticSource::Runtime,
+            )],
+            Self::MissingRenderOutputSourcePort {
+                output_node_id,
+                source_node_id,
+                port_id,
+            } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::RenderPipeline,
+                "missing-render-output-source-port",
+                format!(
+                    "render output node {output_node_id} references missing output port {port_id} on source node {source_node_id}"
+                ),
+                ShaderDiagnosticSource::Runtime,
+            )],
+            Self::UnsupportedRenderOutputSource {
+                output_node_id,
+                source_node_id,
+                source_kind,
+            } => vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::RenderPipeline,
+                "unsupported-render-output-source",
+                format!(
+                    "render output node {output_node_id} is connected to unsupported render source {source_node_id} ({source_kind})"
+                ),
+                ShaderDiagnosticSource::Runtime,
+            )],
+        }
+    }
+}
+
+fn shader_analysis_diagnostic(diagnostic: &crate::ShaderInterfaceDiagnostic) -> ShaderDiagnostic {
+    ShaderDiagnostic::error(
+        ShaderDiagnosticPhase::InterfaceAnalysis,
+        diagnostic.code.clone(),
+        diagnostic.message.clone(),
+        ShaderDiagnosticSource::User,
+    )
+    .with_line_column(diagnostic.line, None)
+    .with_uniform_id(diagnostic.uniform_id.clone())
 }
 
 fn shader_uniform_value(
@@ -627,8 +745,11 @@ mod tests {
         let error = render_scene_from_preview_document(&invalid).expect_err("scene should fail");
         assert!(matches!(
             error,
-            RenderSceneBuildError::InvalidShaderInterface { node_id, message }
-                if node_id == "shader_1" && message.contains("unsupported uniform type")
+            RenderSceneBuildError::InvalidShaderInterface { node_id, message, diagnostics }
+                if node_id == "shader_1"
+                    && message.contains("unsupported uniform type")
+                    && diagnostics[0].phase == ShaderDiagnosticPhase::InterfaceAnalysis
+                    && diagnostics[0].line == Some(1)
         ));
 
         let mut node = shader_node(json!("wgsl"), json!(shader_source()));
@@ -1125,6 +1246,124 @@ mod tests {
                 source_kind: "core.value-f32".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn render_scene_build_errors_emit_shader_diagnostics() {
+        let cases = vec![
+            (
+                RenderSceneBuildError::ShaderInterfacePortsOutOfSync {
+                    node_id: "shader_1".to_owned(),
+                },
+                "shader-interface-ports-out-of-sync",
+                ShaderDiagnosticPhase::SourceSync,
+                ShaderDiagnosticSource::Runtime,
+            ),
+            (
+                RenderSceneBuildError::MissingShaderEntrypoint {
+                    node_id: "shader_1".to_owned(),
+                    entrypoint: "fs_main",
+                },
+                "missing-shader-entrypoint",
+                ShaderDiagnosticPhase::WgslGeneration,
+                ShaderDiagnosticSource::User,
+            ),
+            (
+                RenderSceneBuildError::ReservedShaderEntrypoint {
+                    node_id: "shader_1".to_owned(),
+                    entrypoint: "vs_main",
+                },
+                "reserved-shader-entrypoint",
+                ShaderDiagnosticPhase::WgslGeneration,
+                ShaderDiagnosticSource::User,
+            ),
+            (
+                RenderSceneBuildError::MissingShaderLanguage {
+                    node_id: "shader_1".to_owned(),
+                },
+                "missing-shader-language",
+                ShaderDiagnosticPhase::SourceSync,
+                ShaderDiagnosticSource::User,
+            ),
+            (
+                RenderSceneBuildError::UnsupportedShaderLanguage {
+                    node_id: "shader_1".to_owned(),
+                    language: "glsl".to_owned(),
+                },
+                "unsupported-shader-language",
+                ShaderDiagnosticPhase::SourceSync,
+                ShaderDiagnosticSource::User,
+            ),
+            (
+                RenderSceneBuildError::MissingShaderSource {
+                    node_id: "shader_1".to_owned(),
+                },
+                "missing-shader-source",
+                ShaderDiagnosticPhase::SourceSync,
+                ShaderDiagnosticSource::User,
+            ),
+            (
+                RenderSceneBuildError::RenderOutputWithoutInput {
+                    node_id: "output_1".to_owned(),
+                },
+                "render-output-without-input",
+                ShaderDiagnosticPhase::RenderPipeline,
+                ShaderDiagnosticSource::Runtime,
+            ),
+            (
+                RenderSceneBuildError::MissingRenderOutputSourceNode {
+                    output_node_id: "output_1".to_owned(),
+                    source_node_id: "missing".to_owned(),
+                },
+                "missing-render-output-source-node",
+                ShaderDiagnosticPhase::RenderPipeline,
+                ShaderDiagnosticSource::Runtime,
+            ),
+            (
+                RenderSceneBuildError::MissingRenderOutputSourcePort {
+                    output_node_id: "output_1".to_owned(),
+                    source_node_id: "shader_1".to_owned(),
+                    port_id: "out".to_owned(),
+                },
+                "missing-render-output-source-port",
+                ShaderDiagnosticPhase::RenderPipeline,
+                ShaderDiagnosticSource::Runtime,
+            ),
+            (
+                RenderSceneBuildError::UnsupportedRenderOutputSource {
+                    output_node_id: "output_1".to_owned(),
+                    source_node_id: "value_1".to_owned(),
+                    source_kind: "core.value-f32".to_owned(),
+                },
+                "unsupported-render-output-source",
+                ShaderDiagnosticPhase::RenderPipeline,
+                ShaderDiagnosticSource::Runtime,
+            ),
+        ];
+
+        for (error, code, phase, source) in cases {
+            let diagnostics = error.shader_diagnostics();
+
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, code);
+            assert_eq!(diagnostics[0].phase, phase);
+            assert_eq!(diagnostics[0].source, source);
+            assert!(!diagnostics[0].message.is_empty());
+        }
+
+        let diagnostic = ShaderDiagnostic::error(
+            ShaderDiagnosticPhase::InterfaceAnalysis,
+            "invalid-interface",
+            "bad uniform",
+            ShaderDiagnosticSource::User,
+        );
+        let error = RenderSceneBuildError::InvalidShaderInterface {
+            node_id: "shader_1".to_owned(),
+            message: "bad uniform".to_owned(),
+            diagnostics: vec![diagnostic.clone()],
+        };
+
+        assert_eq!(error.shader_diagnostics(), vec![diagnostic]);
     }
 
     #[test]

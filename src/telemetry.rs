@@ -63,6 +63,8 @@ pub struct RuntimeTelemetryRender {
     pub last_frame_ms: Option<f64>,
     pub last_error: Option<String>,
     pub source_node_id: Option<String>,
+    pub diagnostics: Vec<ShaderDiagnostic>,
+    pub generated_source_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +91,104 @@ pub struct PreviewTelemetryHeartbeat {
     pub last_frame_ms: Option<f64>,
     pub last_error: Option<String>,
     pub source_node_id: Option<String>,
+    pub diagnostics: Vec<ShaderDiagnostic>,
+    pub generated_source_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShaderDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShaderDiagnosticPhase {
+    InterfaceAnalysis,
+    SourceSync,
+    WgslGeneration,
+    WgslCompile,
+    RenderPipeline,
+    RenderFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShaderDiagnosticSource {
+    User,
+    Generated,
+    Runtime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShaderDiagnostic {
+    pub severity: ShaderDiagnosticSeverity,
+    pub phase: ShaderDiagnosticPhase,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uniform_id: Option<String>,
+    pub source: ShaderDiagnosticSource,
+}
+
+impl ShaderDiagnostic {
+    pub fn new(
+        severity: ShaderDiagnosticSeverity,
+        phase: ShaderDiagnosticPhase,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        source: ShaderDiagnosticSource,
+    ) -> Self {
+        Self {
+            severity,
+            phase,
+            code: code.into(),
+            message: message.into(),
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            uniform_id: None,
+            source,
+        }
+    }
+
+    pub fn error(
+        phase: ShaderDiagnosticPhase,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        source: ShaderDiagnosticSource,
+    ) -> Self {
+        Self::new(
+            ShaderDiagnosticSeverity::Error,
+            phase,
+            code,
+            message,
+            source,
+        )
+    }
+
+    pub fn with_line_column(mut self, line: Option<usize>, column: Option<usize>) -> Self {
+        self.line = line;
+        self.column = column;
+        self
+    }
+
+    pub fn with_uniform_id(mut self, uniform_id: Option<String>) -> Self {
+        self.uniform_id = uniform_id;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -105,6 +205,8 @@ pub struct PreviewTelemetryWriter {
     last_write_at: Option<Instant>,
     last_frame_ms: Option<f64>,
     last_error: Option<String>,
+    diagnostics: Vec<ShaderDiagnostic>,
+    generated_source_available: bool,
 }
 
 impl RuntimeTelemetrySnapshot {
@@ -158,12 +260,14 @@ impl PreviewTelemetryWriter {
         backend: impl Into<String>,
         source_node_id: Option<String>,
     ) -> Self {
+        let renderer = renderer.into();
+        let generated_source_available = renderer == "fullscreen-shader";
         Self {
             path,
             graph_id,
             graph_revision,
             session_revision,
-            renderer: renderer.into(),
+            renderer,
             backend: backend.into(),
             source_node_id,
             frames_rendered: 0,
@@ -171,6 +275,8 @@ impl PreviewTelemetryWriter {
             last_write_at: None,
             last_frame_ms: None,
             last_error: None,
+            diagnostics: Vec::new(),
+            generated_source_available,
         }
     }
 
@@ -183,7 +289,22 @@ impl PreviewTelemetryWriter {
     }
 
     pub fn record_error(&mut self, error: impl Into<String>) {
-        self.last_error = Some(error.into());
+        let message = error.into();
+        self.last_error = Some(message.clone());
+        self.diagnostics.push(ShaderDiagnostic::error(
+            ShaderDiagnosticPhase::RenderFrame,
+            "render-error",
+            message,
+            ShaderDiagnosticSource::Runtime,
+        ));
+        self.write_if_due(Instant::now(), true);
+    }
+
+    pub fn record_shader_diagnostic(&mut self, diagnostic: ShaderDiagnostic) {
+        if diagnostic.severity == ShaderDiagnosticSeverity::Error {
+            self.last_error = Some(diagnostic.message.clone());
+        }
+        self.diagnostics.push(diagnostic);
         self.write_if_due(Instant::now(), true);
     }
 
@@ -229,6 +350,8 @@ impl PreviewTelemetryWriter {
             last_frame_ms: self.last_frame_ms.map(round_1),
             last_error: self.last_error.clone(),
             source_node_id: self.source_node_id.clone(),
+            diagnostics: self.diagnostics.clone(),
+            generated_source_available: self.generated_source_available,
         }
     }
 }
@@ -312,7 +435,8 @@ fn render_from_preview(
             .as_ref()
             .and_then(|heartbeat| heartbeat.source_node_id.clone());
         let last_error = heartbeat
-            .and_then(|heartbeat| heartbeat.last_error)
+            .as_ref()
+            .and_then(|heartbeat| heartbeat.last_error.clone())
             .or_else(|| preview.message.clone());
         return RuntimeTelemetryRender {
             active,
@@ -323,6 +447,13 @@ fn render_from_preview(
             last_frame_ms: None,
             last_error,
             source_node_id,
+            diagnostics: heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.diagnostics.clone())
+                .unwrap_or_default(),
+            generated_source_available: heartbeat
+                .as_ref()
+                .is_some_and(|heartbeat| heartbeat.generated_source_available),
         };
     }
 
@@ -336,6 +467,8 @@ fn render_from_preview(
             last_frame_ms: heartbeat.last_frame_ms,
             last_error: heartbeat.last_error.or_else(|| preview.message.clone()),
             source_node_id: heartbeat.source_node_id,
+            diagnostics: heartbeat.diagnostics,
+            generated_source_available: heartbeat.generated_source_available,
         };
     }
 
@@ -351,6 +484,8 @@ fn render_from_preview(
             .map(|diagnostic| diagnostic.message.clone())
             .or_else(|| preview.message.clone()),
         source_node_id: None,
+        diagnostics: Vec::new(),
+        generated_source_available: false,
     }
 }
 
@@ -566,6 +701,57 @@ mod tests {
 
         assert_eq!(decoded.frames_rendered, 0);
         assert_eq!(decoded.last_error.as_deref(), Some("surface lost"));
+        assert_eq!(
+            decoded.diagnostics[0].phase,
+            ShaderDiagnosticPhase::RenderFrame
+        );
+        std::fs::remove_file(path).expect("heartbeat should be removable");
+    }
+
+    #[test]
+    fn preview_telemetry_writer_records_shader_diagnostics() {
+        let path = std::env::temp_dir().join(format!(
+            "skenion-preview-telemetry-shader-diagnostic-{}.json",
+            std::process::id()
+        ));
+        let mut writer = test_writer(path.clone());
+
+        writer.record_shader_diagnostic(ShaderDiagnostic {
+            severity: ShaderDiagnosticSeverity::Warning,
+            phase: ShaderDiagnosticPhase::InterfaceAnalysis,
+            code: "unused-uniform".to_owned(),
+            message: "uniform tint is not referenced".to_owned(),
+            line: Some(2),
+            column: Some(5),
+            end_line: None,
+            end_column: None,
+            uniform_id: Some("tint".to_owned()),
+            source: ShaderDiagnosticSource::User,
+        });
+        let warning = read_preview_telemetry(&path)
+            .expect("heartbeat should read")
+            .expect("heartbeat should exist");
+        assert_eq!(warning.last_error, None);
+        assert_eq!(
+            warning.diagnostics[0].severity,
+            ShaderDiagnosticSeverity::Warning
+        );
+
+        writer.record_shader_diagnostic(ShaderDiagnostic::error(
+            ShaderDiagnosticPhase::WgslCompile,
+            "wgsl-validation",
+            "invalid shader module",
+            ShaderDiagnosticSource::Generated,
+        ));
+        let error = read_preview_telemetry(&path)
+            .expect("heartbeat should read")
+            .expect("heartbeat should exist");
+        assert_eq!(error.last_error.as_deref(), Some("invalid shader module"));
+        assert_eq!(error.diagnostics.len(), 2);
+        assert_eq!(
+            error.diagnostics[1].phase,
+            ShaderDiagnosticPhase::WgslCompile
+        );
         std::fs::remove_file(path).expect("heartbeat should be removable");
     }
 
@@ -617,6 +803,13 @@ mod tests {
             last_frame_ms: Some(16.7),
             last_error: None,
             source_node_id: Some("clear_1".to_owned()),
+            diagnostics: vec![ShaderDiagnostic::error(
+                ShaderDiagnosticPhase::RenderFrame,
+                "test-diagnostic",
+                "test diagnostic",
+                ShaderDiagnosticSource::Runtime,
+            )],
+            generated_source_available: false,
         }
     }
 
@@ -673,5 +866,7 @@ mod tests {
         );
         assert_eq!(value["framesRendered"], json!(10));
         assert_eq!(value["sourceNodeId"], json!("clear_1"));
+        assert_eq!(value["diagnostics"][0]["phase"], json!("render-frame"));
+        assert_eq!(value["generatedSourceAvailable"], json!(false));
     }
 }
