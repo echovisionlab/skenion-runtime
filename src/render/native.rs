@@ -1,6 +1,5 @@
 use std::{borrow::Cow, error::Error, num::NonZeroU64, path::PathBuf, sync::Arc, time::Instant};
 
-use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -11,7 +10,10 @@ use winit::{
 
 use crate::{
     PreviewFrameLimit,
-    render::{PreviewDocument, RenderScene, render_scene_from_preview_document},
+    render::{
+        FullscreenShaderScene, PreviewDocument, RenderScene, ShaderUniformBinding,
+        ShaderUniformValue, render_scene_from_preview_document,
+    },
     telemetry::PreviewTelemetryWriter,
 };
 
@@ -243,40 +245,6 @@ enum WgpuPreviewMode {
     },
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
-struct SkenionFrameUniform {
-    resolution: [f32; 2],
-    time: f32,
-    frame: u32,
-    u_value: f32,
-    u_value2: f32,
-    _pad0: [f32; 2],
-    u_color: [f32; 4],
-}
-
-impl SkenionFrameUniform {
-    fn new(
-        width: u32,
-        height: u32,
-        time: f32,
-        frame: u32,
-        u_value: f32,
-        u_value2: f32,
-        u_color: [f32; 4],
-    ) -> Self {
-        Self {
-            resolution: [width as f32, height as f32],
-            time,
-            frame,
-            u_value,
-            u_value2,
-            _pad0: [0.0; 2],
-            u_color,
-        }
-    }
-}
-
 impl WgpuPreviewRenderer {
     fn new(window: Arc<Window>, scene: &RenderScene) -> Result<Self, String> {
         let size = window.inner_size();
@@ -383,12 +351,9 @@ impl WgpuPreviewRenderer {
                     self.config.height,
                     time,
                     frame_index,
-                    shader_u_value(scene),
-                    shader_u_value2(scene),
-                    shader_u_color(scene),
+                    shader_uniforms(scene),
                 );
-                self.queue
-                    .write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+                self.queue.write_buffer(uniform_buffer, 0, &uniform.bytes);
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("skenion-preview-fullscreen-shader-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -425,7 +390,7 @@ impl WgpuPreviewMode {
         match scene {
             RenderScene::ClearColor(_) => Ok(Self::Clear),
             RenderScene::FullscreenShader(shader_scene) => {
-                Self::fullscreen_shader(device, config, &shader_scene.source)
+                Self::fullscreen_shader(device, config, shader_scene)
             }
         }
     }
@@ -433,20 +398,13 @@ impl WgpuPreviewMode {
     fn fullscreen_shader(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
-        source: &str,
+        shader_scene: &FullscreenShaderScene,
     ) -> Result<Self, String> {
-        let uniform = SkenionFrameUniform::new(
-            config.width,
-            config.height,
-            0.0,
-            0,
-            0.0,
-            0.0,
-            [1.0, 1.0, 1.0, 1.0],
-        );
+        let uniform =
+            SkenionFrameUniform::new(config.width, config.height, 0.0, 0, &shader_scene.uniforms);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("skenion-frame-uniform"),
-            contents: bytemuck::bytes_of(&uniform),
+            contents: &uniform.bytes,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -457,9 +415,7 @@ impl WgpuPreviewMode {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(
-                        std::mem::size_of::<SkenionFrameUniform>() as u64
-                    ),
+                    min_binding_size: NonZeroU64::new(uniform.bytes.len() as u64),
                 },
                 count: None,
             }],
@@ -478,9 +434,10 @@ impl WgpuPreviewMode {
             immediate_size: 0,
         });
         let shader_error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module_source = fullscreen_shader_module_source(shader_scene);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skenion-fullscreen-shader-module"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(module_source)),
         });
         let targets = [Some(wgpu::ColorTargetState {
             format: config.format,
@@ -532,25 +489,112 @@ fn wgpu_color(color: [f64; 4]) -> wgpu::Color {
     }
 }
 
-fn shader_u_value(scene: &RenderScene) -> f32 {
-    match scene {
-        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_value,
-        RenderScene::ClearColor(_) => 0.0,
+#[derive(Debug, Clone, PartialEq)]
+struct SkenionFrameUniform {
+    bytes: Vec<u8>,
+}
+
+impl SkenionFrameUniform {
+    fn new(
+        width: u32,
+        height: u32,
+        time: f32,
+        frame: u32,
+        uniforms: &[ShaderUniformBinding],
+    ) -> Self {
+        let mut bytes = Vec::new();
+        write_f32(&mut bytes, 0, width as f32);
+        write_f32(&mut bytes, 4, height as f32);
+        write_f32(&mut bytes, 8, time);
+        write_u32(&mut bytes, 12, frame);
+        let mut offset = 16;
+
+        for uniform in uniforms {
+            let (alignment, size) = uniform_layout(&uniform.value);
+            offset = align_to(offset, alignment);
+            match &uniform.value {
+                ShaderUniformValue::F32(value) => write_f32(&mut bytes, offset, *value),
+                ShaderUniformValue::I32(value) => write_i32(&mut bytes, offset, *value),
+                ShaderUniformValue::Bool(value) => {
+                    write_u32(&mut bytes, offset, u32::from(*value));
+                }
+                ShaderUniformValue::ColorRgba(value) => {
+                    for (index, component) in value.iter().enumerate() {
+                        write_f32(&mut bytes, offset + index * 4, *component);
+                    }
+                }
+            }
+            offset += size;
+        }
+
+        bytes.resize(align_to(offset, 16), 0);
+        Self { bytes }
     }
 }
 
-fn shader_u_value2(scene: &RenderScene) -> f32 {
+fn shader_uniforms(scene: &RenderScene) -> &[ShaderUniformBinding] {
     match scene {
-        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_value2,
-        RenderScene::ClearColor(_) => 0.0,
+        RenderScene::FullscreenShader(shader_scene) => &shader_scene.uniforms,
+        RenderScene::ClearColor(_) => &[],
     }
 }
 
-fn shader_u_color(scene: &RenderScene) -> [f32; 4] {
-    match scene {
-        RenderScene::FullscreenShader(shader_scene) => shader_scene.u_color,
-        RenderScene::ClearColor(_) => [1.0, 1.0, 1.0, 1.0],
+fn fullscreen_shader_module_source(shader_scene: &FullscreenShaderScene) -> String {
+    let mut source = String::from(
+        "struct SkenionFrame {\n  resolution: vec2<f32>,\n  time: f32,\n  frame: u32,\n",
+    );
+    for uniform in &shader_scene.uniforms {
+        source.push_str("  ");
+        source.push_str(&uniform.id);
+        source.push_str(": ");
+        source.push_str(wgsl_type(&uniform.value));
+        source.push_str(",\n");
     }
+    source.push_str("}\n\n@group(0) @binding(0)\nvar<uniform> skenion: SkenionFrame;\n\nfn sk_bool(value: u32) -> bool {\n  return value != 0u;\n}\n\nstruct VertexOut {\n  @builtin(position) position: vec4<f32>,\n}\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {\n  var positions = array<vec2<f32>, 3>(\n    vec2<f32>(-1.0, -3.0),\n    vec2<f32>(-1.0,  1.0),\n    vec2<f32>( 3.0,  1.0)\n  );\n\n  var out: VertexOut;\n  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);\n  return out;\n}\n\n");
+    source.push_str(&shader_scene.source);
+    source
+}
+
+fn wgsl_type(value: &ShaderUniformValue) -> &'static str {
+    match value {
+        ShaderUniformValue::F32(_) => "f32",
+        ShaderUniformValue::I32(_) => "i32",
+        ShaderUniformValue::Bool(_) => "u32",
+        ShaderUniformValue::ColorRgba(_) => "vec4<f32>",
+    }
+}
+
+fn uniform_layout(value: &ShaderUniformValue) -> (usize, usize) {
+    match value {
+        ShaderUniformValue::ColorRgba(_) => (16, 16),
+        ShaderUniformValue::F32(_) | ShaderUniformValue::I32(_) | ShaderUniformValue::Bool(_) => {
+            (4, 4)
+        }
+    }
+}
+
+fn align_to(value: usize, alignment: usize) -> usize {
+    value.div_ceil(alignment) * alignment
+}
+
+fn write_f32(bytes: &mut Vec<u8>, offset: usize, value: f32) {
+    write_bytes(bytes, offset, &value.to_le_bytes());
+}
+
+fn write_i32(bytes: &mut Vec<u8>, offset: usize, value: i32) {
+    write_bytes(bytes, offset, &value.to_le_bytes());
+}
+
+fn write_u32(bytes: &mut Vec<u8>, offset: usize, value: u32) {
+    write_bytes(bytes, offset, &value.to_le_bytes());
+}
+
+fn write_bytes(bytes: &mut Vec<u8>, offset: usize, value: &[u8]) {
+    let end = offset + value.len();
+    if bytes.len() < end {
+        bytes.resize(end, 0);
+    }
+    bytes[offset..end].copy_from_slice(value);
 }
 
 #[cfg(test)]
@@ -569,22 +613,89 @@ mod tests {
 
     #[test]
     fn frame_uniform_uses_resolution_time_and_frame() {
-        let uniform =
-            SkenionFrameUniform::new(960, 540, 1.25, 12, 0.75, 0.25, [1.0, 0.5, 0.25, 0.8]);
+        let uniform = SkenionFrameUniform::new(
+            960,
+            540,
+            1.25,
+            12,
+            &[
+                ShaderUniformBinding {
+                    id: "speed".to_owned(),
+                    value: ShaderUniformValue::F32(0.75),
+                },
+                ShaderUniformBinding {
+                    id: "enabled".to_owned(),
+                    value: ShaderUniformValue::Bool(true),
+                },
+                ShaderUniformBinding {
+                    id: "iterations".to_owned(),
+                    value: ShaderUniformValue::I32(8),
+                },
+                ShaderUniformBinding {
+                    id: "tint".to_owned(),
+                    value: ShaderUniformValue::ColorRgba([1.0, 0.5, 0.25, 0.8]),
+                },
+            ],
+        );
 
-        assert_eq!(uniform.resolution, [960.0, 540.0]);
-        assert_eq!(uniform.time, 1.25);
-        assert_eq!(uniform.frame, 12);
-        assert_eq!(uniform.u_value, 0.75);
-        assert_eq!(uniform.u_value2, 0.25);
-        assert_eq!(uniform._pad0, [0.0; 2]);
-        assert_eq!(uniform.u_color, [1.0, 0.5, 0.25, 0.8]);
-        assert_eq!(std::mem::size_of::<SkenionFrameUniform>(), 48);
+        assert_eq!(read_f32(&uniform.bytes, 0), 960.0);
+        assert_eq!(read_f32(&uniform.bytes, 4), 540.0);
+        assert_eq!(read_f32(&uniform.bytes, 8), 1.25);
+        assert_eq!(read_u32(&uniform.bytes, 12), 12);
+        assert_eq!(read_f32(&uniform.bytes, 16), 0.75);
+        assert_eq!(read_u32(&uniform.bytes, 20), 1);
+        assert_eq!(read_i32(&uniform.bytes, 24), 8);
+        assert_eq!(read_f32(&uniform.bytes, 32), 1.0);
+        assert_eq!(read_f32(&uniform.bytes, 36), 0.5);
+        assert_eq!(read_f32(&uniform.bytes, 40), 0.25);
+        assert_eq!(read_f32(&uniform.bytes, 44), 0.8);
+        assert_eq!(uniform.bytes.len(), 48);
     }
 
     #[test]
     fn render_scene_reports_renderer_labels() {
         assert_eq!(RenderScene::default().renderer_label(), "clear-color");
         assert_eq!(RenderScene::default().source_node_id(), None);
+    }
+
+    #[test]
+    fn generated_shader_module_declares_dynamic_uniforms() {
+        let scene = FullscreenShaderScene {
+            language: crate::render::ShaderLanguage::Wgsl,
+            source: "@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                .to_owned(),
+            source_node_id: "shader_1".to_owned(),
+            uniforms: vec![
+                ShaderUniformBinding {
+                    id: "speed".to_owned(),
+                    value: ShaderUniformValue::F32(0.5),
+                },
+                ShaderUniformBinding {
+                    id: "enabled".to_owned(),
+                    value: ShaderUniformValue::Bool(true),
+                },
+            ],
+            fallback_clear_color: [0.0, 0.0, 0.0, 1.0],
+        };
+
+        let source = fullscreen_shader_module_source(&scene);
+
+        assert!(source.contains("speed: f32"));
+        assert!(source.contains("enabled: u32"));
+        assert!(source.contains("fn sk_bool(value: u32) -> bool"));
+        assert!(source.contains("fn vs_main"));
+        assert!(source.contains("fn fs_main"));
+    }
+
+    fn read_f32(bytes: &[u8], offset: usize) -> f32 {
+        f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_i32(bytes: &[u8], offset: usize) -> i32 {
+        i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 }

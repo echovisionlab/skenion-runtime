@@ -7,7 +7,10 @@ pub use skenion_contracts::{
     InvertPatchErrorV01 as InvertPatchError, NodeDefinitionManifestV01 as NodeDefinition,
     NodeExecutionV01 as NodeExecution, NodeStateV01 as NodeState, NumberRangeV01 as NumberRange,
     PortActivationV01 as PortActivation, PortDirectionV01 as PortDirection, PortRefV01 as PortRef,
-    PortV01 as Port, StringOrStringsV01 as StringOrStrings,
+    PortV01 as Port, ReplaceNodeInterfaceEdgePolicyV01 as ReplaceNodeInterfaceEdgePolicy,
+    ShaderInterfaceV01 as ShaderInterface, ShaderUniformV01 as ShaderUniform,
+    StringOrStringsV01 as StringOrStrings, analyze_shader_interface_v01,
+    shader_interface_to_ports_v01,
 };
 pub use skenion_contracts::{
     CycleValidationV02, EdgeSpecV02, ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02,

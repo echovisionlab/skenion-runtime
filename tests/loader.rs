@@ -180,8 +180,10 @@ fn canonical_shader_uniform_example_uses_number_f32_and_plans() {
     let uniform_port = shader_node
         .ports
         .iter()
-        .find(|port| port.id == "u_value")
-        .expect("shader should expose u_value input");
+        .find(|port| port.id == "speed")
+        .or_else(|| shader_node.ports.iter().find(|port| port.id == "u_value"))
+        .expect("shader should expose a number.f32 uniform input");
+    let uniform_port_id = uniform_port.id.as_str();
 
     assert_eq!(value_port.data_type.data_kind, "number.f32");
     assert_eq!(uniform_port.data_type.data_kind, "number.f32");
@@ -190,9 +192,9 @@ fn canonical_shader_uniform_example_uses_number_f32_and_plans() {
             edge.from.node == "value_1"
                 && edge.from.port == "value"
                 && edge.to.node == "shader_1"
-                && edge.to.port == "u_value"
+                && edge.to.port == uniform_port_id
         }),
-        "shader uniform fixture should wire core.value-f32.value to render.fullscreen-shader.u_value"
+        "shader uniform fixture should wire core.value-f32.value to the shader uniform input"
     );
 
     let mut registry = NodeRegistry::new();

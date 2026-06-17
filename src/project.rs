@@ -1,9 +1,11 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
-    GraphDocument, GraphNode, NodeDefinition, NodeRegistry, Port, PortDirection,
+    DataFlow, GraphDocument, GraphNode, NodeDefinition, NodeRegistry, Port, PortDirection,
     compatible_data_types, type_label, validate_graph_document,
 };
+
+const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectValidationError {
@@ -119,6 +121,9 @@ fn validate_node_snapshot(
 
     for snapshot_port in &node.ports {
         let Some(definition_port) = definition_ports.get(snapshot_port.id.as_str()) else {
+            if allows_dynamic_shader_input(node, definition, snapshot_port) {
+                continue;
+            }
             errors.push(ProjectValidationError::new(format!(
                 "port snapshot references missing manifest port: {}.{}",
                 node.id, snapshot_port.id
@@ -170,17 +175,21 @@ fn validate_edges(
     definitions_by_node: &HashMap<&str, &NodeDefinition>,
     errors: &mut Vec<ProjectValidationError>,
 ) {
+    let nodes_by_id: HashMap<&str, &GraphNode> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+
     for edge in &graph.edges {
         let from_definition = definitions_by_node.get(edge.from.node.as_str());
         let to_definition = definitions_by_node.get(edge.to.node.as_str());
-        let from = from_definition.and_then(|definition| {
-            definition
-                .ports
-                .iter()
-                .find(|port| port.id == edge.from.port)
-        });
-        let to = to_definition
-            .and_then(|definition| definition.ports.iter().find(|port| port.id == edge.to.port));
+        let from = nodes_by_id
+            .get(edge.from.node.as_str())
+            .and_then(|node| node.ports.iter().find(|port| port.id == edge.from.port));
+        let to = nodes_by_id
+            .get(edge.to.node.as_str())
+            .and_then(|node| node.ports.iter().find(|port| port.id == edge.to.port));
 
         if from_definition.is_some() && from.is_none() {
             errors.push(ProjectValidationError::new(format!(
@@ -223,6 +232,17 @@ fn validate_edges(
             )));
         }
     }
+}
+
+fn allows_dynamic_shader_input(node: &GraphNode, definition: &NodeDefinition, port: &Port) -> bool {
+    node.kind == RENDER_FULLSCREEN_SHADER_KIND
+        && definition.id == RENDER_FULLSCREEN_SHADER_KIND
+        && port.direction == PortDirection::Input
+        && port.data_type.flow == DataFlow::Value
+        && matches!(
+            port.data_type.data_kind.as_str(),
+            "number.f32" | "number.i32" | "boolean" | "color.rgba"
+        )
 }
 
 pub(crate) fn detect_cycle(graph: &GraphDocument) -> Option<Vec<String>> {
@@ -470,6 +490,48 @@ mod tests {
         assert!(display.contains(
             "event<event.bang> is not compatible with definition type value<number.f32>"
         ));
+    }
+
+    #[test]
+    fn accepts_dynamic_fullscreen_shader_value_input_snapshots() {
+        let definition = definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "render.fullscreen-shader",
+          "version": "0.1.0",
+          "displayName": "Fullscreen Shader",
+          "category": "Render",
+          "ports": [
+            { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "gpu.texture2d", "format": "rgba8unorm", "colorSpace": "srgb" } }
+          ],
+          "execution": { "model": "gpu_pass" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }));
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "dynamic-shader",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "shader",
+              "kind": "render.fullscreen-shader",
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": [
+                { "id": "speed", "direction": "input", "type": { "flow": "value", "dataKind": "number.f32" }, "activation": "latched" },
+                { "id": "enabled", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "gpu.texture2d", "format": "rgba8unorm", "colorSpace": "srgb" } }
+              ]
+            }
+          ],
+          "edges": []
+        }));
+
+        validate_project(&graph, &registry(vec![definition]))
+            .expect("dynamic shader input snapshots should validate");
     }
 
     #[test]

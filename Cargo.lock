@@ -1853,7 +1853,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "skenion-contracts"
 version = "0.13.0"
-source = "git+https://github.com/echovisionlab/skenion-contracts?tag=skenion-contracts-v0.13.0#8b180ce362663eb7c5969b8802bcf28831b1b182"
+source = "git+https://github.com/echovisionlab/skenion-contracts?branch=codex%2Fdynamic-shader-interface-v0#8716f9087c61475d5de2fe44e520745bfa71fba7"
 dependencies = [
  "serde",
  "serde_json",

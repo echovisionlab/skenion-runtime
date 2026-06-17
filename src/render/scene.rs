@@ -2,7 +2,10 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::render::PreviewDocument;
-use crate::{ControlValue, GraphNode, PortDirection};
+use crate::{
+    ControlValue, GraphNode, PortDirection, analyze_shader_interface_v01,
+    shader_interface_to_ports_v01,
+};
 
 pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
 pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
@@ -27,10 +30,22 @@ pub struct FullscreenShaderScene {
     pub language: ShaderLanguage,
     pub source: String,
     pub source_node_id: String,
-    pub u_value: f32,
-    pub u_value2: f32,
-    pub u_color: [f32; 4],
+    pub uniforms: Vec<ShaderUniformBinding>,
     pub fallback_clear_color: [f64; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderUniformBinding {
+    pub id: String,
+    pub value: ShaderUniformValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShaderUniformValue {
+    F32(f32),
+    I32(i32),
+    Bool(bool),
+    ColorRgba([f32; 4]),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +66,15 @@ pub enum RenderSceneBuildError {
         node_id: String,
         entrypoint: &'static str,
     },
+    #[error("fullscreen shader node {node_id} source declares reserved {entrypoint} entry point")]
+    ReservedShaderEntrypoint {
+        node_id: String,
+        entrypoint: &'static str,
+    },
+    #[error("fullscreen shader node {node_id} has invalid interface: {message}")]
+    InvalidShaderInterface { node_id: String, message: String },
+    #[error("fullscreen shader node {node_id} graph ports do not match shader annotations")]
+    ShaderInterfacePortsOutOfSync { node_id: String },
     #[error("render output node {node_id} has no incoming edge to port in")]
     RenderOutputWithoutInput { node_id: String },
     #[error("render output node {output_node_id} references missing source node {source_node_id}")]
@@ -241,8 +265,8 @@ fn fullscreen_shader_scene_from_node(
             node_id: node.id.clone(),
         });
     }
-    if !source.contains("fn vs_main") {
-        return Err(RenderSceneBuildError::MissingShaderEntrypoint {
+    if source.contains("fn vs_main") {
+        return Err(RenderSceneBuildError::ReservedShaderEntrypoint {
             node_id: node.id.clone(),
             entrypoint: "vs_main",
         });
@@ -253,36 +277,110 @@ fn fullscreen_shader_scene_from_node(
             entrypoint: "fs_main",
         });
     }
+    let analysis = analyze_shader_interface_v01(source);
+    if !analysis.ok {
+        let message = analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(RenderSceneBuildError::InvalidShaderInterface {
+            node_id: node.id.clone(),
+            message,
+        });
+    }
+    let expected_ports = shader_interface_to_ports_v01(&analysis.shader_interface);
+    if node.ports != expected_ports {
+        return Err(RenderSceneBuildError::ShaderInterfacePortsOutOfSync {
+            node_id: node.id.clone(),
+        });
+    }
 
     Ok(RenderScene::FullscreenShader(FullscreenShaderScene {
         language,
         source: source.to_owned(),
         source_node_id: node.id.clone(),
-        u_value: fullscreen_shader_number_input(document, node, "u_value"),
-        u_value2: fullscreen_shader_number_input(document, node, "u_value2"),
-        u_color: fullscreen_shader_color_input(document, node, "u_color"),
+        uniforms: analysis
+            .shader_interface
+            .uniforms
+            .iter()
+            .map(|uniform| ShaderUniformBinding {
+                id: uniform.id.clone(),
+                value: shader_uniform_value(document, node, uniform),
+            })
+            .collect(),
         fallback_clear_color: DEFAULT_CLEAR_COLOR,
     }))
 }
 
-fn fullscreen_shader_number_input(
+fn shader_uniform_value(
     document: &PreviewDocument,
     node: &GraphNode,
-    port_id: &str,
-) -> f32 {
-    resolve_control_value_at_input(document, &node.id, port_id)
-        .and_then(ControlValue::as_f32)
-        .unwrap_or(0.0)
+    uniform: &crate::ShaderUniform,
+) -> ShaderUniformValue {
+    let connected = resolve_control_value_at_input(document, &node.id, &uniform.id);
+    match uniform.data_type.data_kind.as_str() {
+        "number.f32" => connected.and_then(ControlValue::as_f32).map_or_else(
+            || ShaderUniformValue::F32(default_f32(&uniform.default)),
+            ShaderUniformValue::F32,
+        ),
+        "number.i32" => connected
+            .and_then(|value| match value {
+                ControlValue::I32(value) => Some(*value as i32),
+                _ => None,
+            })
+            .map_or_else(
+                || ShaderUniformValue::I32(default_i32(&uniform.default)),
+                ShaderUniformValue::I32,
+            ),
+        "boolean" => connected
+            .and_then(|value| match value {
+                ControlValue::Bool(value) => Some(*value),
+                _ => None,
+            })
+            .map_or_else(
+                || ShaderUniformValue::Bool(default_bool(&uniform.default)),
+                ShaderUniformValue::Bool,
+            ),
+        "color.rgba" => connected.and_then(ControlValue::as_rgba_f32).map_or_else(
+            || ShaderUniformValue::ColorRgba(default_color(&uniform.default)),
+            ShaderUniformValue::ColorRgba,
+        ),
+        _ => ShaderUniformValue::F32(0.0),
+    }
 }
 
-fn fullscreen_shader_color_input(
-    document: &PreviewDocument,
-    node: &GraphNode,
-    port_id: &str,
-) -> [f32; 4] {
-    resolve_control_value_at_input(document, &node.id, port_id)
-        .and_then(ControlValue::as_rgba_f32)
+fn default_f32(value: &Option<serde_json::Value>) -> f32 {
+    value
+        .as_ref()
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0) as f32
+}
+
+fn default_i32(value: &Option<serde_json::Value>) -> i32 {
+    value
+        .as_ref()
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32
+}
+
+fn default_bool(value: &Option<serde_json::Value>) -> bool {
+    value
+        .as_ref()
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn default_color(value: &Option<serde_json::Value>) -> [f32; 4] {
+    value
+        .as_ref()
+        .and_then(read_color_f32)
         .unwrap_or(DEFAULT_SHADER_COLOR)
+}
+
+fn read_color_f32(value: &Value) -> Option<[f32; 4]> {
+    read_color(value).map(|color| color.map(|component| component.clamp(0.0, 1.0) as f32))
 }
 
 pub(crate) fn resolve_control_value_at_input<'a>(
@@ -378,7 +476,10 @@ mod tests {
             json!("red"),
             json!([0.1, 0.2, 0.3]),
             json!([0.1, 0.2, 0.3, 1.0, 0.5]),
+            json!([false, 0.2, 0.3, 1.0]),
             json!([0.1, false, 0.3, 1.0]),
+            json!([0.1, 0.2, false, 1.0]),
+            json!([0.1, 0.2, 0.3, false]),
         ] {
             let document = document_with_nodes(vec![clear_node(value)]);
 
@@ -401,9 +502,20 @@ mod tests {
                 language: ShaderLanguage::Wgsl,
                 source: shader_source().to_owned(),
                 source_node_id: "shader_1".to_owned(),
-                u_value: 0.0,
-                u_value2: 0.0,
-                u_color: DEFAULT_SHADER_COLOR,
+                uniforms: vec![
+                    ShaderUniformBinding {
+                        id: "speed".to_owned(),
+                        value: ShaderUniformValue::F32(0.0),
+                    },
+                    ShaderUniformBinding {
+                        id: "phase".to_owned(),
+                        value: ShaderUniformValue::F32(0.0),
+                    },
+                    ShaderUniformBinding {
+                        id: "tint".to_owned(),
+                        value: ShaderUniformValue::ColorRgba(DEFAULT_SHADER_COLOR),
+                    },
+                ],
                 fallback_clear_color: DEFAULT_CLEAR_COLOR
             })
         );
@@ -470,17 +582,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_shader_entrypoints() {
+    fn rejects_reserved_or_missing_shader_entrypoints() {
         let document = document_with_nodes(vec![shader_node(
             json!("wgsl"),
-            json!("@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"),
+            json!(
+                "@vertex fn vs_main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }\n@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+            ),
         )]);
 
         let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
 
         assert_eq!(
             error,
-            RenderSceneBuildError::MissingShaderEntrypoint {
+            RenderSceneBuildError::ReservedShaderEntrypoint {
                 node_id: "shader_1".to_owned(),
                 entrypoint: "vs_main"
             }
@@ -488,9 +602,7 @@ mod tests {
 
         let document = document_with_nodes(vec![shader_node(
             json!("wgsl"),
-            json!(
-                "@vertex fn vs_main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }"
-            ),
+            json!("fn helper() -> f32 { return 1.0; }"),
         )]);
 
         let error = render_scene_from_preview_document(&document).expect_err("scene should fail");
@@ -500,6 +612,33 @@ mod tests {
             RenderSceneBuildError::MissingShaderEntrypoint {
                 node_id: "shader_1".to_owned(),
                 entrypoint: "fs_main"
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_unsynced_shader_interfaces() {
+        let invalid = document_with_nodes(vec![shader_node(
+            json!("wgsl"),
+            json!(
+                "// @skenion.uniform bad vec3\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+            ),
+        )]);
+        let error = render_scene_from_preview_document(&invalid).expect_err("scene should fail");
+        assert!(matches!(
+            error,
+            RenderSceneBuildError::InvalidShaderInterface { node_id, message }
+                if node_id == "shader_1" && message.contains("unsupported uniform type")
+        ));
+
+        let mut node = shader_node(json!("wgsl"), json!(shader_source()));
+        node.ports = vec![gpu_output_port()];
+        let unsynced = document_with_nodes(vec![node]);
+        let error = render_scene_from_preview_document(&unsynced).expect_err("scene should fail");
+        assert_eq!(
+            error,
+            RenderSceneBuildError::ShaderInterfacePortsOutOfSync {
+                node_id: "shader_1".to_owned()
             }
         );
     }
@@ -568,13 +707,108 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_shader_reads_i32_and_bool_uniform_defaults() {
+        let document = document_with_nodes(vec![shader_node(
+            json!("wgsl"),
+            json!(typed_shader_source()),
+        )]);
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            shader_uniform(&scene, "iterations"),
+            &ShaderUniformValue::I32(8)
+        );
+        assert_eq!(
+            shader_uniform(&scene, "enabled"),
+            &ShaderUniformValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn fullscreen_shader_reads_connected_i32_and_bool_uniforms() {
+        let document = document_with_edges(
+            vec![
+                i32_node_with_value("iterations_1", 12),
+                bool_node_with_value("enabled_1", false),
+                shader_node(json!("wgsl"), json!(typed_shader_source())),
+            ],
+            vec![
+                edge("iterations_1", "value", "shader_1", "iterations"),
+                edge("enabled_1", "value", "shader_1", "enabled"),
+            ],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            shader_uniform(&scene, "iterations"),
+            &ShaderUniformValue::I32(12)
+        );
+        assert_eq!(
+            shader_uniform(&scene, "enabled"),
+            &ShaderUniformValue::Bool(false)
+        );
+    }
+
+    #[test]
+    fn fullscreen_shader_defaults_i32_and_bool_when_connected_value_type_mismatches() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_id_and_value("wrong_iterations", json!(4.0)),
+                value_node_with_id_and_value("wrong_enabled", json!(1.0)),
+                shader_node(json!("wgsl"), json!(typed_shader_source())),
+            ],
+            vec![
+                edge("wrong_iterations", "value", "shader_1", "iterations"),
+                edge("wrong_enabled", "value", "shader_1", "enabled"),
+            ],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            shader_uniform(&scene, "iterations"),
+            &ShaderUniformValue::I32(8)
+        );
+        assert_eq!(
+            shader_uniform(&scene, "enabled"),
+            &ShaderUniformValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn shader_uniform_value_defaults_unknown_uniform_data_kind() {
+        let document =
+            document_with_nodes(vec![shader_node(json!("wgsl"), json!(shader_source()))]);
+        let node = document
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "shader_1")
+            .expect("shader node should exist");
+        let uniform: crate::ShaderUniform = serde_json::from_value(json!({
+            "id": "unknown",
+            "label": "Unknown",
+            "type": { "flow": "value", "dataKind": "unknown.kind" },
+            "required": false
+        }))
+        .expect("uniform should parse");
+
+        assert_eq!(
+            shader_uniform_value(&document, node, &uniform),
+            ShaderUniformValue::F32(0.0)
+        );
+    }
+
+    #[test]
     fn fullscreen_shader_reads_connected_value_node() {
         let document = document_with_edges(
             vec![
                 value_node_with_value(json!(0.42)),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_1", "value", "shader_1", "u_value")],
+            vec![edge("value_1", "value", "shader_1", "speed")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -589,7 +823,7 @@ mod tests {
                 value_node_with_value(json!(0.42)),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_1", "value", "shader_1", "u_value")],
+            vec![edge("value_1", "value", "shader_1", "speed")],
         );
         document
             .control_state
@@ -608,7 +842,7 @@ mod tests {
                 value_node_with_id_and_value("value_2", json!(0.73)),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_2", "value", "shader_1", "u_value2")],
+            vec![edge("value_2", "value", "shader_1", "phase")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -623,7 +857,7 @@ mod tests {
                 color_node_with_value(json!([1.2, 0.5, -0.25, 0.8])),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("color_1", "value", "shader_1", "u_color")],
+            vec![edge("color_1", "value", "shader_1", "tint")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -639,7 +873,7 @@ mod tests {
                     value_node_with_value(value),
                     shader_node(json!("wgsl"), json!(shader_source())),
                 ],
-                vec![edge("value_1", "value", "shader_1", "u_value")],
+                vec![edge("value_1", "value", "shader_1", "speed")],
             );
 
             let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -655,7 +889,7 @@ mod tests {
                 clear_node(json!([0.1, 0.2, 0.3, 1.0])),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("clear_1", "out", "shader_1", "u_value")],
+            vec![edge("clear_1", "out", "shader_1", "speed")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -670,7 +904,7 @@ mod tests {
                 value_node_with_value(json!(0.42)),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_1", "value", "shader_1", "u_color")],
+            vec![edge("value_1", "value", "shader_1", "tint")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -682,7 +916,7 @@ mod tests {
     fn fullscreen_shader_defaults_u_value_for_missing_source_node() {
         let document = document_with_edges(
             vec![shader_node(json!("wgsl"), json!(shader_source()))],
-            vec![edge("missing_value", "value", "shader_1", "u_value")],
+            vec![edge("missing_value", "value", "shader_1", "speed")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -694,7 +928,7 @@ mod tests {
     fn fullscreen_shader_defaults_u_color_for_missing_source_node() {
         let document = document_with_edges(
             vec![shader_node(json!("wgsl"), json!(shader_source()))],
-            vec![edge("missing_color", "value", "shader_1", "u_color")],
+            vec![edge("missing_color", "value", "shader_1", "tint")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -709,7 +943,7 @@ mod tests {
                 value_node_with_value(json!("not-a-number")),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_1", "value", "shader_1", "u_value")],
+            vec![edge("value_1", "value", "shader_1", "speed")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -729,7 +963,7 @@ mod tests {
                     color_node_with_value(value),
                     shader_node(json!("wgsl"), json!(shader_source())),
                 ],
-                vec![edge("color_1", "value", "shader_1", "u_color")],
+                vec![edge("color_1", "value", "shader_1", "tint")],
             );
 
             let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -745,7 +979,7 @@ mod tests {
                 value_node(),
                 shader_node(json!("wgsl"), json!(shader_source())),
             ],
-            vec![edge("value_1", "value", "shader_1", "u_value")],
+            vec![edge("value_1", "value", "shader_1", "speed")],
         );
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
@@ -784,6 +1018,38 @@ mod tests {
         });
 
         let _ = shader_u_color(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected f32 speed uniform")]
+    fn shader_u_value_helper_rejects_wrong_uniform_type() {
+        let scene = shader_scene_with_uniform("speed", ShaderUniformValue::Bool(false));
+
+        let _ = shader_u_value(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected f32 phase uniform")]
+    fn shader_u_value2_helper_rejects_wrong_uniform_type() {
+        let scene = shader_scene_with_uniform("phase", ShaderUniformValue::Bool(false));
+
+        let _ = shader_u_value2(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected color tint uniform")]
+    fn shader_u_color_helper_rejects_wrong_uniform_type() {
+        let scene = shader_scene_with_uniform("tint", ShaderUniformValue::Bool(false));
+
+        let _ = shader_u_color(&scene);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing shader uniform missing")]
+    fn shader_uniform_helper_rejects_missing_uniform() {
+        let scene = shader_scene_with_uniform("speed", ShaderUniformValue::F32(0.0));
+
+        let _ = shader_uniform(&scene, "missing");
     }
 
     #[test]
@@ -944,12 +1210,19 @@ mod tests {
         let mut params = serde_json::Map::new();
         params.insert("language".to_owned(), language);
         params.insert("source".to_owned(), source);
+        let ports = params
+            .get("source")
+            .and_then(Value::as_str)
+            .map(analyze_shader_interface_v01)
+            .filter(|analysis| analysis.ok)
+            .map(|analysis| shader_interface_to_ports_v01(&analysis.shader_interface))
+            .unwrap_or_else(|| vec![gpu_output_port()]);
         GraphNode {
             id: "shader_1".to_owned(),
             kind: RENDER_FULLSCREEN_SHADER_KIND.to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
-            ports: vec![gpu_output_port()],
+            ports,
         }
     }
 
@@ -1031,6 +1304,52 @@ mod tests {
         }
     }
 
+    fn i32_node_with_value(id: &str, value: i32) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), json!(value));
+        GraphNode {
+            id: id.to_owned(),
+            kind: "core.value-i32".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Value",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "number.i32"
+                    }
+                }))
+                .expect("valid i32 value port"),
+            ],
+        }
+    }
+
+    fn bool_node_with_value(id: &str, value: bool) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), json!(value));
+        GraphNode {
+            id: id.to_owned(),
+            kind: "core.value-bool".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Value",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "boolean"
+                    }
+                }))
+                .expect("valid bool value port"),
+            ],
+        }
+    }
+
     fn color_node_with_value(value: Value) -> GraphNode {
         let mut params = serde_json::Map::new();
         params.insert("value".to_owned(), value);
@@ -1091,24 +1410,51 @@ mod tests {
     }
 
     fn shader_u_value(scene: &RenderScene) -> f32 {
-        match scene {
-            RenderScene::FullscreenShader(shader) => shader.u_value,
-            _ => panic!("expected fullscreen shader scene"),
+        match shader_uniform(scene, "speed") {
+            ShaderUniformValue::F32(value) => *value,
+            _ => panic!("expected f32 speed uniform"),
         }
     }
 
     fn shader_u_value2(scene: &RenderScene) -> f32 {
-        match scene {
-            RenderScene::FullscreenShader(shader) => shader.u_value2,
-            _ => panic!("expected fullscreen shader scene"),
+        match shader_uniform(scene, "phase") {
+            ShaderUniformValue::F32(value) => *value,
+            _ => panic!("expected f32 phase uniform"),
         }
     }
 
     fn shader_u_color(scene: &RenderScene) -> [f32; 4] {
+        match shader_uniform(scene, "tint") {
+            ShaderUniformValue::ColorRgba(value) => *value,
+            _ => panic!("expected color tint uniform"),
+        }
+    }
+
+    fn shader_uniform<'a>(scene: &'a RenderScene, id: &str) -> &'a ShaderUniformValue {
         match scene {
-            RenderScene::FullscreenShader(shader) => shader.u_color,
+            RenderScene::FullscreenShader(shader) => {
+                &shader
+                    .uniforms
+                    .iter()
+                    .find(|uniform| uniform.id == id)
+                    .unwrap_or_else(|| panic!("missing shader uniform {id}"))
+                    .value
+            }
             _ => panic!("expected fullscreen shader scene"),
         }
+    }
+
+    fn shader_scene_with_uniform(id: &str, value: ShaderUniformValue) -> RenderScene {
+        RenderScene::FullscreenShader(FullscreenShaderScene {
+            language: ShaderLanguage::Wgsl,
+            source: "fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }".to_owned(),
+            source_node_id: "shader_1".to_owned(),
+            uniforms: vec![ShaderUniformBinding {
+                id: id.to_owned(),
+                value,
+            }],
+            fallback_clear_color: DEFAULT_CLEAR_COLOR,
+        })
     }
 
     fn edge(from_node: &str, from_port: &str, to_node: &str, to_port: &str) -> Edge {
@@ -1155,42 +1501,25 @@ mod tests {
     }
 
     fn shader_source() -> &'static str {
-        r#"struct SkenionFrame {
-  resolution: vec2<f32>,
-  time: f32,
-  frame: u32,
-  u_value: f32,
-  u_value2: f32,
-  _pad0: vec2<f32>,
-  u_color: vec4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> skenion: SkenionFrame;
-
-struct VertexOut {
-  @builtin(position) position: vec4<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  var positions = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -3.0),
-    vec2<f32>(-1.0,  1.0),
-    vec2<f32>( 3.0,  1.0)
-  );
-
-  var out: VertexOut;
-  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-  return out;
-}
-
+        r#"// @skenion.uniform speed number.f32 default=0 min=0 max=1 step=0.01
+// @skenion.uniform phase number.f32 default=0 min=0 max=1 step=0.01
+// @skenion.uniform tint color.rgba default=[1,1,1,1]
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-  let mix_value = clamp(skenion.u_value, 0.0, 1.0);
-  let brightness = 0.25 + 0.75 * clamp(skenion.u_value2, 0.0, 1.0);
+  let mix_value = clamp(skenion.speed, 0.0, 1.0);
+  let brightness = 0.25 + 0.75 * clamp(skenion.phase, 0.0, 1.0);
   let animated = vec3<f32>(0.2 + mix_value * 0.8, 0.3, 1.0 - mix_value);
-  return vec4<f32>(mix(animated, skenion.u_color.rgb, mix_value) * brightness, skenion.u_color.a);
+  return vec4<f32>(mix(animated, skenion.tint.rgb, mix_value) * brightness, skenion.tint.a);
+}"#
+    }
+
+    fn typed_shader_source() -> &'static str {
+        r#"// @skenion.uniform iterations number.i32 default=8
+// @skenion.uniform enabled boolean default=true
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  let enabled_value = select(0.0, 1.0, skenion.enabled);
+  return vec4<f32>(f32(skenion.iterations) / 16.0, enabled_value, 0.25, 1.0);
 }"#
     }
 }
