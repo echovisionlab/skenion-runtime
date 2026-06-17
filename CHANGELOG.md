@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.16.0...skenion-runtime-v0.17.0) (2026-06-17)
+
+
+### Features
+
+* **runtime:** add control layer state reads ([25dbaf8](https://github.com/echovisionlab/skenion-runtime/commit/25dbaf8d3bf5e2acf6ab0a68dec67ab7f48a7783))
+* **runtime:** render dynamic shader uniforms ([#45](https://github.com/echovisionlab/skenion-runtime/issues/45)) ([fbd8586](https://github.com/echovisionlab/skenion-runtime/commit/fbd858605e9ef197f21d927a62266311c388405c))
+
 ## [0.16.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.15.0...skenion-runtime-v0.16.0) (2026-06-17)
 
 
