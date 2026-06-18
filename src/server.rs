@@ -788,9 +788,19 @@ fn store_asset(
     bytes: Bytes,
 ) -> RuntimeAssetImportResponse {
     let id = asset_id(&name, &mime_type, &bytes);
+    store_asset_with_id(state, id, name, mime_type, bytes, runtime_asset_directory())
+}
+
+fn store_asset_with_id(
+    state: &RuntimeServerState,
+    id: String,
+    name: String,
+    mime_type: String,
+    bytes: Bytes,
+    directory: PathBuf,
+) -> RuntimeAssetImportResponse {
     let kind = asset_kind(&mime_type);
     let runtime_uri = format!("skenion-runtime://assets/{id}");
-    let directory = runtime_asset_directory();
     if let Err(error) = fs::create_dir_all(&directory) {
         return RuntimeAssetImportResponse {
             ok: false,
@@ -1119,6 +1129,30 @@ mod tests {
                 .contains(asset_id)
         );
 
+        let unnamed_body = format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"\r\n\r\nasset-bytes\r\n--{boundary}--\r\n"
+        );
+        let unnamed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v0/assets/import")
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(unnamed_body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let unnamed = body_json(unnamed.into_body()).await;
+        assert_eq!(unnamed["ok"], true);
+        assert_eq!(unnamed["asset"]["name"], "asset.bin");
+        assert_eq!(unnamed["asset"]["mimeType"], "application/octet-stream");
+        assert_eq!(unnamed["asset"]["kind"], "binary");
+
         let listed = app
             .clone()
             .oneshot(
@@ -1132,7 +1166,7 @@ mod tests {
             .expect("router should respond");
         let listed = body_json(listed.into_body()).await;
         assert_eq!(listed["ok"], true);
-        assert_eq!(listed["assets"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["assets"].as_array().unwrap().len(), 2);
 
         let fetched = app
             .clone()
@@ -1167,6 +1201,107 @@ mod tests {
                 .unwrap()
                 .contains("missing")
         );
+
+        let ignored_field = format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"metadata\"\r\n\r\nignored\r\n--{boundary}--\r\n"
+        );
+        let missing_file = runtime_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v0/assets/import")
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(ignored_field))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let missing_file = body_json(missing_file.into_body()).await;
+        assert_eq!(missing_file["ok"], false);
+        assert!(
+            missing_file["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("did not include a file field")
+        );
+
+        let malformed_file = format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"; filename=\"broken.bin\"\r\ncontent-type: application/octet-stream\r\n\r\nunterminated"
+        );
+        let malformed = runtime_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v0/assets/import")
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(malformed_file))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let malformed = body_json(malformed.into_body()).await;
+        assert_eq!(malformed["ok"], false);
+    }
+
+    #[test]
+    fn asset_store_helpers_report_filesystem_errors_and_kind_labels() {
+        let state = RuntimeServerState::default();
+        let base = std::env::temp_dir().join(format!(
+            "skenion-asset-store-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&base, b"not a directory").expect("blocker should write");
+
+        let create_error = store_asset_with_id(
+            &state,
+            "asset_create_error".to_owned(),
+            "clip.mov".to_owned(),
+            "video/quicktime".to_owned(),
+            Bytes::from_static(b"asset"),
+            base.clone(),
+        );
+        assert!(!create_error.ok);
+        assert!(
+            create_error.diagnostics[0]
+                .message
+                .contains("failed to create runtime asset directory")
+        );
+
+        std::fs::remove_file(&base).expect("blocker should remove");
+        std::fs::create_dir_all(&base).expect("base directory should create");
+        std::fs::create_dir(base.join("asset_write_error")).expect("asset blocker should create");
+
+        let write_error = store_asset_with_id(
+            &state,
+            "asset_write_error".to_owned(),
+            "clip.mov".to_owned(),
+            "video/quicktime".to_owned(),
+            Bytes::from_static(b"asset"),
+            base.clone(),
+        );
+        assert!(!write_error.ok);
+        assert!(
+            write_error.diagnostics[0]
+                .message
+                .contains("failed to store runtime asset")
+        );
+
+        assert_eq!(asset_kind("video/mp4"), "video");
+        assert_eq!(asset_kind("image/png"), "image");
+        assert_eq!(asset_kind("audio/wav"), "audio");
+        assert_eq!(asset_kind("application/octet-stream"), "binary");
+
+        std::fs::remove_dir_all(base).expect("base directory should remove");
     }
 
     #[test]

@@ -185,6 +185,20 @@ mod tests {
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
             Some(ControlValue::String("perform".to_owned()))
         );
+        let mut comment = node(COMMENT_KIND, json!(null));
+        comment
+            .params
+            .insert("text".to_owned(), json!("visible note"));
+        assert_eq!(
+            ControlValue::for_node_default(&comment),
+            Some(ControlValue::String("visible note".to_owned()))
+        );
+        let mut panel = node(PANEL_KIND, json!(null));
+        panel.params.insert("color".to_owned(), json!("#00ff00"));
+        assert_eq!(
+            ControlValue::for_node_default(&panel),
+            Some(ControlValue::String("#00ff00".to_owned()))
+        );
         assert_eq!(
             ControlValue::for_node_default(&node(UI_SLIDER_F32_KIND, json!(0.75))),
             Some(ControlValue::F32(0.75))
@@ -216,6 +230,14 @@ mod tests {
         assert_eq!(
             ControlValue::for_node_default(&node(STRING_KIND, json!(false))),
             Some(ControlValue::String(String::new()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(COMMENT_KIND, json!(null))),
+            Some(ControlValue::String(String::new()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(PANEL_KIND, json!(null))),
+            Some(ControlValue::String("transparent".to_owned()))
         );
     }
 
