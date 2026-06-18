@@ -1,13 +1,17 @@
 use std::{
+    collections::BTreeMap,
     convert::Infallible,
+    fs,
+    hash::{Hash, Hasher},
+    path::PathBuf,
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Multipart, Path, State},
     http::{HeaderValue, Method, header::CONTENT_TYPE},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -91,6 +95,7 @@ pub enum DiagnosticSeverity {
 pub struct RuntimeServerState {
     pub session: Arc<RwLock<RuntimeSession>>,
     pub preview: Arc<Mutex<PreviewManager>>,
+    pub assets: Arc<RwLock<RuntimeAssetStore>>,
     pub started_at: Instant,
 }
 
@@ -99,9 +104,50 @@ impl Default for RuntimeServerState {
         Self {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
             preview: Arc::new(Mutex::new(PreviewManager::from_env())),
+            assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
             started_at: Instant::now(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeAssetStore {
+    assets: BTreeMap<String, RuntimeAsset>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAsset {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub runtime_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssetImportResponse {
+    pub ok: bool,
+    pub asset: Option<RuntimeAsset>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssetListResponse {
+    pub ok: bool,
+    pub assets: Vec<RuntimeAsset>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssetGetResponse {
+    pub ok: bool,
+    pub asset: Option<RuntimeAsset>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 pub fn runtime_router() -> Router {
@@ -132,6 +178,9 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/session/preview/stop", post(stop_preview))
         .route("/v0/session/preview/restart", post(restart_preview))
         .route("/v0/session/render/generated-shader", get(generated_shader))
+        .route("/v0/assets/import", post(import_asset))
+        .route("/v0/assets", get(list_assets))
+        .route("/v0/assets/{asset_id}", get(get_asset))
         .route("/v0/session/telemetry", get(session_telemetry))
         .route(
             "/v0/session/telemetry/stream",
@@ -179,6 +228,9 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "session.preview.stop",
             "session.preview.restart",
             "session.render.generatedShader",
+            "assets.import",
+            "assets.list",
+            "assets.get",
             "session.telemetry",
             "session.telemetry.stream",
         ],
@@ -604,6 +656,88 @@ async fn generated_shader(
     Json(response)
 }
 
+async fn import_asset(
+    State(state): State<RuntimeServerState>,
+    mut multipart: Multipart,
+) -> Json<RuntimeAssetImportResponse> {
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let name = field
+            .file_name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "asset.bin".to_owned());
+        let mime_type = field
+            .content_type()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+        let bytes = match field.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Json(RuntimeAssetImportResponse {
+                    ok: false,
+                    asset: None,
+                    diagnostics: vec![RuntimeDiagnostic::error(format!(
+                        "failed to read uploaded asset bytes: {error}"
+                    ))],
+                });
+            }
+        };
+
+        return Json(store_asset(&state, name, mime_type, bytes));
+    }
+
+    Json(RuntimeAssetImportResponse {
+        ok: false,
+        asset: None,
+        diagnostics: vec![RuntimeDiagnostic::error(
+            "asset import request did not include a file field",
+        )],
+    })
+}
+
+async fn list_assets(State(state): State<RuntimeServerState>) -> Json<RuntimeAssetListResponse> {
+    let assets = state
+        .assets
+        .read()
+        .expect("runtime asset store lock should not be poisoned")
+        .assets
+        .values()
+        .cloned()
+        .collect();
+    Json(RuntimeAssetListResponse {
+        ok: true,
+        assets,
+        diagnostics: Vec::new(),
+    })
+}
+
+async fn get_asset(
+    State(state): State<RuntimeServerState>,
+    Path(asset_id): Path<String>,
+) -> Json<RuntimeAssetGetResponse> {
+    let asset = state
+        .assets
+        .read()
+        .expect("runtime asset store lock should not be poisoned")
+        .assets
+        .get(&asset_id)
+        .cloned();
+    let ok = asset.is_some();
+    Json(RuntimeAssetGetResponse {
+        ok,
+        asset,
+        diagnostics: if ok {
+            Vec::new()
+        } else {
+            vec![RuntimeDiagnostic::error(format!(
+                "asset {asset_id} does not exist"
+            ))]
+        },
+    })
+}
+
 async fn session_telemetry(
     State(state): State<RuntimeServerState>,
 ) -> Json<RuntimeTelemetrySnapshot> {
@@ -645,6 +779,85 @@ fn telemetry_snapshot(state: &RuntimeServerState) -> RuntimeTelemetrySnapshot {
             .try_into()
             .unwrap_or(u64::MAX),
     )
+}
+
+fn store_asset(
+    state: &RuntimeServerState,
+    name: String,
+    mime_type: String,
+    bytes: Bytes,
+) -> RuntimeAssetImportResponse {
+    let id = asset_id(&name, &mime_type, &bytes);
+    let kind = asset_kind(&mime_type);
+    let runtime_uri = format!("skenion-runtime://assets/{id}");
+    let directory = runtime_asset_directory();
+    if let Err(error) = fs::create_dir_all(&directory) {
+        return RuntimeAssetImportResponse {
+            ok: false,
+            asset: None,
+            diagnostics: vec![RuntimeDiagnostic::error(format!(
+                "failed to create runtime asset directory: {error}"
+            ))],
+        };
+    }
+    let path = directory.join(&id);
+    if let Err(error) = fs::write(&path, &bytes) {
+        return RuntimeAssetImportResponse {
+            ok: false,
+            asset: None,
+            diagnostics: vec![RuntimeDiagnostic::error(format!(
+                "failed to store runtime asset: {error}"
+            ))],
+        };
+    }
+    let asset = RuntimeAsset {
+        id: id.clone(),
+        name,
+        mime_type,
+        kind,
+        size_bytes: bytes.len().try_into().unwrap_or(u64::MAX),
+        runtime_uri,
+    };
+    state
+        .assets
+        .write()
+        .expect("runtime asset store lock should not be poisoned")
+        .assets
+        .insert(id, asset.clone());
+    RuntimeAssetImportResponse {
+        ok: true,
+        asset: Some(asset),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn runtime_asset_directory() -> PathBuf {
+    std::env::temp_dir().join("skenion-runtime-assets")
+}
+
+fn asset_id(name: &str, mime_type: &str, bytes: &Bytes) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    mime_type.hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("asset_{:016x}", hasher.finish())
+}
+
+fn asset_kind(mime_type: &str) -> String {
+    if mime_type.starts_with("video/") {
+        "video".to_owned()
+    } else if mime_type.starts_with("image/") {
+        "image".to_owned()
+    } else if mime_type.starts_with("audio/") {
+        "audio".to_owned()
+    } else {
+        "binary".to_owned()
+    }
 }
 
 impl RuntimeApiResponse {
@@ -852,6 +1065,9 @@ mod tests {
             "session.control.event",
             "session.control.state",
             "session.control.channels",
+            "assets.import",
+            "assets.list",
+            "assets.get",
             "session.preview.start",
             "session.render.generatedShader",
             "session.telemetry",
@@ -864,6 +1080,93 @@ mod tests {
                 "missing capability {expected}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn asset_import_list_and_get_endpoints() {
+        let app = runtime_router();
+        let boundary = "skenion-test-boundary";
+        let body = format!(
+            "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"; filename=\"clip.mov\"\r\ncontent-type: video/quicktime\r\n\r\nasset-bytes\r\n--{boundary}--\r\n"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v0/assets/import")
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        let imported = body_json(response.into_body()).await;
+        assert_eq!(imported["ok"], true);
+        assert_eq!(imported["asset"]["name"], "clip.mov");
+        assert_eq!(imported["asset"]["mimeType"], "video/quicktime");
+        assert_eq!(imported["asset"]["kind"], "video");
+        let asset_id = imported["asset"]["id"].as_str().unwrap();
+        assert!(
+            imported["asset"]["runtimeUri"]
+                .as_str()
+                .unwrap()
+                .contains(asset_id)
+        );
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v0/assets")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let listed = body_json(listed.into_body()).await;
+        assert_eq!(listed["ok"], true);
+        assert_eq!(listed["assets"].as_array().unwrap().len(), 1);
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/v0/assets/{asset_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let fetched = body_json(fetched.into_body()).await;
+        assert_eq!(fetched["ok"], true);
+        assert_eq!(fetched["asset"]["id"], asset_id);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v0/assets/missing")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let missing = body_json(missing.into_body()).await;
+        assert_eq!(missing["ok"], false);
+        assert!(
+            missing["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing")
+        );
     }
 
     #[test]
@@ -1542,6 +1845,7 @@ mod tests {
         let state = RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             started_at: std::time::Instant::now(),
         };
         let app = runtime_router_with_state(state.clone());
@@ -2010,6 +2314,7 @@ mod tests {
         runtime_router_with_state(RuntimeServerState {
             session: std::sync::Arc::new(std::sync::RwLock::new(RuntimeSession::default())),
             preview: std::sync::Arc::new(std::sync::Mutex::new(PreviewManager::dry_run())),
+            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
             started_at: std::time::Instant::now(),
         })
     }
