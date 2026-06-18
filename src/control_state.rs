@@ -6,10 +6,9 @@ use serde_json::{Value, json};
 use crate::{
     ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeDiagnostic,
     control_value::{
-        COLOR_RGBA_KIND, MESSAGE_KIND, RECEIVE_BOOL_KIND, RECEIVE_F32_KIND, RECEIVE_I32_KIND,
-        RECEIVE_RGBA_KIND, SEND_BOOL_KIND, SEND_F32_KIND, SEND_I32_KIND, SEND_RGBA_KIND,
-        STRING_KIND, TOGGLE_KIND, UI_BUTTON_KIND, UI_SLIDER_F32_KIND, UI_TOGGLE_KIND,
-        VALUE_BOOL_KIND, VALUE_F32_KIND, VALUE_I32_KIND,
+        COLOR_RGBA_KIND, COMMENT_KIND, MESSAGE_KIND, PANEL_KIND, STRING_KIND, TOGGLE_KIND,
+        UI_BUTTON_KIND, UI_SLIDER_F32_KIND, UI_TOGGLE_KIND, VALUE_BOOL_KIND, VALUE_F32_KIND,
+        VALUE_I32_KIND,
     },
 };
 
@@ -104,9 +103,6 @@ impl ControlState {
         if port_id != "value" {
             return None;
         }
-        if let Some(data_kind) = receive_data_kind(&node.kind) {
-            return Some(self.receive_value(node, data_kind));
-        }
         self.values.get(&node.id).cloned()
     }
 
@@ -142,10 +138,6 @@ impl ControlState {
             ));
         }
 
-        if let Some(data_kind) = send_data_kind(&node.kind) {
-            return self.apply_send_event(node, data_kind, request);
-        }
-
         if is_ui_control_kind(&node.kind) {
             return self.apply_ui_event(node, request);
         }
@@ -170,6 +162,12 @@ impl ControlState {
 
         match request.port_id.as_str() {
             "set" => {
+                if matches!(node.kind.as_str(), MESSAGE_KIND | COMMENT_KIND | PANEL_KIND) {
+                    let next = message_text_from_value(&request.value);
+                    self.values
+                        .insert(node.id.clone(), ControlValue::String(next));
+                    return RuntimeControlEventResponse::ok(Vec::new());
+                }
                 if let Err(diagnostic) = ensure_value_type(&request.value, &stored, &node.id) {
                     return RuntimeControlEventResponse::error(diagnostic);
                 }
@@ -177,6 +175,21 @@ impl ControlState {
                 RuntimeControlEventResponse::ok(Vec::new())
             }
             "in" => {
+                if node.kind == MESSAGE_KIND {
+                    if let Some(next) = silent_set_message(&request.value) {
+                        self.values
+                            .insert(node.id.clone(), ControlValue::String(next));
+                        return RuntimeControlEventResponse::ok(Vec::new());
+                    }
+                    return RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                        node_id: node.id.clone(),
+                        port_id: "value".to_owned(),
+                        value: stored,
+                    }]);
+                }
+                if node.kind == TOGGLE_KIND {
+                    return self.apply_toggle_event(node, "in", request.value, stored);
+                }
                 if let Err(diagnostic) = ensure_value_type(&request.value, &stored, &node.id) {
                     return RuntimeControlEventResponse::error(diagnostic);
                 }
@@ -196,19 +209,7 @@ impl ControlState {
                     ));
                 }
                 if node.kind == TOGGLE_KIND {
-                    let ControlValue::Bool(current) = stored else {
-                        return RuntimeControlEventResponse::error(format!(
-                            "node {} has non-boolean toggle state",
-                            node.id
-                        ));
-                    };
-                    let next = ControlValue::Bool(!current);
-                    self.values.insert(node.id.clone(), next.clone());
-                    return RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
-                        node_id: node.id.clone(),
-                        port_id: "value".to_owned(),
-                        value: next,
-                    }]);
+                    return self.apply_toggle_event(node, "bang", request.value, stored);
                 }
                 RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
                     node_id: node.id.clone(),
@@ -231,6 +232,7 @@ impl ControlState {
         let mut queue = response.emitted.clone();
         let mut visited_edges = 0usize;
         while let Some(emission) = queue.pop() {
+            self.publish_object_channel(&emission, graph);
             visited_edges += 1;
             if visited_edges > graph.edges.len().saturating_mul(2).max(32) {
                 return RuntimeControlEventResponse::error(
@@ -245,24 +247,23 @@ impl ControlState {
                 else {
                     continue;
                 };
-                let Some(data_kind) = send_data_kind(&target_node.kind) else {
+                if !supports_runtime_control_events(&target_node.kind) {
                     continue;
-                };
-                let send_response = self.apply_send_event(
-                    target_node,
-                    data_kind,
+                }
+                let target_response = self.apply_event_direct(
                     RuntimeControlEventRequest {
                         node_id: target_node.id.clone(),
                         port_id: edge.to.port.clone(),
                         value: emission.value.clone(),
                     },
+                    graph,
                 );
-                if !send_response.ok {
-                    return send_response;
+                if !target_response.ok {
+                    return target_response;
                 }
-                for send_emission in send_response.emitted {
-                    queue.push(send_emission.clone());
-                    response.emitted.push(send_emission);
+                for target_emission in target_response.emitted {
+                    queue.push(target_emission.clone());
+                    response.emitted.push(target_emission);
                 }
             }
         }
@@ -270,33 +271,42 @@ impl ControlState {
         response
     }
 
-    fn apply_send_event(
-        &mut self,
-        node: &GraphNode,
-        data_kind: &'static str,
-        request: RuntimeControlEventRequest,
-    ) -> RuntimeControlEventResponse {
-        if request.port_id != "in" {
-            return RuntimeControlEventResponse::error(format!(
-                "node {} does not support runtime control input port {}",
-                node.id, request.port_id
-            ));
-        }
-        if let Err(diagnostic) = ensure_data_kind_value(&request.value, data_kind, &node.id) {
-            return RuntimeControlEventResponse::error(diagnostic);
-        }
-        let Some(key) = channel_key_for_node(node, data_kind) else {
-            return RuntimeControlEventResponse::error(format!(
-                "send node {} is missing non-empty params.name",
-                node.id
-            ));
+    fn publish_object_channel(&mut self, emission: &RuntimeControlEmission, graph: &GraphDocument) {
+        let Some(source_node) = graph.nodes.iter().find(|node| node.id == emission.node_id) else {
+            return;
         };
-        self.channels.insert(key, request.value.clone());
-        RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
-            node_id: node.id.clone(),
-            port_id: "in".to_owned(),
-            value: request.value,
-        }])
+        let data_kind = data_kind_for_control_value(&emission.value);
+        let Some(channel_name) = read_named_param(source_node, "sendName") else {
+            return;
+        };
+        let key = format!("{data_kind}:{channel_name}");
+        self.channels.insert(key, emission.value.clone());
+        self.apply_receive_name_updates(
+            data_kind,
+            &channel_name,
+            &emission.value,
+            &emission.node_id,
+            graph,
+        );
+    }
+
+    fn apply_receive_name_updates(
+        &mut self,
+        data_kind: &'static str,
+        channel_name: &str,
+        value: &ControlValue,
+        source_node_id: &str,
+        graph: &GraphDocument,
+    ) {
+        for node in graph.nodes.iter().filter(|node| node.id != source_node_id) {
+            if read_named_param(node, "receiveName").as_deref() != Some(channel_name) {
+                continue;
+            }
+            if !object_accepts_data_kind(node, data_kind) {
+                continue;
+            }
+            self.values.insert(node.id.clone(), value.clone());
+        }
     }
 
     fn apply_ui_event(
@@ -306,15 +316,8 @@ impl ControlState {
     ) -> RuntimeControlEventResponse {
         match node.kind.as_str() {
             UI_BUTTON_KIND => {
-                if request.port_id != "bang" {
+                if request.port_id != "in" && request.port_id != "bang" {
                     return unsupported_runtime_control_port(node, &request.port_id);
-                }
-                if !matches!(request.value, ControlValue::Bang) {
-                    return RuntimeControlEventResponse::error(format!(
-                        "control input {}.bang expects bang, got {}",
-                        node.id,
-                        request.value.kind_label()
-                    ));
                 }
                 RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
                     node_id: node.id.clone(),
@@ -322,56 +325,15 @@ impl ControlState {
                     value: ControlValue::Bang,
                 }])
             }
-            UI_SLIDER_F32_KIND => {
-                if request.port_id != "value" {
-                    return unsupported_runtime_control_port(node, &request.port_id);
-                }
-                let ControlValue::F32(_) = request.value else {
+            UI_SLIDER_F32_KIND => self.apply_slider_event(node, request),
+            UI_TOGGLE_KIND => {
+                let Some(stored) = self.values.get(&node.id).cloned() else {
                     return RuntimeControlEventResponse::error(format!(
-                        "control input {}.value expects f32, got {}",
-                        node.id,
-                        request.value.kind_label()
+                        "node {} has no runtime control state",
+                        node.id
                     ));
                 };
-                self.values.insert(node.id.clone(), request.value.clone());
-                RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
-                    node_id: node.id.clone(),
-                    port_id: "value".to_owned(),
-                    value: request.value,
-                }])
-            }
-            UI_TOGGLE_KIND => {
-                if request.port_id != "value" {
-                    return unsupported_runtime_control_port(node, &request.port_id);
-                }
-                let next = match request.value {
-                    ControlValue::Bang => {
-                        let stored = self.values.get(&node.id).cloned().ok_or_else(|| {
-                            format!("node {} has no runtime control state", node.id)
-                        });
-                        let Ok(ControlValue::Bool(current)) = stored else {
-                            return RuntimeControlEventResponse::error(format!(
-                                "node {} has non-boolean toggle state",
-                                node.id
-                            ));
-                        };
-                        ControlValue::Bool(!current)
-                    }
-                    ControlValue::Bool(value) => ControlValue::Bool(value),
-                    value => {
-                        return RuntimeControlEventResponse::error(format!(
-                            "control input {}.value expects bool or bang, got {}",
-                            node.id,
-                            value.kind_label()
-                        ));
-                    }
-                };
-                self.values.insert(node.id.clone(), next.clone());
-                RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
-                    node_id: node.id.clone(),
-                    port_id: "value".to_owned(),
-                    value: next,
-                }])
+                self.apply_toggle_event(node, &request.port_id, request.value, stored)
             }
             _ => RuntimeControlEventResponse::error(format!(
                 "node {} ({}) does not support runtime control events",
@@ -380,10 +342,94 @@ impl ControlState {
         }
     }
 
-    fn receive_value(&self, node: &GraphNode, data_kind: &'static str) -> ControlValue {
-        channel_key_for_node(node, data_kind)
-            .and_then(|key| self.channels.get(&key).cloned())
-            .unwrap_or_else(|| default_for_data_kind(node, data_kind))
+    fn apply_slider_event(
+        &mut self,
+        node: &GraphNode,
+        request: RuntimeControlEventRequest,
+    ) -> RuntimeControlEventResponse {
+        match request.port_id.as_str() {
+            "set" => {
+                if !matches!(&request.value, ControlValue::F32(_)) {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control input {}.set expects f32, got {}",
+                        node.id,
+                        request.value.kind_label()
+                    ));
+                }
+                self.values.insert(node.id.clone(), request.value);
+                RuntimeControlEventResponse::ok(Vec::new())
+            }
+            "in" | "value" => {
+                if !matches!(&request.value, ControlValue::F32(_)) {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control input {}.{} expects f32, got {}",
+                        node.id,
+                        request.port_id,
+                        request.value.kind_label()
+                    ));
+                }
+                self.values.insert(node.id.clone(), request.value.clone());
+                RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                    node_id: node.id.clone(),
+                    port_id: "value".to_owned(),
+                    value: request.value,
+                }])
+            }
+            "bang" => {
+                if !matches!(request.value, ControlValue::Bang) {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control input {}.bang expects bang, got {}",
+                        node.id,
+                        request.value.kind_label()
+                    ));
+                }
+                let Some(value) = self.values.get(&node.id).cloned() else {
+                    return RuntimeControlEventResponse::error(format!(
+                        "node {} has no runtime control state",
+                        node.id
+                    ));
+                };
+                RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                    node_id: node.id.clone(),
+                    port_id: "value".to_owned(),
+                    value,
+                }])
+            }
+            _ => unsupported_runtime_control_port(node, &request.port_id),
+        }
+    }
+
+    fn apply_toggle_event(
+        &mut self,
+        node: &GraphNode,
+        port_id: &str,
+        value: ControlValue,
+        stored: ControlValue,
+    ) -> RuntimeControlEventResponse {
+        let ControlValue::Bool(current) = stored else {
+            return RuntimeControlEventResponse::error(format!(
+                "node {} has non-boolean toggle state",
+                node.id
+            ));
+        };
+        let silent = port_id == "set";
+        let Some(next_bool) = coerce_toggle_input(value, current) else {
+            return RuntimeControlEventResponse::error(format!(
+                "control input {}.{} expects bang, bool, 0/1, or on/off",
+                node.id, port_id
+            ));
+        };
+        let next = ControlValue::Bool(next_bool);
+        self.values.insert(node.id.clone(), next.clone());
+        if silent {
+            RuntimeControlEventResponse::ok(Vec::new())
+        } else {
+            RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
+                node_id: node.id.clone(),
+                port_id: "value".to_owned(),
+                value: next,
+            }])
+        }
     }
 }
 
@@ -425,11 +471,13 @@ pub fn is_control_value_kind(kind: &str) -> bool {
             | STRING_KIND
             | TOGGLE_KIND
             | MESSAGE_KIND
+            | COMMENT_KIND
+            | PANEL_KIND
     )
 }
 
 pub fn supports_runtime_control_events(kind: &str) -> bool {
-    is_control_value_kind(kind) || send_data_kind(kind).is_some() || is_ui_control_kind(kind)
+    is_control_value_kind(kind) || is_ui_control_kind(kind)
 }
 
 fn is_ui_control_kind(kind: &str) -> bool {
@@ -497,87 +545,89 @@ fn unsupported_runtime_control_port(
     ))
 }
 
-fn send_data_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        SEND_F32_KIND => Some("number.f32"),
-        SEND_I32_KIND => Some("number.i32"),
-        SEND_BOOL_KIND => Some("boolean"),
-        SEND_RGBA_KIND => Some("color.rgba"),
-        _ => None,
-    }
-}
-
-fn receive_data_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        RECEIVE_F32_KIND => Some("number.f32"),
-        RECEIVE_I32_KIND => Some("number.i32"),
-        RECEIVE_BOOL_KIND => Some("boolean"),
-        RECEIVE_RGBA_KIND => Some("color.rgba"),
-        _ => None,
-    }
-}
-
-fn channel_key_for_node(node: &GraphNode, data_kind: &'static str) -> Option<String> {
-    let name = node.params.get("name")?.as_str()?.trim();
-    if name.is_empty() {
+fn read_named_param(node: &GraphNode, key: &str) -> Option<String> {
+    let value = node.params.get(key)?.as_str()?.trim();
+    if value.is_empty() {
         return None;
     }
-    Some(format!("{data_kind}:{name}"))
+    Some(value.to_owned())
 }
 
-fn default_for_data_kind(node: &GraphNode, data_kind: &'static str) -> ControlValue {
-    let value = node.params.get("default");
-    match data_kind {
-        "number.f32" => ControlValue::F32(value.and_then(Value::as_f64).unwrap_or(0.0)),
-        "number.i32" => ControlValue::I32(value.and_then(Value::as_i64).unwrap_or(0)),
-        "boolean" => ControlValue::Bool(value.and_then(Value::as_bool).unwrap_or(false)),
-        "color.rgba" => ControlValue::Rgba(
-            value
-                .and_then(read_rgba_value)
-                .unwrap_or([1.0, 1.0, 1.0, 1.0]),
-        ),
-        _ => ControlValue::Bang,
+fn data_kind_for_control_value(value: &ControlValue) -> &'static str {
+    match value {
+        ControlValue::F32(_) => "number.f32",
+        ControlValue::I32(_) => "number.i32",
+        ControlValue::Bool(_) => "boolean",
+        ControlValue::String(_) => "string",
+        ControlValue::Rgba(_) => "color.rgba",
+        ControlValue::Bang => "event.bang",
     }
 }
 
-fn ensure_data_kind_value(
-    value: &ControlValue,
-    data_kind: &'static str,
-    node_id: &str,
-) -> Result<(), String> {
-    let ok = matches!(
-        (data_kind, value),
-        ("number.f32", ControlValue::F32(_))
-            | ("number.i32", ControlValue::I32(_))
-            | ("boolean", ControlValue::Bool(_))
-            | ("color.rgba", ControlValue::Rgba(_))
-    );
-    if ok {
-        return Ok(());
-    }
-    Err(format!(
-        "control input {node_id} expects {}, got {}",
-        data_kind_label(data_kind),
-        value.kind_label()
-    ))
-}
-
-fn data_kind_label(data_kind: &'static str) -> &'static str {
-    match data_kind {
-        "number.f32" => "f32",
-        "number.i32" => "i32",
-        "boolean" => "bool",
-        "color.rgba" => "rgba",
-        _ => data_kind,
+fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
+    match node.kind.as_str() {
+        VALUE_F32_KIND | UI_SLIDER_F32_KIND => data_kind == "number.f32",
+        VALUE_I32_KIND => data_kind == "number.i32",
+        VALUE_BOOL_KIND | TOGGLE_KIND | UI_TOGGLE_KIND => data_kind == "boolean",
+        COLOR_RGBA_KIND => data_kind == "color.rgba",
+        STRING_KIND | MESSAGE_KIND | COMMENT_KIND | PANEL_KIND => data_kind == "string",
+        UI_BUTTON_KIND => data_kind == "event.bang",
+        _ => false,
     }
 }
 
-fn read_rgba_value(value: &Value) -> Option<[f64; 4]> {
-    let values = value.as_array()?;
-    let [r, g, b, a] = values.as_slice() else {
+fn message_text_from_value(value: &ControlValue) -> String {
+    match value {
+        ControlValue::String(value) => value.strip_prefix("set ").unwrap_or(value).to_owned(),
+        ControlValue::F32(value) => value.to_string(),
+        ControlValue::I32(value) => value.to_string(),
+        ControlValue::Bool(value) => {
+            if *value {
+                "on".to_owned()
+            } else {
+                "off".to_owned()
+            }
+        }
+        ControlValue::Rgba(value) => {
+            format!("rgba {} {} {} {}", value[0], value[1], value[2], value[3])
+        }
+        ControlValue::Bang => "bang".to_owned(),
+    }
+}
+
+fn silent_set_message(value: &ControlValue) -> Option<String> {
+    let ControlValue::String(value) = value else {
         return None;
     };
-    Some([r.as_f64()?, g.as_f64()?, b.as_f64()?, a.as_f64()?])
+    value.strip_prefix("set ").map(str::to_owned)
+}
+
+fn coerce_toggle_input(value: ControlValue, current: bool) -> Option<bool> {
+    match value {
+        ControlValue::Bang => Some(!current),
+        ControlValue::Bool(value) => Some(value),
+        ControlValue::I32(value) => match value {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        },
+        ControlValue::F32(0.0) => Some(false),
+        ControlValue::F32(1.0) => Some(true),
+        ControlValue::String(value) => {
+            let normalized = value
+                .strip_prefix("set ")
+                .unwrap_or(&value)
+                .trim()
+                .to_ascii_lowercase();
+            match normalized.as_str() {
+                "0" | "off" | "false" => Some(false),
+                "1" | "on" | "true" => Some(true),
+                "bang" => Some(!current),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -743,6 +793,56 @@ mod tests {
     }
 
     #[test]
+    fn toggle_accepts_on_off_and_set_messages() {
+        let graph = graph(vec![
+            value_node("toggle_1", UI_TOGGLE_KIND, json!(false)),
+            value_node("core_toggle_1", TOGGLE_KIND, json!(false)),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let on = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "toggle_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::String("on".to_owned()),
+            },
+            &graph,
+        );
+        assert!(on.ok);
+        assert_eq!(on.emitted[0].value, ControlValue::Bool(true));
+
+        let set_off = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "toggle_1".to_owned(),
+                port_id: "set".to_owned(),
+                value: ControlValue::String("set off".to_owned()),
+            },
+            &graph,
+        );
+        assert!(set_off.ok);
+        assert!(set_off.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("toggle_1"),
+            Some(&ControlValue::Bool(false))
+        );
+
+        let core_toggle = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "core_toggle_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::String("set on".to_owned()),
+            },
+            &graph,
+        );
+        assert!(core_toggle.ok);
+        assert_eq!(core_toggle.emitted[0].value, ControlValue::Bool(true));
+        assert_eq!(
+            state.value_for_node("core_toggle_1"),
+            Some(&ControlValue::Bool(true))
+        );
+    }
+
+    #[test]
     fn string_and_message_controls_emit_strings() {
         let graph = graph(vec![
             value_node("string_1", STRING_KIND, json!("ready")),
@@ -781,67 +881,227 @@ mod tests {
                 value: ControlValue::String("perform".to_owned())
             }]
         );
+
+        let set_response = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "message_1".to_owned(),
+                port_id: "set".to_owned(),
+                value: ControlValue::String("set updated".to_owned()),
+            },
+            &graph,
+        );
+        assert!(set_response.ok);
+        assert!(set_response.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("message_1"),
+            Some(&ControlValue::String("updated".to_owned()))
+        );
+
+        let silent_in = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "message_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::String("set queued".to_owned()),
+            },
+            &graph,
+        );
+        assert!(silent_in.ok);
+        assert!(silent_in.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("message_1"),
+            Some(&ControlValue::String("queued".to_owned()))
+        );
+
+        let emit_in = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "message_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::Bang,
+            },
+            &graph,
+        );
+        assert!(emit_in.ok);
+        assert_eq!(
+            emit_in.emitted,
+            vec![RuntimeControlEmission {
+                node_id: "message_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::String("queued".to_owned())
+            }]
+        );
     }
 
     #[test]
-    fn send_updates_typed_channel() {
-        let graph = graph(vec![send_node(
-            "send_1",
-            SEND_F32_KIND,
-            "number.f32",
-            "speed",
-        )]);
+    fn object_send_name_updates_channel_and_receive_name_state() {
+        let mut sender = value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("speed"));
+        let mut receiver = value_node("value_1", VALUE_F32_KIND, json!(0.0));
+        receiver
+            .params
+            .insert("receiveName".to_owned(), json!("speed"));
+        let routing_graph = graph(vec![sender, receiver]);
+        let mut state = ControlState::from_graph(&routing_graph);
+
+        let response = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::F32(1.25),
+            },
+            &routing_graph,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            state.channels.get("number.f32:speed"),
+            Some(&ControlValue::F32(1.25))
+        );
+        assert_eq!(
+            state.value_for_node("value_1"),
+            Some(&ControlValue::F32(1.25))
+        );
+
+        let mut bang_sender = ui_button_node("button_1");
+        bang_sender
+            .params
+            .insert("sendName".to_owned(), json!("go"));
+        let graph = graph(vec![bang_sender]);
+        let mut state = ControlState::from_graph(&graph);
+        let bang = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "button_1".to_owned(),
+                port_id: "bang".to_owned(),
+                value: ControlValue::Bang,
+            },
+            &graph,
+        );
+        assert!(bang.ok);
+        assert_eq!(
+            state.channels.get("event.bang:go"),
+            Some(&ControlValue::Bang)
+        );
+    }
+
+    #[test]
+    fn object_channel_helpers_skip_missing_sources_empty_names_and_mismatched_receivers() {
+        let mut sender = value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("   "));
+        let mut wrong_receiver = value_node("bool_1", VALUE_BOOL_KIND, json!(false));
+        wrong_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("speed"));
+        let empty_name_graph = graph(vec![sender, wrong_receiver]);
+        let mut state = ControlState::from_graph(&empty_name_graph);
+
+        state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "missing".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.0),
+            },
+            &empty_name_graph,
+        );
+        state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "slider_1".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.0),
+            },
+            &empty_name_graph,
+        );
+        assert!(state.channels.is_empty());
+        assert_eq!(
+            state.value_for_node("bool_1"),
+            Some(&ControlValue::Bool(false))
+        );
+
+        let mut sender = value_node("slider_2", UI_SLIDER_F32_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("speed"));
+        let mut wrong_receiver = value_node("bool_2", VALUE_BOOL_KIND, json!(false));
+        wrong_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("speed"));
+        let mismatched_receiver_graph = graph(vec![sender, wrong_receiver]);
+        let mut mismatched_state = ControlState::from_graph(&mismatched_receiver_graph);
+        mismatched_state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "slider_2".to_owned(),
+                port_id: "value".to_owned(),
+                value: ControlValue::F32(1.0),
+            },
+            &mismatched_receiver_graph,
+        );
+        assert_eq!(
+            mismatched_state.value_for_node("bool_2"),
+            Some(&ControlValue::Bool(false))
+        );
+
+        assert_eq!(
+            data_kind_for_control_value(&ControlValue::I32(1)),
+            "number.i32"
+        );
+        assert_eq!(
+            data_kind_for_control_value(&ControlValue::Rgba([1.0, 0.0, 0.0, 1.0])),
+            "color.rgba"
+        );
+        assert!(object_accepts_data_kind(
+            &value_node("i32_1", VALUE_I32_KIND, json!(0)),
+            "number.i32"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("rgba_1", COLOR_RGBA_KIND, json!([1.0, 0.0, 0.0, 1.0])),
+            "color.rgba"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("message_1", MESSAGE_KIND, json!("go")),
+            "string"
+        ));
+        assert!(object_accepts_data_kind(
+            &ui_button_node("button_1"),
+            "event.bang"
+        ));
+        assert!(!object_accepts_data_kind(
+            &value_node("target_1", "core.target", json!(null)),
+            "string"
+        ));
+    }
+
+    #[test]
+    fn object_set_does_not_update_send_name_channel() {
+        let mut node = value_node("value_1", VALUE_F32_KIND, json!(0.25));
+        node.params.insert("sendName".to_owned(), json!("speed"));
+        let graph = graph(vec![node]);
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(
             RuntimeControlEventRequest {
-                node_id: "send_1".to_owned(),
-                port_id: "in".to_owned(),
-                value: ControlValue::F32(1.5),
+                node_id: "value_1".to_owned(),
+                port_id: "set".to_owned(),
+                value: ControlValue::F32(2.0),
             },
             &graph,
         );
 
         assert!(response.ok);
+        assert!(response.emitted.is_empty());
         assert_eq!(
-            response.emitted,
-            vec![RuntimeControlEmission {
-                node_id: "send_1".to_owned(),
-                port_id: "in".to_owned(),
-                value: ControlValue::F32(1.5)
-            }]
+            state.value_for_node("value_1"),
+            Some(&ControlValue::F32(2.0))
         );
-        assert_eq!(
-            state.channels.get("number.f32:speed"),
-            Some(&ControlValue::F32(1.5))
-        );
-
-        let wrong_type = state.apply_event(
-            RuntimeControlEventRequest {
-                node_id: "send_1".to_owned(),
-                port_id: "in".to_owned(),
-                value: ControlValue::Bool(true),
-            },
-            &graph,
-        );
-        assert!(!wrong_type.ok);
-        assert_eq!(
-            state.channels.get("number.f32:speed"),
-            Some(&ControlValue::F32(1.5))
-        );
+        assert!(state.channels.is_empty());
     }
 
     #[test]
-    fn ui_panel_emissions_route_to_connected_send_channels() {
+    fn object_edges_propagate_to_connected_control_inputs() {
         let mut graph = graph(vec![
             value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
-            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
-            value_node("toggle_1", UI_TOGGLE_KIND, json!(true)),
-            send_node("send_enabled", SEND_BOOL_KIND, "boolean", "enabled"),
+            value_node("value_1", VALUE_F32_KIND, json!(0.0)),
+            value_node("message_1", MESSAGE_KIND, json!("go")),
+            ui_button_node("button_1"),
         ]);
         graph.edges = vec![
-            edge("slider_1", "value", "send_speed", "in"),
-            edge("toggle_1", "value", "send_enabled", "in"),
+            edge("slider_1", "value", "value_1", "in"),
+            edge("button_1", "bang", "message_1", "bang"),
         ];
         let mut state = ControlState::from_graph(&graph);
 
@@ -856,34 +1116,44 @@ mod tests {
         assert!(slider.ok);
         assert_eq!(slider.emitted.len(), 2);
         assert_eq!(
-            state.channels.get("number.f32:speed"),
+            state.value_for_node("value_1"),
             Some(&ControlValue::F32(1.5))
         );
 
-        let toggle = state.apply_event(
+        let button = state.apply_event(
             RuntimeControlEventRequest {
-                node_id: "toggle_1".to_owned(),
-                port_id: "value".to_owned(),
+                node_id: "button_1".to_owned(),
+                port_id: "in".to_owned(),
                 value: ControlValue::Bang,
             },
             &graph,
         );
-        assert!(toggle.ok);
-        assert_eq!(toggle.emitted.len(), 2);
+        assert!(button.ok);
         assert_eq!(
-            state.channels.get("boolean:enabled"),
-            Some(&ControlValue::Bool(false))
+            button.emitted,
+            vec![
+                RuntimeControlEmission {
+                    node_id: "button_1".to_owned(),
+                    port_id: "bang".to_owned(),
+                    value: ControlValue::Bang
+                },
+                RuntimeControlEmission {
+                    node_id: "message_1".to_owned(),
+                    port_id: "value".to_owned(),
+                    value: ControlValue::String("go".to_owned())
+                }
+            ]
         );
     }
 
     #[test]
-    fn ui_panel_propagation_ignores_edges_to_missing_targets() {
+    fn object_edge_propagation_ignores_edges_to_missing_targets() {
         let mut graph = graph(vec![value_node(
             "slider_1",
             UI_SLIDER_F32_KIND,
             json!(0.25),
         )]);
-        graph.edges = vec![edge("slider_1", "value", "missing_send", "in")];
+        graph.edges = vec![edge("slider_1", "value", "missing", "in")];
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(
@@ -901,12 +1171,12 @@ mod tests {
     }
 
     #[test]
-    fn ui_panel_propagation_rejects_invalid_send_target_port() {
+    fn object_edge_propagation_rejects_invalid_target_port() {
         let mut graph = graph(vec![
             value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
-            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
+            value_node("value_1", VALUE_F32_KIND, json!(0.0)),
         ]);
-        graph.edges = vec![edge("slider_1", "value", "send_speed", "set")];
+        graph.edges = vec![edge("slider_1", "value", "value_1", "missing")];
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(
@@ -919,7 +1189,7 @@ mod tests {
         );
 
         assert!(!response.ok);
-        assert!(response.diagnostics[0].message.contains("port set"));
+        assert!(response.diagnostics[0].message.contains("port missing"));
         assert!(state.channels.is_empty());
     }
 
@@ -927,11 +1197,11 @@ mod tests {
     fn ui_panel_propagation_stops_at_runtime_safety_limit() {
         let mut graph = graph(vec![
             value_node("slider_1", UI_SLIDER_F32_KIND, json!(0.25)),
-            send_node("send_speed", SEND_F32_KIND, "number.f32", "speed"),
+            value_node("value_1", VALUE_F32_KIND, json!(0.0)),
         ]);
         graph.edges = vec![
-            edge("slider_1", "value", "send_speed", "in"),
-            edge("send_speed", "in", "send_speed", "in"),
+            edge("slider_1", "value", "value_1", "in"),
+            edge("value_1", "value", "value_1", "in"),
         ];
         let mut state = ControlState::from_graph(&graph);
 
@@ -949,178 +1219,6 @@ mod tests {
             response.diagnostics[0]
                 .message
                 .contains("runtime safety limit")
-        );
-    }
-
-    #[test]
-    fn send_rejects_missing_name_wrong_port_and_routes_all_typed_channels() {
-        let mut missing_name = send_node("send_missing", SEND_F32_KIND, "number.f32", " ");
-        missing_name.params.insert("name".to_owned(), json!(" "));
-        let graph = graph(vec![
-            send_node("send_i32", SEND_I32_KIND, "number.i32", "iterations"),
-            send_node("send_bool", SEND_BOOL_KIND, "boolean", "enabled"),
-            send_node("send_rgba", SEND_RGBA_KIND, "color.rgba", "tint"),
-            missing_name,
-        ]);
-        let mut state = ControlState::from_graph(&graph);
-
-        let wrong_port = state.apply_event(
-            RuntimeControlEventRequest {
-                node_id: "send_i32".to_owned(),
-                port_id: "set".to_owned(),
-                value: ControlValue::I32(8),
-            },
-            &graph,
-        );
-        assert!(!wrong_port.ok);
-        assert!(state.channels.is_empty());
-
-        for (node_id, value, channel) in [
-            (
-                "send_i32",
-                ControlValue::I32(8),
-                ("number.i32:iterations", ControlValue::I32(8)),
-            ),
-            (
-                "send_bool",
-                ControlValue::Bool(true),
-                ("boolean:enabled", ControlValue::Bool(true)),
-            ),
-            (
-                "send_rgba",
-                ControlValue::Rgba([0.2, 0.4, 0.6, 1.0]),
-                ("color.rgba:tint", ControlValue::Rgba([0.2, 0.4, 0.6, 1.0])),
-            ),
-        ] {
-            let response = state.apply_event(
-                RuntimeControlEventRequest {
-                    node_id: node_id.to_owned(),
-                    port_id: "in".to_owned(),
-                    value,
-                },
-                &graph,
-            );
-            assert!(response.ok);
-            assert_eq!(state.channels.get(channel.0), Some(&channel.1));
-        }
-
-        let missing_name = state.apply_event(
-            RuntimeControlEventRequest {
-                node_id: "send_missing".to_owned(),
-                port_id: "in".to_owned(),
-                value: ControlValue::F32(1.0),
-            },
-            &graph,
-        );
-        assert!(!missing_name.ok);
-        assert!(
-            missing_name.diagnostics[0]
-                .message
-                .contains("missing non-empty params.name")
-        );
-    }
-
-    #[test]
-    fn receive_resolves_channel_or_default() {
-        let graph = graph(vec![receive_node(
-            "receive_1",
-            RECEIVE_F32_KIND,
-            "number.f32",
-            "speed",
-            json!(0.25),
-        )]);
-        let mut state = ControlState::from_graph(&graph);
-        let node = &graph.nodes[0];
-
-        assert_eq!(
-            state.output_value_for_node(node, "value"),
-            Some(ControlValue::F32(0.25))
-        );
-
-        state
-            .channels
-            .insert("number.f32:speed".to_owned(), ControlValue::F32(1.75));
-
-        assert_eq!(
-            state.output_value_for_node(node, "value"),
-            Some(ControlValue::F32(1.75))
-        );
-    }
-
-    #[test]
-    fn receive_resolves_all_default_types_and_non_value_ports() {
-        let graph = graph(vec![
-            receive_node(
-                "receive_i32",
-                RECEIVE_I32_KIND,
-                "number.i32",
-                "iterations",
-                json!(8),
-            ),
-            receive_node(
-                "receive_bool",
-                RECEIVE_BOOL_KIND,
-                "boolean",
-                "enabled",
-                json!(true),
-            ),
-            receive_node(
-                "receive_rgba",
-                RECEIVE_RGBA_KIND,
-                "color.rgba",
-                "tint",
-                json!([0.2, 0.4, 0.6, 1.0]),
-            ),
-            receive_node(
-                "receive_bad_rgba",
-                RECEIVE_RGBA_KIND,
-                "color.rgba",
-                "",
-                json!([0.2, 0.4]),
-            ),
-        ]);
-        let mut state = ControlState::from_graph(&graph);
-
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[0], "value"),
-            Some(ControlValue::I32(8))
-        );
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[1], "value"),
-            Some(ControlValue::Bool(true))
-        );
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[2], "value"),
-            Some(ControlValue::Rgba([0.2, 0.4, 0.6, 1.0]))
-        );
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[3], "value"),
-            Some(ControlValue::Rgba([1.0, 1.0, 1.0, 1.0]))
-        );
-        assert_eq!(state.output_value_for_node(&graph.nodes[0], "bang"), None);
-
-        state
-            .channels
-            .insert("number.i32:iterations".to_owned(), ControlValue::I32(12));
-        state
-            .channels
-            .insert("boolean:enabled".to_owned(), ControlValue::Bool(false));
-        state.channels.insert(
-            "color.rgba:tint".to_owned(),
-            ControlValue::Rgba([1.0, 0.0, 0.0, 1.0]),
-        );
-
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[0], "value"),
-            Some(ControlValue::I32(12))
-        );
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[1], "value"),
-            Some(ControlValue::Bool(false))
-        );
-        assert_eq!(
-            state.output_value_for_node(&graph.nodes[2], "value"),
-            Some(ControlValue::Rgba([1.0, 0.0, 0.0, 1.0]))
         );
     }
 
@@ -1191,14 +1289,9 @@ mod tests {
                 value: ControlValue::Bang,
             },
             RuntimeControlEventRequest {
-                node_id: "button_1".to_owned(),
-                port_id: "bang".to_owned(),
-                value: ControlValue::Bool(true),
-            },
-            RuntimeControlEventRequest {
                 node_id: "slider_1".to_owned(),
                 port_id: "set".to_owned(),
-                value: ControlValue::F32(1.0),
+                value: ControlValue::Bool(true),
             },
             RuntimeControlEventRequest {
                 node_id: "slider_1".to_owned(),
@@ -1207,19 +1300,87 @@ mod tests {
             },
             RuntimeControlEventRequest {
                 node_id: "toggle_1".to_owned(),
-                port_id: "set".to_owned(),
-                value: ControlValue::Bool(true),
-            },
-            RuntimeControlEventRequest {
-                node_id: "toggle_1".to_owned(),
                 port_id: "value".to_owned(),
-                value: ControlValue::F32(1.0),
+                value: ControlValue::F32(2.0),
             },
         ] {
             let response = state.apply_event(request, &graph);
             assert!(!response.ok);
             assert!(response.emitted.is_empty());
         }
+
+        let any_button = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "button_1".to_owned(),
+                port_id: "in".to_owned(),
+                value: ControlValue::Bool(true),
+            },
+            &graph,
+        );
+        assert!(any_button.ok);
+        assert_eq!(any_button.emitted[0].value, ControlValue::Bang);
+
+        let slider_set = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "set".to_owned(),
+                value: ControlValue::F32(1.0),
+            },
+            &graph,
+        );
+        assert!(slider_set.ok);
+        assert!(slider_set.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("slider_1"),
+            Some(&ControlValue::F32(1.0))
+        );
+
+        let slider_bang = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "bang".to_owned(),
+                value: ControlValue::Bang,
+            },
+            &graph,
+        );
+        assert!(slider_bang.ok);
+        assert_eq!(slider_bang.emitted[0].value, ControlValue::F32(1.0));
+
+        let slider_bad_bang = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "bang".to_owned(),
+                value: ControlValue::Bool(true),
+            },
+            &graph,
+        );
+        assert!(!slider_bad_bang.ok);
+
+        let slider_other = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "other".to_owned(),
+                value: ControlValue::F32(1.0),
+            },
+            &graph,
+        );
+        assert!(!slider_other.ok);
+
+        state.values.remove("slider_1");
+        let slider_missing_state = state.apply_event(
+            RuntimeControlEventRequest {
+                node_id: "slider_1".to_owned(),
+                port_id: "bang".to_owned(),
+                value: ControlValue::Bang,
+            },
+            &graph,
+        );
+        assert!(!slider_missing_state.ok);
+        assert!(
+            slider_missing_state.diagnostics[0]
+                .message
+                .contains("has no runtime control state")
+        );
 
         let bool_toggle = state.apply_event(
             RuntimeControlEventRequest {
@@ -1248,7 +1409,7 @@ mod tests {
         assert!(
             missing_state.diagnostics[0]
                 .message
-                .contains("non-boolean toggle state")
+                .contains("has no runtime control state")
         );
     }
 
@@ -1292,18 +1453,39 @@ mod tests {
             id: "value".to_owned(),
         };
 
-        assert!(supports_runtime_control_events(SEND_RGBA_KIND));
         assert!(supports_runtime_control_events(UI_BUTTON_KIND));
         assert!(!supports_runtime_control_events("core.target"));
-        assert_eq!(data_kind_label("custom.kind"), "custom.kind");
-        assert_eq!(
-            default_for_data_kind(&node, "custom.kind"),
-            ControlValue::Bang
-        );
         assert_eq!(
             ControlState::from_graph(&graph(vec![node.clone()]))
                 .output_value_for_node(&node, "value",),
             Some(ControlValue::F32(0.5))
+        );
+        assert_eq!(
+            ControlState::from_graph(&graph(vec![node.clone()]))
+                .output_value_for_node(&node, "other",),
+            None
+        );
+
+        assert_eq!(message_text_from_value(&ControlValue::F32(1.25)), "1.25");
+        assert_eq!(message_text_from_value(&ControlValue::I32(7)), "7");
+        assert_eq!(message_text_from_value(&ControlValue::Bool(true)), "on");
+        assert_eq!(message_text_from_value(&ControlValue::Bool(false)), "off");
+        assert_eq!(
+            message_text_from_value(&ControlValue::Rgba([1.0, 0.5, 0.0, 1.0])),
+            "rgba 1 0.5 0 1"
+        );
+        assert_eq!(message_text_from_value(&ControlValue::Bang), "bang");
+        assert_eq!(silent_set_message(&ControlValue::Bang), None);
+        assert_eq!(coerce_toggle_input(ControlValue::I32(0), true), Some(false));
+        assert_eq!(coerce_toggle_input(ControlValue::I32(1), false), Some(true));
+        assert_eq!(coerce_toggle_input(ControlValue::I32(2), false), None);
+        assert_eq!(
+            coerce_toggle_input(ControlValue::String("bang".to_owned()), false),
+            Some(true)
+        );
+        assert_eq!(
+            coerce_toggle_input(ControlValue::String("maybe".to_owned()), false),
+            None
         );
 
         assert_eq!(
@@ -1497,20 +1679,8 @@ mod tests {
             COLOR_RGBA_KIND => stored_value_ports("color.rgba"),
             STRING_KIND => stored_value_ports("string"),
             MESSAGE_KIND => message_ports(),
-            UI_SLIDER_F32_KIND => vec![port(
-                "value",
-                PortDirection::Output,
-                DataFlow::Value,
-                "number.f32",
-                None,
-            )],
-            UI_TOGGLE_KIND => vec![port(
-                "value",
-                PortDirection::Output,
-                DataFlow::Value,
-                "boolean",
-                None,
-            )],
+            UI_SLIDER_F32_KIND => stored_value_ports("number.f32"),
+            UI_TOGGLE_KIND => ui_toggle_ports(),
             _ => Vec::new(),
         };
         GraphNode {
@@ -1522,71 +1692,28 @@ mod tests {
         }
     }
 
-    fn send_node(id: &str, kind: &str, data_kind: &str, name: &str) -> GraphNode {
-        let mut params = Map::new();
-        params.insert("name".to_owned(), json!(name));
-        GraphNode {
-            id: id.to_owned(),
-            kind: kind.to_owned(),
-            kind_version: "0.1.0".to_owned(),
-            params,
-            ports: vec![port(
-                "in",
-                PortDirection::Input,
-                DataFlow::Value,
-                data_kind,
-                Some(PortActivation::Trigger),
-            )],
-        }
-    }
-
-    fn receive_node(
-        id: &str,
-        kind: &str,
-        data_kind: &str,
-        name: &str,
-        default: serde_json::Value,
-    ) -> GraphNode {
-        let mut params = Map::new();
-        params.insert("name".to_owned(), json!(name));
-        params.insert("default".to_owned(), default);
-        GraphNode {
-            id: id.to_owned(),
-            kind: kind.to_owned(),
-            kind_version: "0.1.0".to_owned(),
-            params,
-            ports: vec![
-                port(
-                    "bang",
-                    PortDirection::Input,
-                    DataFlow::Event,
-                    "event.bang",
-                    Some(PortActivation::Trigger),
-                ),
-                port(
-                    "value",
-                    PortDirection::Output,
-                    DataFlow::Value,
-                    data_kind,
-                    None,
-                ),
-            ],
-        }
-    }
-
     fn ui_button_node(id: &str) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
             kind: UI_BUTTON_KIND.to_owned(),
             kind_version: "0.1.0".to_owned(),
             params: Map::new(),
-            ports: vec![port(
-                "bang",
-                PortDirection::Output,
-                DataFlow::Event,
-                "event.bang",
-                None,
-            )],
+            ports: vec![
+                port(
+                    "in",
+                    PortDirection::Input,
+                    DataFlow::Value,
+                    "message.any",
+                    Some(PortActivation::Trigger),
+                ),
+                port(
+                    "bang",
+                    PortDirection::Output,
+                    DataFlow::Event,
+                    "event.bang",
+                    None,
+                ),
+            ],
         }
     }
 
@@ -1626,6 +1753,20 @@ mod tests {
     fn message_ports() -> Vec<Port> {
         vec![
             port(
+                "in",
+                PortDirection::Input,
+                DataFlow::Value,
+                "message.any",
+                Some(PortActivation::Trigger),
+            ),
+            port(
+                "set",
+                PortDirection::Input,
+                DataFlow::Value,
+                "message.any",
+                Some(PortActivation::Latched),
+            ),
+            port(
                 "bang",
                 PortDirection::Input,
                 DataFlow::Event,
@@ -1637,6 +1778,32 @@ mod tests {
                 PortDirection::Output,
                 DataFlow::Value,
                 "string",
+                None,
+            ),
+        ]
+    }
+
+    fn ui_toggle_ports() -> Vec<Port> {
+        vec![
+            port(
+                "in",
+                PortDirection::Input,
+                DataFlow::Value,
+                "message.any",
+                Some(PortActivation::Trigger),
+            ),
+            port(
+                "set",
+                PortDirection::Input,
+                DataFlow::Value,
+                "message.any",
+                Some(PortActivation::Latched),
+            ),
+            port(
+                "value",
+                PortDirection::Output,
+                DataFlow::Value,
+                "boolean",
                 None,
             ),
         ]

@@ -967,31 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_shader_reads_receive_channel_value() {
-        let mut document = document_with_edges(
-            vec![
-                receive_node(
-                    "receive_1",
-                    "core.receive-f32",
-                    "number.f32",
-                    "speed",
-                    json!(0.25),
-                ),
-                shader_node(json!("wgsl"), json!(shader_source())),
-            ],
-            vec![edge("receive_1", "value", "shader_1", "speed")],
-        );
-        document
-            .control_state
-            .channels
-            .insert("number.f32:speed".to_owned(), ControlValue::F32(1.8));
-
-        let scene = render_scene_from_preview_document(&document).expect("scene should build");
-
-        assert_eq!(shader_u_value(&scene), 1.8);
-    }
-
-    #[test]
     fn fullscreen_shader_reads_connected_second_value_node() {
         let document = document_with_edges(
             vec![
@@ -1679,48 +1654,6 @@ mod tests {
                     }
                 }))
                 .expect("valid color port"),
-            ],
-        }
-    }
-
-    fn receive_node(
-        id: &str,
-        kind: &str,
-        data_kind: &str,
-        name: &str,
-        default: Value,
-    ) -> GraphNode {
-        let mut params = serde_json::Map::new();
-        params.insert("name".to_owned(), json!(name));
-        params.insert("default".to_owned(), default);
-        GraphNode {
-            id: id.to_owned(),
-            kind: kind.to_owned(),
-            kind_version: "0.1.0".to_owned(),
-            params,
-            ports: vec![
-                serde_json::from_value(json!({
-                    "id": "bang",
-                    "direction": "input",
-                    "label": "Bang",
-                    "type": {
-                        "flow": "event",
-                        "dataKind": "event.bang"
-                    },
-                    "required": false,
-                    "activation": "trigger"
-                }))
-                .expect("valid receive bang port"),
-                serde_json::from_value(json!({
-                    "id": "value",
-                    "direction": "output",
-                    "label": "Value",
-                    "type": {
-                        "flow": "value",
-                        "dataKind": data_kind
-                    }
-                }))
-                .expect("valid receive value port"),
             ],
         }
     }

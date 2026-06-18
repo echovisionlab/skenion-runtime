@@ -10,14 +10,8 @@ pub const COLOR_RGBA_KIND: &str = "core.color-rgba";
 pub const STRING_KIND: &str = "core.string";
 pub const TOGGLE_KIND: &str = "core.toggle";
 pub const MESSAGE_KIND: &str = "core.message";
-pub const SEND_F32_KIND: &str = "core.send-f32";
-pub const SEND_I32_KIND: &str = "core.send-i32";
-pub const SEND_BOOL_KIND: &str = "core.send-bool";
-pub const SEND_RGBA_KIND: &str = "core.send-rgba";
-pub const RECEIVE_F32_KIND: &str = "core.receive-f32";
-pub const RECEIVE_I32_KIND: &str = "core.receive-i32";
-pub const RECEIVE_BOOL_KIND: &str = "core.receive-bool";
-pub const RECEIVE_RGBA_KIND: &str = "core.receive-rgba";
+pub const COMMENT_KIND: &str = "core.comment";
+pub const PANEL_KIND: &str = "core.panel";
 pub const UI_BUTTON_KIND: &str = "ui.button";
 pub const UI_SLIDER_F32_KIND: &str = "ui.slider-f32";
 pub const UI_TOGGLE_KIND: &str = "ui.toggle";
@@ -44,6 +38,20 @@ impl ControlValue {
             )),
             STRING_KIND | MESSAGE_KIND => Some(Self::String(
                 read_string_param(node).unwrap_or_default().to_owned(),
+            )),
+            COMMENT_KIND => Some(Self::String(
+                node.params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )),
+            PANEL_KIND => Some(Self::String(
+                node.params
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .unwrap_or("transparent")
+                    .to_owned(),
             )),
             TOGGLE_KIND => Some(Self::Bool(read_bool_param(node).unwrap_or(false))),
             UI_SLIDER_F32_KIND => Some(Self::F32(read_f64_param(node).unwrap_or(0.0))),
@@ -177,6 +185,20 @@ mod tests {
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
             Some(ControlValue::String("perform".to_owned()))
         );
+        let mut comment = node(COMMENT_KIND, json!(null));
+        comment
+            .params
+            .insert("text".to_owned(), json!("visible note"));
+        assert_eq!(
+            ControlValue::for_node_default(&comment),
+            Some(ControlValue::String("visible note".to_owned()))
+        );
+        let mut panel = node(PANEL_KIND, json!(null));
+        panel.params.insert("color".to_owned(), json!("#00ff00"));
+        assert_eq!(
+            ControlValue::for_node_default(&panel),
+            Some(ControlValue::String("#00ff00".to_owned()))
+        );
         assert_eq!(
             ControlValue::for_node_default(&node(UI_SLIDER_F32_KIND, json!(0.75))),
             Some(ControlValue::F32(0.75))
@@ -208,6 +230,14 @@ mod tests {
         assert_eq!(
             ControlValue::for_node_default(&node(STRING_KIND, json!(false))),
             Some(ControlValue::String(String::new()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(COMMENT_KIND, json!(null))),
+            Some(ControlValue::String(String::new()))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(PANEL_KIND, json!(null))),
+            Some(ControlValue::String("transparent".to_owned()))
         );
     }
 
