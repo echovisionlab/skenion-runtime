@@ -19,8 +19,25 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
+          repository: echovisionlab/skenion-contracts
+          path: .deps/skenion-contracts
+      - uses: actions/checkout@v6
+        with:
           repository: echovisionlab/skenion-examples
           path: .deps/skenion-examples
+      - name: Align cross-repo dependency branches
+        if: github.event_name == 'pull_request'
+        run: |
+          for dep in .deps/skenion-contracts .deps/skenion-examples; do
+            (
+              cd "${dep}"
+              if git ls-remote --exit-code origin "refs/heads/${GITHUB_HEAD_REF}" >/dev/null 2>&1; then
+                git fetch --depth=1 origin "${GITHUB_HEAD_REF}"
+                git checkout FETCH_HEAD
+              fi
+            )
+          done
+      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
