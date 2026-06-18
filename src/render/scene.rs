@@ -893,6 +893,35 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_shader_reads_uint_uniform_defaults_and_connections() {
+        let default_document = document_with_nodes(vec![shader_node(
+            json!("wgsl"),
+            json!(uint_shader_source()),
+        )]);
+        let default_scene =
+            render_scene_from_preview_document(&default_document).expect("scene should build");
+        assert_eq!(
+            shader_uniform(&default_scene, "count"),
+            &ShaderUniformValue::U32(4)
+        );
+
+        let connected_document = document_with_edges(
+            vec![
+                u32_node_with_value("count_1", u64::from(u32::MAX) + 10),
+                shader_node(json!("wgsl"), json!(uint_shader_source())),
+            ],
+            vec![edge("count_1", "value", "shader_1", "count")],
+        );
+        let connected_scene =
+            render_scene_from_preview_document(&connected_document).expect("scene should build");
+
+        assert_eq!(
+            shader_uniform(&connected_scene, "count"),
+            &ShaderUniformValue::U32(u32::MAX)
+        );
+    }
+
+    #[test]
     fn fullscreen_shader_defaults_i32_and_bool_when_connected_value_type_mismatches() {
         let document = document_with_edges(
             vec![
@@ -1609,6 +1638,29 @@ mod tests {
         }
     }
 
+    fn u32_node_with_value(id: &str, value: u64) -> GraphNode {
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), json!(value));
+        GraphNode {
+            id: id.to_owned(),
+            kind: "core.uint".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: vec![
+                serde_json::from_value(json!({
+                    "id": "value",
+                    "direction": "output",
+                    "label": "Value",
+                    "type": {
+                        "flow": "value",
+                        "dataKind": "number.uint"
+                    }
+                }))
+                .expect("valid u32 value port"),
+            ],
+        }
+    }
+
     fn color_node_with_value(value: Value) -> GraphNode {
         let mut params = serde_json::Map::new();
         params.insert("value".to_owned(), value);
@@ -1779,6 +1831,14 @@ fn fs_main() -> @location(0) vec4<f32> {
 fn fs_main() -> @location(0) vec4<f32> {
   let enabled_value = select(0.0, 1.0, skenion.enabled);
   return vec4<f32>(f32(skenion.iterations) / 16.0, enabled_value, 0.25, 1.0);
+}"#
+    }
+
+    fn uint_shader_source() -> &'static str {
+        r#"// @skenion.uniform count number.uint default=4
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  return vec4<f32>(f32(skenion.count) / 255.0, 0.0, 0.0, 1.0);
 }"#
     }
 }

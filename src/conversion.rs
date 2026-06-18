@@ -127,8 +127,8 @@ fn convert_color(value: [f64; 4], representation: &str) -> [f64; 4] {
             quantize_unorm8(value[2]),
             1.0,
         ],
-        "rgba16f" => value.map(|component| component.clamp(0.0, 1.0) as f32 as f64),
-        _ => value.map(|component| component.clamp(0.0, 1.0)),
+        "rgba16f" => value.map(|component| sanitize_f64(component).clamp(0.0, 1.0) as f32 as f64),
+        _ => value.map(|component| sanitize_f64(component).clamp(0.0, 1.0)),
     }
 }
 
@@ -209,6 +209,164 @@ mod tests {
                 representation: "rgba8unorm".to_owned(),
                 color_space: "linear".to_owned(),
                 value: [0.0, 128.0 / 255.0, 1.0, 1.0],
+            })
+        );
+    }
+
+    #[test]
+    fn converts_to_requested_data_kind_and_representations() {
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::uint(7), "number.float", Some("f64")),
+            Some(ControlValue::Float {
+                representation: "f64".to_owned(),
+                value: 7.0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(1.28),
+                "number.float",
+                Some("f8.e4m3")
+            ),
+            Some(ControlValue::Float {
+                representation: "f8.e4m3".to_owned(),
+                value: 1.25,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(f64::INFINITY),
+                "number.float",
+                Some("f16")
+            ),
+            Some(ControlValue::Float {
+                representation: "f16".to_owned(),
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(1.5),
+                "number.float",
+                Some("vendor.float")
+            ),
+            Some(ControlValue::Float {
+                representation: "vendor.float".to_owned(),
+                value: 1.5,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::uint(300), "number.int", Some("i16")),
+            Some(ControlValue::Int {
+                representation: "i16".to_owned(),
+                value: 300,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::int(-1), "number.uint", Some("u16")),
+            Some(ControlValue::Uint {
+                representation: "u16".to_owned(),
+                value: 0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::bool(true), "boolean", None),
+            Some(ControlValue::bool(true))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::color([0.25, 0.5, 0.75, 0.0]),
+                "color",
+                Some("rgb8unorm")
+            ),
+            Some(ControlValue::Color {
+                representation: "rgb8unorm".to_owned(),
+                color_space: "linear".to_owned(),
+                value: [64.0 / 255.0, 128.0 / 255.0, 191.0 / 255.0, 1.0],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_incompatible_or_unknown_conversions() {
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::float(1.0), &ControlValue::bool(false)),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_stored(
+                &ControlValue::string("x"),
+                &ControlValue::Float {
+                    representation: "bad.float".to_owned(),
+                    value: 0.0,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "unknown.kind", None),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "boolean", None),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "color", None),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(1.0),
+                "number.int",
+                Some("bad.int")
+            ),
+            None
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(1.0),
+                "number.uint",
+                Some("bad.uint")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clamps_wide_integer_representations_and_half_color() {
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(i64::MAX as f64),
+                "number.int",
+                Some("i64")
+            ),
+            Some(ControlValue::Int {
+                representation: "i64".to_owned(),
+                value: i64::MAX,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(u64::MAX as f64),
+                "number.uint",
+                Some("u64")
+            ),
+            Some(ControlValue::Uint {
+                representation: "u64".to_owned(),
+                value: u64::MAX,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::color([-0.5, 0.25, 2.0, f64::NAN]),
+                "color",
+                Some("rgba16f")
+            ),
+            Some(ControlValue::Color {
+                representation: "rgba16f".to_owned(),
+                color_space: "linear".to_owned(),
+                value: [0.0, 0.25, 1.0, 0.0],
             })
         );
     }

@@ -411,6 +411,23 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_color_with_default_color_space() {
+        assert_eq!(
+            serde_json::from_value::<ControlValue>(json!({
+                "type": "color",
+                "representation": "rgba32f",
+                "value": [0.1, 0.2, 0.3, 1.0]
+            }))
+            .unwrap(),
+            ControlValue::Color {
+                representation: "rgba32f".to_owned(),
+                color_space: "linear".to_owned(),
+                value: [0.1, 0.2, 0.3, 1.0],
+            }
+        );
+    }
+
+    #[test]
     fn serializes_control_messages_with_selector_and_atoms() {
         assert_eq!(
             serde_json::to_value(ControlMessage::bang()).unwrap(),
@@ -465,6 +482,18 @@ mod tests {
             "symbol ready"
         );
         assert_eq!(
+            ControlMessage::from_value(ControlValue::uint(9)).to_text(),
+            "uint 9"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::bool(true)).to_text(),
+            "bool on"
+        );
+        assert_eq!(
+            ControlMessage::from_value(ControlValue::bool(false)).to_text(),
+            "bool off"
+        );
+        assert_eq!(
             ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.25, 1.0])).to_text(),
             "color color 1 0.5 0.25 1"
         );
@@ -479,6 +508,10 @@ mod tests {
         assert_eq!(
             ControlValue::for_node_default(&node(INT_KIND, json!(7))),
             Some(ControlValue::int(7))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(UINT_KIND, json!(7))),
+            Some(ControlValue::uint(7))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
@@ -529,6 +562,10 @@ mod tests {
         assert_eq!(
             ControlValue::for_node_default(&node(INT_KIND, json!(1.25))),
             Some(ControlValue::int(0))
+        );
+        assert_eq!(
+            ControlValue::for_node_default(&node(UINT_KIND, json!(-1))),
+            Some(ControlValue::uint(0))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(BOOL_KIND, json!("bad"))),
@@ -585,11 +622,16 @@ mod tests {
     #[test]
     fn converts_shader_values() {
         assert_eq!(ControlValue::float(1.25).as_f32(), Some(1.25));
+        assert_eq!(ControlValue::float(f64::NAN).as_f32(), Some(0.0));
+        assert_eq!(ControlValue::int(i64::MAX).as_i32(), Some(i32::MAX));
+        assert_eq!(ControlValue::uint(u64::MAX).as_u32(), Some(u32::MAX));
         assert_eq!(
             ControlValue::color([-1.0, 0.25, 2.0, 1.0]).as_rgba_f32(),
             Some([0.0, 0.25, 1.0, 1.0])
         );
         assert_eq!(ControlValue::bool(false).as_f32(), None);
+        assert_eq!(ControlValue::bool(false).as_i32(), None);
+        assert_eq!(ControlValue::bool(false).as_u32(), None);
         assert_eq!(ControlValue::float(0.0).as_rgba_f32(), None);
     }
 

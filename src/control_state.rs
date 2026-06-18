@@ -675,7 +675,7 @@ fn coerce_toggle_input(message: &ControlMessage, current: bool) -> Option<bool> 
         "bang" if message.atoms.is_empty() => Some(!current),
         "on" | "true" => Some(true),
         "off" | "false" => Some(false),
-        "set" | "float" | "int" | "bool" | "symbol" => match message.first_atom()? {
+        "set" | "float" | "int" | "uint" | "bool" | "symbol" => match message.first_atom()? {
             ControlValue::Bool { value } => Some(*value),
             ControlValue::Int { value, .. } => match value {
                 0 => Some(false),
@@ -1081,12 +1081,20 @@ mod tests {
             "number.int"
         );
         assert_eq!(
+            data_kind_for_control_value(&ControlValue::uint(1)),
+            "number.uint"
+        );
+        assert_eq!(
             data_kind_for_control_value(&ControlValue::color([1.0, 0.0, 0.0, 1.0])),
             "color"
         );
         assert!(object_accepts_data_kind(
             &value_node("i32_1", INT_KIND, json!(0)),
             "number.int"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("u32_1", UINT_KIND, json!(0)),
+            "number.uint"
         ));
         assert!(object_accepts_data_kind(
             &value_node("rgba_1", COLOR_KIND, json!([1.0, 0.0, 0.0, 1.0])),
@@ -1451,13 +1459,14 @@ mod tests {
                 atoms: vec![
                     ControlValue::float(1.5),
                     ControlValue::int(2),
+                    ControlValue::uint(3),
                     ControlValue::bool(true),
                     ControlValue::bool(false),
                     ControlValue::string("label".to_owned()),
                     ControlValue::color([1.0, 0.5, 0.0, 1.0])
                 ]
             }),
-            "1.5 2 on off label color 1 0.5 0 1"
+            "1.5 2 3 on off label color 1 0.5 0 1"
         );
         assert_eq!(silent_set_message(&ControlMessage::bang()), None);
         assert_eq!(
@@ -1473,6 +1482,13 @@ mod tests {
                 &ControlValue::int(0)
             ),
             Some(ControlValue::int(3))
+        );
+        assert_eq!(
+            value_from_message(
+                &ControlMessage::from_value(ControlValue::float(3.0)),
+                &ControlValue::uint(0)
+            ),
+            Some(ControlValue::uint(3))
         );
         assert_eq!(
             value_from_message(
@@ -1561,6 +1577,18 @@ mod tests {
                 },
                 false
             ),
+            None
+        );
+        assert_eq!(
+            coerce_toggle_input(&ControlMessage::from_value(ControlValue::uint(0)), true),
+            Some(false)
+        );
+        assert_eq!(
+            coerce_toggle_input(&ControlMessage::from_value(ControlValue::uint(1)), false),
+            Some(true)
+        );
+        assert_eq!(
+            coerce_toggle_input(&ControlMessage::from_value(ControlValue::uint(2)), false),
             None
         );
 
