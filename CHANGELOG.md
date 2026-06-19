@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.22.0...skenion-runtime-v0.23.0) (2026-06-19)
+
+
+### Features
+
+* **runtime:** execute semantic numeric conversions ([fa43f59](https://github.com/echovisionlab/skenion-runtime/commit/fa43f598b00e84f75aef32cd6abeafad5086d0dc))
+
 ## [0.22.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.21.0...skenion-runtime-v0.22.0) (2026-06-18)
 
 
