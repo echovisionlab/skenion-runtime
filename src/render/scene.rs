@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::render::PreviewDocument;
 use crate::{
     ControlValue, GraphNode, PortDirection, analyze_shader_interface_v01,
-    shader_interface_to_ports_v01,
+    convert_control_value_to_data_kind, shader_interface_to_ports_v01,
     telemetry::{ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource},
 };
 
@@ -438,7 +438,14 @@ fn shader_uniform_value(
     node: &GraphNode,
     uniform: &crate::ShaderUniform,
 ) -> ShaderUniformValue {
-    let connected = resolve_control_value_at_input(document, &node.id, &uniform.id);
+    let connected =
+        resolve_control_value_at_input(document, &node.id, &uniform.id).and_then(|value| {
+            convert_control_value_to_data_kind(
+                &value,
+                &uniform.data_type.data_kind,
+                first_format(&uniform.data_type),
+            )
+        });
     match uniform.data_type.data_kind.as_str() {
         "number.float" => connected
             .as_ref()
@@ -477,6 +484,13 @@ fn shader_uniform_value(
             ),
         _ => ShaderUniformValue::F32(0.0),
     }
+}
+
+fn first_format(data_type: &crate::DataType) -> Option<&str> {
+    data_type
+        .format
+        .as_ref()
+        .and_then(|format| format.values().into_iter().next())
 }
 
 fn default_f32(value: &Option<serde_json::Value>) -> f32 {
@@ -922,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_shader_defaults_i32_and_bool_when_connected_value_type_mismatches() {
+    fn fullscreen_shader_converts_numeric_uniform_inputs_and_defaults_incompatible_bool() {
         let document = document_with_edges(
             vec![
                 value_node_with_id_and_value("wrong_iterations", json!(4.0)),
@@ -939,11 +953,54 @@ mod tests {
 
         assert_eq!(
             shader_uniform(&scene, "iterations"),
-            &ShaderUniformValue::I32(8)
+            &ShaderUniformValue::I32(4)
         );
         assert_eq!(
             shader_uniform(&scene, "enabled"),
             &ShaderUniformValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn fullscreen_shader_converts_int_and_uint_sources_to_float_uniforms() {
+        let int_document = document_with_edges(
+            vec![
+                i32_node_with_value("int_speed", 12),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("int_speed", "value", "shader_1", "speed")],
+        );
+        let int_scene =
+            render_scene_from_preview_document(&int_document).expect("scene should build");
+        assert_eq!(shader_u_value(&int_scene), 12.0);
+
+        let uint_document = document_with_edges(
+            vec![
+                u32_node_with_value("uint_speed", 7),
+                shader_node(json!("wgsl"), json!(shader_source())),
+            ],
+            vec![edge("uint_speed", "value", "shader_1", "speed")],
+        );
+        let uint_scene =
+            render_scene_from_preview_document(&uint_document).expect("scene should build");
+        assert_eq!(shader_u_value(&uint_scene), 7.0);
+    }
+
+    #[test]
+    fn fullscreen_shader_converts_float_source_to_uint_uniform() {
+        let document = document_with_edges(
+            vec![
+                value_node_with_id_and_value("float_count", json!(12.9)),
+                shader_node(json!("wgsl"), json!(uint_shader_source())),
+            ],
+            vec![edge("float_count", "value", "shader_1", "count")],
+        );
+
+        let scene = render_scene_from_preview_document(&document).expect("scene should build");
+
+        assert_eq!(
+            shader_uniform(&scene, "count"),
+            &ShaderUniformValue::U32(12)
         );
     }
 

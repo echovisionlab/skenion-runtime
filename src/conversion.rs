@@ -94,6 +94,8 @@ fn quantize_float(value: f64, representation: &str) -> f64 {
         "f64" => value,
         "f32" | "f16" => value as f32 as f64,
         "f8.e4m3" | "f8.e5m2" => (value * 16.0).round() / 16.0,
+        "ufloat16" => value.max(0.0) as f32 as f64,
+        "ufloat8" => (value.max(0.0) * 16.0).round() / 16.0,
         _ => value,
     }
 }
@@ -230,6 +232,28 @@ mod tests {
             ),
             Some(ControlValue::Float {
                 representation: "f8.e4m3".to_owned(),
+                value: 1.25,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(-1.0),
+                "number.float",
+                Some("ufloat16")
+            ),
+            Some(ControlValue::Float {
+                representation: "ufloat16".to_owned(),
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::float(1.28),
+                "number.float",
+                Some("ufloat8")
+            ),
+            Some(ControlValue::Float {
+                representation: "ufloat8".to_owned(),
                 value: 1.25,
             })
         );
