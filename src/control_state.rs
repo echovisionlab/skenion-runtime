@@ -261,7 +261,10 @@ impl ControlState {
         let mut queue = response.emitted.clone();
         let mut visited_edges = 0usize;
         while let Some(emission) = queue.pop() {
-            self.publish_object_channel(&emission, graph);
+            for channel_emission in self.publish_object_channel(&emission, graph) {
+                queue.push(channel_emission.clone());
+                response.emitted.push(channel_emission);
+            }
             visited_edges += 1;
             if visited_edges > graph.edges.len().saturating_mul(2).max(32) {
                 return RuntimeControlEventResponse::error(
@@ -300,13 +303,17 @@ impl ControlState {
         response
     }
 
-    fn publish_object_channel(&mut self, emission: &RuntimeControlEmission, graph: &GraphDocument) {
+    fn publish_object_channel(
+        &mut self,
+        emission: &RuntimeControlEmission,
+        graph: &GraphDocument,
+    ) -> Vec<RuntimeControlEmission> {
         let Some(source_node) = graph.nodes.iter().find(|node| node.id == emission.node_id) else {
-            return;
+            return Vec::new();
         };
         let data_kind = data_kind_for_control_message(&emission.message);
         let Some(channel_name) = read_named_param(source_node, "sendName") else {
-            return;
+            return Vec::new();
         };
         let key = format!("{data_kind}:{channel_name}");
         self.channels.insert(key, emission.message.clone());
@@ -316,7 +323,7 @@ impl ControlState {
             &emission.message,
             &emission.node_id,
             graph,
-        );
+        )
     }
 
     fn apply_receive_name_updates(
@@ -326,7 +333,8 @@ impl ControlState {
         message: &ControlMessage,
         source_node_id: &str,
         graph: &GraphDocument,
-    ) {
+    ) -> Vec<RuntimeControlEmission> {
+        let mut emitted = Vec::new();
         for node in graph.nodes.iter().filter(|node| node.id != source_node_id) {
             if read_named_param(node, "receiveName").as_deref() != Some(channel_name) {
                 continue;
@@ -334,12 +342,20 @@ impl ControlState {
             if !object_accepts_data_kind(node, data_kind) {
                 continue;
             }
-            if let Some(stored) = self.values.get(&node.id).cloned()
-                && let Some(value) = value_from_message(message, &stored)
-            {
-                self.values.insert(node.id.clone(), value);
+            let target_port = if node.kind == PANEL_KIND { "set" } else { "in" };
+            let response = self.apply_event_direct(
+                RuntimeControlEventRequest {
+                    node_id: node.id.clone(),
+                    port_id: target_port.to_owned(),
+                    message: message.clone(),
+                },
+                graph,
+            );
+            if response.ok {
+                emitted.extend(response.emitted);
             }
         }
+        emitted
     }
 
     fn apply_toggle_event(
@@ -504,10 +520,23 @@ fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
         BOOL_KIND => data_kind == "boolean",
         COLOR_KIND => data_kind == "color",
         STRING_KIND | PANEL_KIND => data_kind == "string",
-        MESSAGE_KIND => matches!(data_kind, "message.any" | "string" | "event.bang"),
-        BANG_KIND => data_kind == "event.bang",
+        MESSAGE_KIND | BANG_KIND => is_control_message_data_kind(data_kind),
         _ => false,
     }
+}
+
+fn is_control_message_data_kind(data_kind: &'static str) -> bool {
+    matches!(
+        data_kind,
+        "number.float"
+            | "number.int"
+            | "number.uint"
+            | "boolean"
+            | "color"
+            | "string"
+            | "event.bang"
+            | "message.any"
+    )
 }
 
 fn is_toggle_widget(node: &GraphNode) -> bool {
@@ -573,6 +602,11 @@ fn set_message_text(message: &ControlMessage) -> String {
             .map(control_atom_to_text)
             .collect::<Vec<_>>()
             .join(" ");
+    }
+    if message.selector == "symbol"
+        && let Some(ControlValue::String { value }) = message.first_atom()
+    {
+        return value.clone();
     }
     message.to_text()
 }
@@ -1021,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn object_send_name_updates_channel_and_receive_name_state() {
+    fn object_send_name_dispatches_to_receive_name_inlet() {
         let mut sender = value_node("slider_1", FLOAT_KIND, json!(0.25));
         sender.params.insert("sendName".to_owned(), json!("speed"));
         let mut receiver = value_node("value_1", FLOAT_KIND, json!(0.0));
@@ -1040,6 +1074,21 @@ mod tests {
         assert_eq!(
             state.channels.get("number.float:speed"),
             Some(&ControlMessage::from_value(ControlValue::float(1.25)))
+        );
+        assert_eq!(
+            response.emitted,
+            vec![
+                RuntimeControlEmission {
+                    node_id: "slider_1".to_owned(),
+                    port_id: "value".to_owned(),
+                    message: ControlMessage::from_value(ControlValue::float(1.25)),
+                },
+                RuntimeControlEmission {
+                    node_id: "value_1".to_owned(),
+                    port_id: "value".to_owned(),
+                    message: ControlMessage::from_value(ControlValue::float(1.25)),
+                },
+            ]
         );
         assert_eq!(
             state.value_for_node("value_1"),
@@ -1061,6 +1110,71 @@ mod tests {
     }
 
     #[test]
+    fn object_receive_name_dispatches_any_message_to_bang() {
+        let mut sender = value_node("message_1", MESSAGE_KIND, json!("perform"));
+        sender.params.insert("sendName".to_owned(), json!("go"));
+        let mut receiver = bang_node("bang_1");
+        receiver
+            .params
+            .insert("receiveName".to_owned(), json!("go"));
+        let routing_graph = graph(vec![sender, receiver]);
+        let mut state = ControlState::from_graph(&routing_graph);
+
+        let response = state.apply_event(bang_request("message_1", "in"), &routing_graph);
+
+        assert!(response.ok);
+        assert_eq!(
+            response.emitted,
+            vec![
+                RuntimeControlEmission {
+                    node_id: "message_1".to_owned(),
+                    port_id: "out".to_owned(),
+                    message: ControlMessage::parse_text("perform"),
+                },
+                RuntimeControlEmission {
+                    node_id: "bang_1".to_owned(),
+                    port_id: "out".to_owned(),
+                    message: ControlMessage::bang(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn object_receive_name_dispatches_float_to_bang() {
+        let mut sender = value_node("slider_1", FLOAT_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("go"));
+        let mut receiver = bang_node("bang_1");
+        receiver
+            .params
+            .insert("receiveName".to_owned(), json!("go"));
+        let routing_graph = graph(vec![sender, receiver]);
+        let mut state = ControlState::from_graph(&routing_graph);
+
+        let response = state.apply_event(
+            value_request("slider_1", "in", ControlValue::float(1.25)),
+            &routing_graph,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            response.emitted,
+            vec![
+                RuntimeControlEmission {
+                    node_id: "slider_1".to_owned(),
+                    port_id: "value".to_owned(),
+                    message: ControlMessage::from_value(ControlValue::float(1.25)),
+                },
+                RuntimeControlEmission {
+                    node_id: "bang_1".to_owned(),
+                    port_id: "out".to_owned(),
+                    message: ControlMessage::bang(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn panel_set_port_updates_runtime_color_text_silently() {
         let graph = graph(vec![panel_node("panel_1")]);
         let mut state = ControlState::from_graph(&graph);
@@ -1075,6 +1189,41 @@ mod tests {
         assert_eq!(
             state.value_for_node("panel_1"),
             Some(&ControlValue::string("#00ff00".to_owned()))
+        );
+    }
+
+    #[test]
+    fn object_receive_name_dispatches_string_channels_to_panel_set_port() {
+        let mut sender = value_node("string_1", STRING_KIND, json!("idle"));
+        sender.params.insert("sendName".to_owned(), json!("status"));
+        let mut receiver = panel_node("panel_1");
+        receiver
+            .params
+            .insert("receiveName".to_owned(), json!("status"));
+        let routing_graph = graph(vec![sender, receiver]);
+        let mut state = ControlState::from_graph(&routing_graph);
+
+        let response = state.apply_event(
+            request(
+                "string_1",
+                "in",
+                ControlMessage::from_value(ControlValue::string("ready".to_owned())),
+            ),
+            &routing_graph,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            response.emitted,
+            vec![RuntimeControlEmission {
+                node_id: "string_1".to_owned(),
+                port_id: "value".to_owned(),
+                message: ControlMessage::from_value(ControlValue::string("ready".to_owned())),
+            }]
+        );
+        assert_eq!(
+            state.value_for_node("panel_1"),
+            Some(&ControlValue::string("ready".to_owned()))
         );
     }
 
@@ -1132,6 +1281,27 @@ mod tests {
             Some(&ControlValue::bool(false))
         );
 
+        let mut sender = value_node("slider_3", FLOAT_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("speed"));
+        let mut other_receiver = value_node("value_3", FLOAT_KIND, json!(0.0));
+        other_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("other"));
+        let different_name_graph = graph(vec![sender, other_receiver]);
+        let mut different_name_state = ControlState::from_graph(&different_name_graph);
+        different_name_state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "slider_3".to_owned(),
+                port_id: "value".to_owned(),
+                message: ControlMessage::from_value(ControlValue::float(1.0)),
+            },
+            &different_name_graph,
+        );
+        assert_eq!(
+            different_name_state.value_for_node("value_3"),
+            Some(&ControlValue::float(0.0))
+        );
+
         assert_eq!(
             data_kind_for_control_value(&ControlValue::int(1)),
             "number.int"
@@ -1161,9 +1331,40 @@ mod tests {
             "string"
         ));
         assert!(object_accepts_data_kind(
+            &value_node("message_1", MESSAGE_KIND, json!("go")),
+            "number.float"
+        ));
+        assert!(object_accepts_data_kind(
             &bang_node("button_1"),
             "event.bang"
         ));
+        assert!(object_accepts_data_kind(
+            &bang_node("button_1"),
+            "number.float"
+        ));
+        assert!(object_accepts_data_kind(&bang_node("button_1"), "string"));
+        for data_kind in [
+            "number.float",
+            "number.int",
+            "number.uint",
+            "boolean",
+            "color",
+            "string",
+            "event.bang",
+            "message.any",
+        ] {
+            assert!(
+                object_accepts_data_kind(&bang_node("button_1"), data_kind),
+                "bang should accept {data_kind}"
+            );
+            assert!(
+                object_accepts_data_kind(
+                    &value_node("message_1", MESSAGE_KIND, json!("go")),
+                    data_kind
+                ),
+                "message should accept {data_kind}"
+            );
+        }
         assert!(!object_accepts_data_kind(
             &value_node("target_1", "debug.sink", json!(null)),
             "string"
