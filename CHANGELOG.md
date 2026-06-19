@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.26.0...skenion-runtime-v0.27.0) (2026-06-19)
+
+
+### Features
+
+* **runtime:** add audio dsp planner ([ce2bfda](https://github.com/echovisionlab/skenion-runtime/commit/ce2bfda63e64e5d28b7a2ed9daf2475cfe8aaa98))
+
 ## [0.26.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.3...skenion-runtime-v0.26.0) (2026-06-19)
 
 
