@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.3](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.2...skenion-runtime-v0.25.3) (2026-06-19)
+
+
+### Bug Fixes
+
+* **runtime:** apply pd set messages through object inlets ([#67](https://github.com/echovisionlab/skenion-runtime/issues/67)) ([caae579](https://github.com/echovisionlab/skenion-runtime/commit/caae5796b503b684c30415caeaabd703cc0e7acc))
+
 ## [0.25.2](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.25.1...skenion-runtime-v0.25.2) (2026-06-19)
 
 
