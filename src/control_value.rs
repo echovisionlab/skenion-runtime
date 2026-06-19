@@ -625,6 +625,7 @@ mod tests {
         assert_eq!(ControlValue::float(f64::NAN).as_f32(), Some(0.0));
         assert_eq!(ControlValue::int(i64::MAX).as_i32(), Some(i32::MAX));
         assert_eq!(ControlValue::uint(u64::MAX).as_u32(), Some(u32::MAX));
+        assert_eq!(ControlValue::bool(true).as_bool(), Some(true));
         assert_eq!(
             ControlValue::color([-1.0, 0.25, 2.0, 1.0]).as_rgba_f32(),
             Some([0.0, 0.25, 1.0, 1.0])
@@ -633,6 +634,7 @@ mod tests {
         assert_eq!(ControlValue::bool(false).as_i32(), None);
         assert_eq!(ControlValue::bool(false).as_u32(), None);
         assert_eq!(ControlValue::float(0.0).as_rgba_f32(), None);
+        assert_eq!(ControlValue::float(0.0).as_bool(), None);
     }
 
     fn node(kind: &str, value: serde_json::Value) -> GraphNode {
