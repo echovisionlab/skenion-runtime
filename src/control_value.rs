@@ -227,6 +227,15 @@ impl ControlMessage {
                 selector: "set".to_owned(),
                 atoms: parse_message_atoms(rest),
             },
+            "float" => typed_or_generic_message(selector, rest, parse_float_atom),
+            "int" => typed_or_generic_message(selector, rest, parse_int_atom),
+            "uint" => typed_or_generic_message(selector, rest, parse_uint_atom),
+            "bool" => typed_or_generic_message(selector, rest, parse_bool_atom),
+            "symbol" => Self {
+                selector: "symbol".to_owned(),
+                atoms: vec![ControlValue::string(rest.to_owned())],
+            },
+            "color" => typed_or_generic_message(selector, rest, parse_color_atom),
             "on" | "off" | "true" | "false" if rest.is_empty() => Self {
                 selector: selector.to_owned(),
                 atoms: Vec::new(),
@@ -256,6 +265,11 @@ impl ControlMessage {
         if self.atoms.is_empty() {
             return self.selector.clone();
         }
+        if self.atoms.len() == 1
+            && let Some(payload) = typed_atom_payload_to_text(&self.selector, &self.atoms[0])
+        {
+            return format!("{} {}", self.selector, payload);
+        }
         format!(
             "{} {}",
             self.selector,
@@ -272,11 +286,25 @@ fn parse_message_atoms(text: &str) -> Vec<ControlValue> {
     if text.is_empty() {
         return Vec::new();
     }
-    text.split_whitespace()
-        .map(|token| {
-            parse_scalar_atom(token).unwrap_or_else(|| ControlValue::string(token.to_owned()))
-        })
-        .collect()
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    let mut atoms = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token == "color"
+            && index + 4 < tokens.len()
+            && let Some(color) = parse_color_atom(&tokens[index + 1..index + 5].join(" "))
+        {
+            atoms.push(color);
+            index += 5;
+            continue;
+        }
+        atoms.push(
+            parse_scalar_atom(token).unwrap_or_else(|| ControlValue::string(token.to_owned())),
+        );
+        index += 1;
+    }
+    atoms
 }
 
 fn parse_scalar_atom(token: &str) -> Option<ControlValue> {
@@ -288,6 +316,81 @@ fn parse_scalar_atom(token: &str) -> Option<ControlValue> {
             .map(ControlValue::int)
             .or_else(|_| token.parse::<f64>().map(ControlValue::float))
             .ok(),
+    }
+}
+
+fn typed_or_generic_message(
+    selector: &str,
+    rest: &str,
+    parser: fn(&str) -> Option<ControlValue>,
+) -> ControlMessage {
+    parser(rest)
+        .map(ControlMessage::from_value)
+        .unwrap_or_else(|| ControlMessage {
+            selector: selector.to_owned(),
+            atoms: parse_message_atoms(rest),
+        })
+}
+
+fn parse_float_atom(text: &str) -> Option<ControlValue> {
+    let mut tokens = text.split_whitespace();
+    let token = tokens.next()?;
+    tokens.next().is_none().then_some(())?;
+    token.parse::<f64>().ok().map(ControlValue::float)
+}
+
+fn parse_int_atom(text: &str) -> Option<ControlValue> {
+    let mut tokens = text.split_whitespace();
+    let token = tokens.next()?;
+    tokens.next().is_none().then_some(())?;
+    token.parse::<i64>().ok().map(ControlValue::int)
+}
+
+fn parse_uint_atom(text: &str) -> Option<ControlValue> {
+    let mut tokens = text.split_whitespace();
+    let token = tokens.next()?;
+    tokens.next().is_none().then_some(())?;
+    token.parse::<u64>().ok().map(ControlValue::uint)
+}
+
+fn parse_bool_atom(text: &str) -> Option<ControlValue> {
+    let mut tokens = text.split_whitespace();
+    let token = tokens.next()?.to_ascii_lowercase();
+    tokens.next().is_none().then_some(())?;
+    match token.as_str() {
+        "1" | "on" | "true" => Some(ControlValue::bool(true)),
+        "0" | "off" | "false" => Some(ControlValue::bool(false)),
+        _ => None,
+    }
+}
+
+fn parse_color_atom(text: &str) -> Option<ControlValue> {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    let [r, g, b, a] = tokens.as_slice() else {
+        return None;
+    };
+    Some(ControlValue::color([
+        r.parse::<f64>().ok()?,
+        g.parse::<f64>().ok()?,
+        b.parse::<f64>().ok()?,
+        a.parse::<f64>().ok()?,
+    ]))
+}
+
+fn typed_atom_payload_to_text(selector: &str, atom: &ControlValue) -> Option<String> {
+    match (selector, atom) {
+        ("float", ControlValue::Float { value, .. }) => Some(value.to_string()),
+        ("int", ControlValue::Int { value, .. }) => Some(value.to_string()),
+        ("uint", ControlValue::Uint { value, .. }) => Some(value.to_string()),
+        ("bool", ControlValue::Bool { value }) => {
+            Some(if *value { "on" } else { "off" }.to_owned())
+        }
+        ("symbol", ControlValue::String { value }) => Some(value.clone()),
+        ("color", ControlValue::Color { value, .. }) => Some(format!(
+            "{} {} {} {}",
+            value[0], value[1], value[2], value[3]
+        )),
+        _ => None,
     }
 }
 
@@ -477,6 +580,10 @@ mod tests {
             "uint 9"
         );
         assert_eq!(
+            ControlMessage::from_value(ControlValue::int(-7)).to_text(),
+            "int -7"
+        );
+        assert_eq!(
             ControlMessage::from_value(ControlValue::bool(true)).to_text(),
             "bool on"
         );
@@ -486,7 +593,95 @@ mod tests {
         );
         assert_eq!(
             ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.25, 1.0])).to_text(),
-            "color color 1 0.5 0.25 1"
+            "color 1 0.5 0.25 1"
+        );
+        assert_eq!(
+            ControlMessage::parse_text("color 1 0.5 0.25 1"),
+            ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.25, 1.0]))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("set color 1 0.5 0.25 1"),
+            ControlMessage {
+                selector: "set".to_owned(),
+                atoms: vec![ControlValue::color([1.0, 0.5, 0.25, 1.0])]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("symbol hello world"),
+            ControlMessage {
+                selector: "symbol".to_owned(),
+                atoms: vec![ControlValue::string("hello world".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("float 1.25"),
+            ControlMessage::from_value(ControlValue::float(1.25))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("int -12"),
+            ControlMessage::from_value(ControlValue::int(-12))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("uint 12"),
+            ControlMessage::from_value(ControlValue::uint(12))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("bool off"),
+            ControlMessage::from_value(ControlValue::bool(false))
+        );
+        assert_eq!(
+            ControlMessage::parse_text("float 1 2"),
+            ControlMessage {
+                selector: "float".to_owned(),
+                atoms: vec![ControlValue::int(1), ControlValue::int(2)]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("int nope"),
+            ControlMessage {
+                selector: "int".to_owned(),
+                atoms: vec![ControlValue::string("nope".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("uint -1"),
+            ControlMessage {
+                selector: "uint".to_owned(),
+                atoms: vec![ControlValue::int(-1)]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("bool maybe"),
+            ControlMessage {
+                selector: "bool".to_owned(),
+                atoms: vec![ControlValue::string("maybe".to_owned())]
+            }
+        );
+        assert_eq!(
+            ControlMessage::parse_text("color 1 2 3"),
+            ControlMessage {
+                selector: "color".to_owned(),
+                atoms: vec![
+                    ControlValue::int(1),
+                    ControlValue::int(2),
+                    ControlValue::int(3)
+                ]
+            }
+        );
+        assert_eq!(
+            (ControlMessage {
+                selector: "list".to_owned(),
+                atoms: vec![
+                    ControlValue::float(1.5),
+                    ControlValue::uint(2),
+                    ControlValue::bool(true),
+                    ControlValue::bool(false),
+                    ControlValue::string("label".to_owned()),
+                    ControlValue::color([0.1, 0.2, 0.3, 1.0])
+                ]
+            })
+            .to_text(),
+            "list 1.5 2 on off label color 0.1 0.2 0.3 1"
         );
     }
 

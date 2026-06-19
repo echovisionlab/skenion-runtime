@@ -821,7 +821,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::{
-        ControlMessage, ControlValue, GraphPatch, GraphPatchEventKind, NodeRegistry,
+        ControlMessage, ControlValue, Edge, GraphPatch, GraphPatchEventKind, NodeRegistry, PortRef,
         ProjectRequest, RuntimeControlEmission, RuntimeControlEventRequest,
         RuntimeControlReadRequest, RuntimeControlReadTarget, RuntimeDiagnostic,
     };
@@ -1196,6 +1196,39 @@ mod tests {
         assert_eq!(
             session.control_state_response().values.get("value_1"),
             Some(&ControlValue::float(32.0))
+        );
+    }
+
+    #[test]
+    fn failed_control_propagation_does_not_mutate_state_or_revision() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+        session.graph.as_mut().unwrap().edges = vec![Edge {
+            from: PortRef {
+                node: "value_1".to_owned(),
+                port: "value".to_owned(),
+            },
+            to: PortRef {
+                node: "target_1".to_owned(),
+                port: "missing".to_owned(),
+            },
+        }];
+        let before = session.snapshot();
+
+        let response =
+            session.apply_control_event(control_request("value_1", "in", f32_value(9.0)));
+
+        assert!(!response.ok);
+        assert!(response.diagnostics[0].message.contains("port missing"));
+        assert_eq!(response.control_revision, Some(before.control_revision));
+        assert_eq!(session.snapshot().control_revision, before.control_revision);
+        assert_eq!(
+            session.control_state_response().values.get("value_1"),
+            Some(&ControlValue::float(0.0))
+        );
+        assert_eq!(
+            session.control_state_response().values.get("target_1"),
+            Some(&ControlValue::float(0.0))
         );
     }
 

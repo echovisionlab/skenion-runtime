@@ -117,12 +117,17 @@ impl ControlState {
         request: RuntimeControlEventRequest,
         graph: &GraphDocument,
     ) -> RuntimeControlEventResponse {
-        let response = self.apply_event_direct(request, graph);
+        let mut staged = self.clone();
+        let response = staged.apply_event_direct(request, graph);
         if !response.ok {
             return response;
         }
 
-        self.propagate_emissions(response, graph)
+        let response = staged.propagate_emissions(response, graph);
+        if response.ok {
+            *self = staged;
+        }
+        response
     }
 
     fn apply_event_direct(
@@ -261,7 +266,9 @@ impl ControlState {
         let mut queue = response.emitted.clone();
         let mut visited_edges = 0usize;
         while let Some(emission) = queue.pop() {
-            for channel_emission in self.publish_object_channel(&emission, graph) {
+            let channel_response = self.publish_object_channel(&emission, graph);
+            response.diagnostics.extend(channel_response.diagnostics);
+            for channel_emission in channel_response.emitted {
                 queue.push(channel_emission.clone());
                 response.emitted.push(channel_emission);
             }
@@ -307,13 +314,13 @@ impl ControlState {
         &mut self,
         emission: &RuntimeControlEmission,
         graph: &GraphDocument,
-    ) -> Vec<RuntimeControlEmission> {
+    ) -> RuntimeControlEventResponse {
         let Some(source_node) = graph.nodes.iter().find(|node| node.id == emission.node_id) else {
-            return Vec::new();
+            return RuntimeControlEventResponse::ok(Vec::new());
         };
         let data_kind = data_kind_for_control_message(&emission.message);
         let Some(channel_name) = read_named_param(source_node, "sendName") else {
-            return Vec::new();
+            return RuntimeControlEventResponse::ok(Vec::new());
         };
         let key = format!("{data_kind}:{channel_name}");
         self.channels.insert(key, emission.message.clone());
@@ -333,13 +340,18 @@ impl ControlState {
         message: &ControlMessage,
         source_node_id: &str,
         graph: &GraphDocument,
-    ) -> Vec<RuntimeControlEmission> {
+    ) -> RuntimeControlEventResponse {
         let mut emitted = Vec::new();
+        let mut diagnostics = Vec::new();
         for node in graph.nodes.iter().filter(|node| node.id != source_node_id) {
             if read_named_param(node, "receiveName").as_deref() != Some(channel_name) {
                 continue;
             }
             if !object_accepts_data_kind(node, data_kind) {
+                diagnostics.push(RuntimeDiagnostic::warning(format!(
+                    "receiveName {channel_name} on node {} ignored incompatible routed {data_kind}",
+                    node.id
+                )));
                 continue;
             }
             let target_port = if node.kind == PANEL_KIND { "set" } else { "in" };
@@ -353,9 +365,20 @@ impl ControlState {
             );
             if response.ok {
                 emitted.extend(response.emitted);
+                diagnostics.extend(response.diagnostics);
+            } else {
+                let detail = response
+                    .diagnostics
+                    .first()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .unwrap_or("unknown receiver error");
+                diagnostics.push(RuntimeDiagnostic::warning(format!(
+                    "receiveName {channel_name} on node {} rejected routed {data_kind}: {detail}",
+                    node.id
+                )));
             }
         }
-        emitted
+        RuntimeControlEventResponse::ok_with_diagnostics(emitted, diagnostics)
     }
 
     fn apply_toggle_event(
@@ -400,6 +423,19 @@ impl RuntimeControlEventResponse {
             control_revision: None,
             emitted,
             diagnostics: Vec::new(),
+        }
+    }
+
+    fn ok_with_diagnostics(
+        emitted: Vec<RuntimeControlEmission>,
+        diagnostics: Vec<RuntimeDiagnostic>,
+    ) -> Self {
+        Self {
+            ok: true,
+            changed: false,
+            control_revision: None,
+            emitted,
+            diagnostics,
         }
     }
 
@@ -514,9 +550,7 @@ fn data_kind_for_control_value(value: &ControlValue) -> &'static str {
 
 fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
     match node.kind.as_str() {
-        FLOAT_KIND => data_kind == "number.float",
-        INT_KIND => data_kind == "number.int",
-        UINT_KIND => data_kind == "number.uint",
+        FLOAT_KIND | INT_KIND | UINT_KIND => is_numeric_data_kind(data_kind),
         BOOL_KIND => data_kind == "boolean",
         COLOR_KIND => data_kind == "color",
         STRING_KIND | PANEL_KIND => data_kind == "string",
@@ -537,6 +571,10 @@ fn is_control_message_data_kind(data_kind: &'static str) -> bool {
             | "event.bang"
             | "message.any"
     )
+}
+
+fn is_numeric_data_kind(data_kind: &'static str) -> bool {
+    matches!(data_kind, "number.float" | "number.int" | "number.uint")
 }
 
 fn is_toggle_widget(node: &GraphNode) -> bool {
@@ -1005,6 +1043,26 @@ mod tests {
             Some(&ControlValue::string("updated".to_owned()))
         );
 
+        let color_set = state.apply_event(
+            request(
+                "message_1",
+                "in",
+                ControlMessage::parse_text("set color 1 0.5 0.25 1"),
+            ),
+            &graph,
+        );
+        assert!(color_set.ok);
+        assert_eq!(
+            state.value_for_node("message_1"),
+            Some(&ControlValue::string("color 1 0.5 0.25 1".to_owned()))
+        );
+        let color_emit = state.apply_event(bang_request("message_1", "in"), &graph);
+        assert!(color_emit.ok);
+        assert_eq!(
+            color_emit.emitted[0].message,
+            ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.25, 1.0]))
+        );
+
         let silent_in = state.apply_event(
             request("message_1", "in", ControlMessage::parse_text("set queued")),
             &graph,
@@ -1175,6 +1233,42 @@ mod tests {
     }
 
     #[test]
+    fn receive_name_dispatch_uses_numeric_conversion_policy() {
+        let mut sender = value_node("float_sender", FLOAT_KIND, json!(0.25));
+        sender.params.insert("sendName".to_owned(), json!("number"));
+        let mut int_receiver = value_node("int_receiver", INT_KIND, json!(0));
+        int_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("number"));
+        let mut uint_receiver = value_node("uint_receiver", UINT_KIND, json!(0));
+        uint_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("number"));
+        let routing_graph = graph(vec![sender, int_receiver, uint_receiver]);
+        let mut state = ControlState::from_graph(&routing_graph);
+
+        let response = state.apply_event(
+            value_request("float_sender", "in", ControlValue::float(12.9)),
+            &routing_graph,
+        );
+
+        assert!(response.ok);
+        assert!(
+            response.diagnostics.is_empty(),
+            "{:?}",
+            response.diagnostics
+        );
+        assert_eq!(
+            state.value_for_node("int_receiver"),
+            Some(&ControlValue::int(12))
+        );
+        assert_eq!(
+            state.value_for_node("uint_receiver"),
+            Some(&ControlValue::uint(12))
+        );
+    }
+
+    #[test]
     fn panel_set_port_updates_runtime_color_text_silently() {
         let graph = graph(vec![panel_node("panel_1")]);
         let mut state = ControlState::from_graph(&graph);
@@ -1238,7 +1332,7 @@ mod tests {
         let empty_name_graph = graph(vec![sender, wrong_receiver]);
         let mut state = ControlState::from_graph(&empty_name_graph);
 
-        state.publish_object_channel(
+        let missing_source = state.publish_object_channel(
             &RuntimeControlEmission {
                 node_id: "missing".to_owned(),
                 port_id: "value".to_owned(),
@@ -1246,7 +1340,8 @@ mod tests {
             },
             &empty_name_graph,
         );
-        state.publish_object_channel(
+        assert!(missing_source.ok);
+        let empty_name = state.publish_object_channel(
             &RuntimeControlEmission {
                 node_id: "slider_1".to_owned(),
                 port_id: "value".to_owned(),
@@ -1254,6 +1349,7 @@ mod tests {
             },
             &empty_name_graph,
         );
+        assert!(empty_name.ok);
         assert!(state.channels.is_empty());
         assert_eq!(
             state.value_for_node("bool_1"),
@@ -1268,7 +1364,7 @@ mod tests {
             .insert("receiveName".to_owned(), json!("speed"));
         let mismatched_receiver_graph = graph(vec![sender, wrong_receiver]);
         let mut mismatched_state = ControlState::from_graph(&mismatched_receiver_graph);
-        mismatched_state.publish_object_channel(
+        let mismatched = mismatched_state.publish_object_channel(
             &RuntimeControlEmission {
                 node_id: "slider_2".to_owned(),
                 port_id: "value".to_owned(),
@@ -1276,9 +1372,47 @@ mod tests {
             },
             &mismatched_receiver_graph,
         );
+        assert!(mismatched.ok);
+        assert_eq!(mismatched.diagnostics.len(), 1);
+        assert!(
+            mismatched.diagnostics[0]
+                .message
+                .contains("ignored incompatible routed number.float")
+        );
         assert_eq!(
             mismatched_state.value_for_node("bool_2"),
             Some(&ControlValue::bool(false))
+        );
+
+        let mut sender = value_node("string_sender", STRING_KIND, json!("ready"));
+        sender.params.insert("sendName".to_owned(), json!("label"));
+        let mut broken_receiver = value_node("string_receiver", STRING_KIND, json!("old"));
+        broken_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("label"));
+        let rejected_receiver_graph = graph(vec![sender, broken_receiver]);
+        let mut rejected_state = ControlState::from_graph(&rejected_receiver_graph);
+        rejected_state
+            .values
+            .insert("string_receiver".to_owned(), ControlValue::float(0.0));
+        let rejected = rejected_state.publish_object_channel(
+            &RuntimeControlEmission {
+                node_id: "string_sender".to_owned(),
+                port_id: "value".to_owned(),
+                message: ControlMessage::from_value(ControlValue::string("new".to_owned())),
+            },
+            &rejected_receiver_graph,
+        );
+        assert!(rejected.ok);
+        assert_eq!(rejected.diagnostics.len(), 1);
+        assert!(
+            rejected.diagnostics[0]
+                .message
+                .contains("rejected routed string")
+        );
+        assert_eq!(
+            rejected_state.value_for_node("string_receiver"),
+            Some(&ControlValue::float(0.0))
         );
 
         let mut sender = value_node("slider_3", FLOAT_KIND, json!(0.25));
@@ -1555,6 +1689,14 @@ mod tests {
         assert!(!response.ok);
         assert!(response.diagnostics[0].message.contains("port missing"));
         assert!(state.channels.is_empty());
+        assert_eq!(
+            state.value_for_node("slider_1"),
+            Some(&ControlValue::float(0.25))
+        );
+        assert_eq!(
+            state.value_for_node("value_1"),
+            Some(&ControlValue::float(0.0))
+        );
     }
 
     #[test]
@@ -1579,6 +1721,14 @@ mod tests {
             response.diagnostics[0]
                 .message
                 .contains("runtime safety limit")
+        );
+        assert_eq!(
+            state.value_for_node("slider_1"),
+            Some(&ControlValue::float(0.25))
+        );
+        assert_eq!(
+            state.value_for_node("value_1"),
+            Some(&ControlValue::float(0.0))
         );
     }
 
@@ -1784,7 +1934,7 @@ mod tests {
         );
         assert_eq!(
             ControlMessage::from_value(ControlValue::color([1.0, 0.5, 0.0, 1.0])).to_text(),
-            "color color 1 0.5 0 1"
+            "color 1 0.5 0 1"
         );
         let selector_only = ControlMessage {
             selector: "clear".to_owned(),
@@ -2117,6 +2267,7 @@ mod tests {
         let ports = match kind {
             FLOAT_KIND => stored_value_ports("number.float"),
             INT_KIND => stored_value_ports("number.int"),
+            UINT_KIND => stored_value_ports("number.uint"),
             BOOL_KIND => stored_value_ports("boolean"),
             COLOR_KIND => stored_value_ports("color"),
             STRING_KIND => stored_value_ports("string"),
