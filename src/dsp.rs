@@ -11,6 +11,7 @@ use crate::{
 };
 
 const AUDIO_SIGNAL_KIND: &str = "signal.audio";
+const AUDIO_OUTPUT_KIND: &str = "audio.output";
 const DEFAULT_BLOCK_SIZE: u32 = 64;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_SAMPLE_FORMAT: &str = "f32";
@@ -153,6 +154,21 @@ pub struct AudioDspSnapshot {
     pub value: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioRealtimeDspOptions {
+    pub plan: AudioDspPlanOptions,
+    pub channels: usize,
+}
+
+impl Default for AudioRealtimeDspOptions {
+    fn default() -> Self {
+        Self {
+            plan: AudioDspPlanOptions::default(),
+            channels: 2,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AudioDspPlanError {
     #[error("{0}")]
@@ -175,6 +191,220 @@ pub enum AudioOfflineDspError {
     InvalidBlockCount,
     #[error("offline audio dsp node {node_id} uses unsupported kind {kind}")]
     UnsupportedNodeKind { node_id: String, kind: String },
+}
+
+#[derive(Debug, Error)]
+pub enum AudioRealtimeDspError {
+    #[error("{0}")]
+    Plan(#[from] AudioDspPlanError),
+    #[error("audio realtime dsp output channel count must be greater than zero")]
+    InvalidChannelCount,
+    #[error("audio realtime dsp graph must contain exactly one audio.output node, found {count}")]
+    OutputCount { count: usize },
+    #[error("audio realtime dsp node {node_id} uses unsupported kind {kind}")]
+    UnsupportedNodeKind { node_id: String, kind: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AudioRealtimeNodeKind {
+    Sig { value: f32 },
+    Osc { frequency: f32 },
+    Mul,
+    Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AudioRealtimeNode {
+    kind: AudioRealtimeNodeKind,
+    output_buffer: Option<usize>,
+    left_buffer: Option<usize>,
+    right_buffer: Option<usize>,
+    phase: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioRealtimeDspExecutor {
+    plan: AudioDspPlan,
+    channels: usize,
+    block_len: usize,
+    output_node_index: usize,
+    nodes: Vec<AudioRealtimeNode>,
+    buffers: Vec<Vec<f32>>,
+    scratch: Vec<f32>,
+}
+
+impl AudioRealtimeDspExecutor {
+    pub fn new(
+        graph: &GraphDocument,
+        registry: &NodeRegistry,
+        options: AudioRealtimeDspOptions,
+    ) -> Result<Self, AudioRealtimeDspError> {
+        if options.channels == 0 {
+            return Err(AudioRealtimeDspError::InvalidChannelCount);
+        }
+        let plan = build_audio_dsp_plan(graph, registry, options.plan)?;
+        let output_nodes = plan
+            .nodes
+            .iter()
+            .filter(|node| node.kind == AUDIO_OUTPUT_KIND)
+            .collect::<Vec<_>>();
+        if output_nodes.len() != 1 {
+            return Err(AudioRealtimeDspError::OutputCount {
+                count: output_nodes.len(),
+            });
+        }
+        if let Some(node) = plan
+            .nodes
+            .iter()
+            .find(|node| !matches_realtime_kind(node.kind.as_str()))
+        {
+            return Err(AudioRealtimeDspError::UnsupportedNodeKind {
+                node_id: node.node_id.clone(),
+                kind: node.kind.clone(),
+            });
+        }
+
+        let node_params_by_id = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.params.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let buffer_index_by_id = plan
+            .buffers
+            .iter()
+            .enumerate()
+            .map(|(index, buffer)| (buffer.id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        let block_len = plan.block_size as usize;
+        let buffers = plan
+            .buffers
+            .iter()
+            .map(|_| vec![0.0; block_len])
+            .collect::<Vec<_>>();
+        let nodes = plan
+            .nodes
+            .iter()
+            .map(|node| realtime_node(node, &buffer_index_by_id, &node_params_by_id))
+            .collect::<Vec<_>>();
+        let output_node_index = plan
+            .nodes
+            .iter()
+            .position(|node| node.kind == AUDIO_OUTPUT_KIND)
+            .expect("realtime output count was already validated");
+
+        Ok(Self {
+            plan,
+            channels: options.channels,
+            block_len,
+            output_node_index,
+            nodes,
+            buffers,
+            scratch: vec![0.0; block_len],
+        })
+    }
+
+    pub fn plan(&self) -> &AudioDspPlan {
+        &self.plan
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    pub fn process_interleaved_output(&mut self, output: &mut [f32]) {
+        output.fill(0.0);
+        if output.is_empty() {
+            return;
+        }
+        let total_frames = output.len() / self.channels;
+        let mut frame_offset = 0;
+        while frame_offset < total_frames {
+            self.process_block();
+            let frames_to_copy = self.block_len.min(total_frames - frame_offset);
+            self.copy_output_frames(output, frame_offset, frames_to_copy);
+            frame_offset += frames_to_copy;
+        }
+    }
+
+    fn process_block(&mut self) {
+        for node_index in 0..self.nodes.len() {
+            match self.nodes[node_index].kind {
+                AudioRealtimeNodeKind::Sig { value } => self.render_sig(node_index, value),
+                AudioRealtimeNodeKind::Osc { frequency } => {
+                    self.render_osc(node_index, frequency);
+                }
+                AudioRealtimeNodeKind::Mul => self.render_mul(node_index),
+                AudioRealtimeNodeKind::Output => {}
+            }
+        }
+    }
+
+    fn render_sig(&mut self, node_index: usize, value: f32) {
+        if let Some(buffer) = self.signal_output_buffer_mut(node_index) {
+            buffer.fill(value);
+        }
+    }
+
+    fn render_osc(&mut self, node_index: usize, frequency: f32) {
+        let increment = frequency / self.plan.sample_rate as f32;
+        let mut phase_value = self.nodes[node_index].phase;
+        let samples = self.scratch.as_mut_slice();
+        for sample in samples.iter_mut().take(self.block_len) {
+            *sample = (phase_value * TAU).sin();
+            phase_value = (phase_value + increment).rem_euclid(1.0);
+        }
+        self.nodes[node_index].phase = phase_value;
+        self.copy_scratch_to_output(node_index);
+    }
+
+    fn render_mul(&mut self, node_index: usize) {
+        let left = self.nodes[node_index].left_buffer;
+        let right = self.nodes[node_index].right_buffer;
+        for index in 0..self.block_len {
+            let sample = self.sample(left, index) * self.sample(right, index);
+            self.scratch[index] = sample;
+        }
+        self.copy_scratch_to_output(node_index);
+    }
+
+    fn copy_scratch_to_output(&mut self, node_index: usize) {
+        if let Some(output_index) = self.nodes[node_index].output_buffer {
+            self.buffers[output_index].copy_from_slice(&self.scratch);
+        }
+    }
+
+    fn copy_output_frames(
+        &mut self,
+        output: &mut [f32],
+        frame_offset: usize,
+        frames_to_copy: usize,
+    ) {
+        let output_node = self.nodes[self.output_node_index];
+        let left = output_node.left_buffer;
+        let right = output_node.right_buffer;
+        for local_frame in 0..frames_to_copy {
+            let output_frame = frame_offset + local_frame;
+            let output_base = output_frame * self.channels;
+            output[output_base] = self.sample(left, local_frame);
+            if self.channels > 1 {
+                output[output_base + 1] = self.sample(right, local_frame);
+            }
+        }
+    }
+
+    fn signal_output_buffer_mut(&mut self, node_index: usize) -> Option<&mut Vec<f32>> {
+        self.nodes[node_index]
+            .output_buffer
+            .map(|output_buffer| &mut self.buffers[output_buffer])
+    }
+
+    fn sample(&self, buffer_id: Option<usize>, index: usize) -> f32 {
+        buffer_id
+            .and_then(|id| self.buffers.get(id))
+            .and_then(|buffer| buffer.get(index))
+            .copied()
+            .unwrap_or(0.0)
+    }
 }
 
 pub fn build_audio_dsp_plan(
@@ -448,12 +678,88 @@ fn control_input_f32(
         .map(|node| param_f32(&node.params, "value", 0.0))
 }
 
+fn control_input_f32_from_params(
+    node: &AudioDspPlanNode,
+    port_id: &str,
+    node_params_by_id: &BTreeMap<String, Map<String, Value>>,
+) -> Option<f32> {
+    for input in &node.control_inputs {
+        if input.port_id != port_id {
+            continue;
+        }
+        let node_id = input.source_node_id.as_deref()?;
+        let params = node_params_by_id.get(node_id)?;
+        return Some(param_f32(params, "value", 0.0));
+    }
+    None
+}
+
 fn param_f32(params: &Map<String, Value>, key: &str, default: f32) -> f32 {
     params
         .get(key)
         .and_then(Value::as_f64)
         .map(|value| value as f32)
         .unwrap_or(default)
+}
+
+fn matches_realtime_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "audio.sig" | "audio.osc" | "audio.operator.mul" | AUDIO_OUTPUT_KIND
+    )
+}
+
+fn realtime_node(
+    node: &AudioDspPlanNode,
+    buffer_index_by_id: &BTreeMap<String, usize>,
+    node_params_by_id: &BTreeMap<String, Map<String, Value>>,
+) -> AudioRealtimeNode {
+    AudioRealtimeNode {
+        kind: realtime_node_kind(node, node_params_by_id),
+        output_buffer: signal_output_buffer_index(node, buffer_index_by_id),
+        left_buffer: signal_input_buffer_index(node, "left", buffer_index_by_id),
+        right_buffer: signal_input_buffer_index(node, "right", buffer_index_by_id),
+        phase: 0.0,
+    }
+}
+
+fn realtime_node_kind(
+    node: &AudioDspPlanNode,
+    node_params_by_id: &BTreeMap<String, Map<String, Value>>,
+) -> AudioRealtimeNodeKind {
+    match node.kind.as_str() {
+        "audio.sig" => AudioRealtimeNodeKind::Sig {
+            value: param_f32(&node.params, "value", 0.0),
+        },
+        "audio.osc" => AudioRealtimeNodeKind::Osc {
+            frequency: control_input_f32_from_params(node, "frequency", node_params_by_id)
+                .unwrap_or_else(|| param_f32(&node.params, "frequency", 440.0)),
+        },
+        "audio.operator.mul" => AudioRealtimeNodeKind::Mul,
+        _ => AudioRealtimeNodeKind::Output,
+    }
+}
+
+fn signal_input_buffer_index(
+    node: &AudioDspPlanNode,
+    port_id: &str,
+    buffer_index_by_id: &BTreeMap<String, usize>,
+) -> Option<usize> {
+    node.signal_inputs
+        .iter()
+        .find(|input| input.port_id == port_id)
+        .and_then(|input| buffer_index_by_id.get(&input.buffer_id))
+        .copied()
+}
+
+fn signal_output_buffer_index(
+    node: &AudioDspPlanNode,
+    buffer_index_by_id: &BTreeMap<String, usize>,
+) -> Option<usize> {
+    node.signal_outputs
+        .first()
+        .and_then(|output| buffer_index_by_id.get(&output.buffer_id))
+        .copied()
 }
 
 fn reject_signal_ports_outside_audio_block(
@@ -578,6 +884,7 @@ mod tests {
             audio_binary_definition("audio.operator.mul"),
             audio_unary_definition("audio.operator.sqrt", "in"),
             audio_snapshot_definition(),
+            audio_output_definition(),
             float_definition(),
             bad_signal_definition(),
         ] {
@@ -975,6 +1282,260 @@ mod tests {
         );
     }
 
+    #[test]
+    fn realtime_executor_writes_stereo_output_from_audio_output_sink() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "realtime-output",
+          "revision": "1",
+          "nodes": [
+            audio_sig_node("left", 0.25),
+            audio_sig_node("right", -0.5),
+            audio_output_node("out")
+          ],
+          "edges": [
+            { "from": { "node": "left", "port": "out" }, "to": { "node": "out", "port": "left" } },
+            { "from": { "node": "right", "port": "out" }, "to": { "node": "out", "port": "right" } }
+          ]
+        }));
+        let mut executor = AudioRealtimeDspExecutor::new(
+            &graph,
+            &registry(),
+            AudioRealtimeDspOptions {
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 48_000,
+                },
+                channels: 2,
+            },
+        )
+        .unwrap();
+        let mut output = vec![99.0; 8];
+
+        executor.process_interleaved_output(&mut output);
+
+        assert_eq!(executor.channels(), 2);
+        assert_eq!(executor.plan().block_size, 4);
+        assert_eq!(output, vec![0.25, -0.5, 0.25, -0.5, 0.25, -0.5, 0.25, -0.5]);
+
+        let mut empty = Vec::new();
+        executor.process_interleaved_output(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn realtime_executor_runs_mul_before_audio_output_sink() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "realtime-mul",
+          "revision": "1",
+          "nodes": [
+            audio_sig_node("left", 2.0),
+            audio_sig_node("right", 0.5),
+            audio_binary_node("mul", "audio.operator.mul"),
+            audio_output_node("out")
+          ],
+          "edges": [
+            { "from": { "node": "left", "port": "out" }, "to": { "node": "mul", "port": "left" } },
+            { "from": { "node": "right", "port": "out" }, "to": { "node": "mul", "port": "right" } },
+            { "from": { "node": "mul", "port": "out" }, "to": { "node": "out", "port": "left" } },
+            { "from": { "node": "mul", "port": "out" }, "to": { "node": "out", "port": "right" } }
+          ]
+        }));
+        let mut executor = AudioRealtimeDspExecutor::new(
+            &graph,
+            &registry(),
+            AudioRealtimeDspOptions {
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 48_000,
+                },
+                channels: 2,
+            },
+        )
+        .unwrap();
+        let mut output = vec![0.0; 8];
+
+        executor.process_interleaved_output(&mut output);
+
+        assert_eq!(output, vec![1.0; 8]);
+    }
+
+    #[test]
+    fn realtime_executor_keeps_oscillator_phase_across_partial_callbacks() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "realtime-osc",
+          "revision": "1",
+          "nodes": [
+            audio_osc_node("osc"),
+            audio_output_node("out")
+          ],
+          "edges": [
+            { "from": { "node": "osc", "port": "out" }, "to": { "node": "out", "port": "left" } }
+          ]
+        }));
+        let mut executor = AudioRealtimeDspExecutor::new(
+            &graph,
+            &registry(),
+            AudioRealtimeDspOptions {
+                plan: AudioDspPlanOptions {
+                    block_size: 4,
+                    sample_rate: 1_760,
+                },
+                channels: 2,
+            },
+        )
+        .unwrap();
+        let mut output = vec![0.0; 12];
+
+        executor.process_interleaved_output(&mut output);
+        let left = output
+            .chunks_exact(2)
+            .map(|frame| frame[0])
+            .collect::<Vec<_>>();
+        let right = output
+            .chunks_exact(2)
+            .map(|frame| frame[1])
+            .collect::<Vec<_>>();
+
+        assert_samples_close(&left, &[0.0, 1.0, 0.0, -1.0, 0.0, 1.0]);
+        assert_eq!(right, vec![0.0; 6]);
+    }
+
+    #[test]
+    fn realtime_executor_reports_output_and_kind_errors_without_processing() {
+        let graph_without_output = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "no-output",
+          "revision": "1",
+          "nodes": [audio_sig_node("sig", 1.0)],
+          "edges": []
+        }));
+        let duplicate_outputs = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "duplicate-output",
+          "revision": "1",
+          "nodes": [audio_output_node("a"), audio_output_node("b")],
+          "edges": []
+        }));
+        let unsupported = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "unsupported-realtime",
+          "revision": "1",
+          "nodes": [
+            audio_unary_node("sqrt", "audio.operator.sqrt"),
+            audio_output_node("out")
+          ],
+          "edges": [
+            { "from": { "node": "sqrt", "port": "out" }, "to": { "node": "out", "port": "left" } }
+          ]
+        }));
+        let invalid_channels = AudioRealtimeDspExecutor::new(
+            &graph_without_output,
+            &registry(),
+            AudioRealtimeDspOptions {
+                plan: AudioDspPlanOptions::default(),
+                channels: 0,
+            },
+        )
+        .unwrap_err();
+        let missing_output = AudioRealtimeDspExecutor::new(
+            &graph_without_output,
+            &registry(),
+            AudioRealtimeDspOptions::default(),
+        )
+        .unwrap_err();
+        let duplicate_output = AudioRealtimeDspExecutor::new(
+            &duplicate_outputs,
+            &registry(),
+            AudioRealtimeDspOptions::default(),
+        )
+        .unwrap_err();
+        let unsupported_kind = AudioRealtimeDspExecutor::new(
+            &unsupported,
+            &registry(),
+            AudioRealtimeDspOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            invalid_channels,
+            AudioRealtimeDspError::InvalidChannelCount
+        ));
+        assert!(matches!(
+            missing_output,
+            AudioRealtimeDspError::OutputCount { count: 0 }
+        ));
+        assert!(matches!(
+            duplicate_output,
+            AudioRealtimeDspError::OutputCount { count: 2 }
+        ));
+        assert!(matches!(
+            unsupported_kind,
+            AudioRealtimeDspError::UnsupportedNodeKind { .. }
+        ));
+    }
+
+    #[test]
+    fn realtime_control_input_helper_handles_absent_sources() {
+        let node = AudioDspPlanNode {
+            node_id: "osc".to_owned(),
+            kind: "audio.osc".to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            order: 0,
+            params: Map::new(),
+            signal_inputs: Vec::new(),
+            control_inputs: vec![
+                AudioDspControlInput {
+                    port_id: "other".to_owned(),
+                    data_kind: "number.float".to_owned(),
+                    source_node_id: None,
+                    source_port_id: None,
+                },
+                AudioDspControlInput {
+                    port_id: "frequency".to_owned(),
+                    data_kind: "number.float".to_owned(),
+                    source_node_id: None,
+                    source_port_id: None,
+                },
+            ],
+            signal_outputs: Vec::new(),
+        };
+        let mut node_params = BTreeMap::new();
+
+        assert_eq!(
+            control_input_f32_from_params(&node, "frequency", &node_params),
+            None
+        );
+        assert_eq!(
+            control_input_f32_from_params(&node, "missing", &node_params),
+            None
+        );
+
+        let mut node_with_missing_source = node.clone();
+        node_with_missing_source.control_inputs[1].source_node_id = Some("missing".to_owned());
+        assert_eq!(
+            control_input_f32_from_params(&node_with_missing_source, "frequency", &node_params),
+            None
+        );
+
+        node_params.insert(
+            "missing".to_owned(),
+            Map::from_iter([("value".to_owned(), json!(12.5))]),
+        );
+        assert_eq!(
+            control_input_f32_from_params(&node_with_missing_source, "frequency", &node_params),
+            Some(12.5)
+        );
+    }
+
     fn audio_source_definition(id: &str, input_port: &str) -> NodeDefinition {
         node_definition(json!({
           "schema": "skenion.node.definition",
@@ -1064,6 +1625,25 @@ mod tests {
             { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "trigger", "direction": "input", "type": { "flow": "event", "dataKind": "message.any" }, "activation": "trigger" },
             { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+          ],
+          "execution": { "model": "audio_block" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn audio_output_definition() -> NodeDefinition {
+        node_definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "audio.output",
+          "version": "0.1.0",
+          "displayName": "dac~",
+          "category": "Audio",
+          "ports": [
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
           ],
           "execution": { "model": "audio_block" },
           "state": { "persistent": false },
@@ -1187,6 +1767,19 @@ mod tests {
             { "id": "signal", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
             { "id": "trigger", "direction": "input", "type": { "flow": "event", "dataKind": "message.any" }, "activation": "trigger" },
             { "id": "value", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+          ]
+        })
+    }
+
+    fn audio_output_node(id: &str) -> serde_json::Value {
+        json!({
+          "id": id,
+          "kind": "audio.output",
+          "kindVersion": "0.1.0",
+          "params": {},
+          "ports": [
+            { "id": "left", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" },
+            { "id": "right", "direction": "input", "type": { "flow": "signal", "dataKind": "signal.audio" }, "activation": "latched" }
           ]
         })
     }

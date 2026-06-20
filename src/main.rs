@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skenion_runtime::{
-    DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewDocument, PreviewFrameLimit,
-    build_execution_plan, format_dummy_execution_text, format_plan_text, load_graph_document,
-    load_node_definition, run_dummy_execution, run_preview_window, run_render_preview_window,
-    serve_runtime, validate_project,
+    AudioBackendConfig, DEFAULT_HOST, DEFAULT_PORT, ExecutionPlan, NodeRegistry, PreviewDocument,
+    PreviewFrameLimit, build_execution_plan, format_dummy_execution_text, format_plan_text,
+    load_graph_document, load_node_definition, run_dummy_execution, run_preview_window,
+    run_render_preview_window, serve_runtime, start_default_audio_output_backend, validate_project,
 };
 
 #[derive(Debug, Parser)]
@@ -104,6 +105,21 @@ enum Command {
         /// Number of frames before the preview exits.
         #[arg(long, default_value_t = 300)]
         frames: usize,
+    },
+    /// Run the CPAL default output backend for an audio.output DSP graph.
+    AudioOutput {
+        /// Path to the graph document.
+        #[arg(long)]
+        graph: PathBuf,
+        /// Directory containing node definition manifests.
+        #[arg(long)]
+        nodes: PathBuf,
+        /// Internal DSP block size used by the realtime executor.
+        #[arg(long, default_value_t = 64)]
+        block_size: u32,
+        /// How long to keep the output backend alive.
+        #[arg(long, default_value_t = 1000)]
+        duration_ms: u64,
     },
     /// Start the local HTTP JSON control API.
     Serve {
@@ -223,6 +239,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 PreviewFrameLimit::Frames(frames)
             };
             run_render_preview_window(document, frame_limit, telemetry, control_state)
+        }
+        Command::AudioOutput {
+            graph,
+            nodes,
+            block_size,
+            duration_ms,
+        } => {
+            let graph = load_graph_document(&graph)?;
+            let registry = NodeRegistry::load_dir(&nodes)?;
+            let backend = start_default_audio_output_backend(
+                &graph,
+                &registry,
+                AudioBackendConfig { block_size },
+            )?;
+            let info = backend.info();
+            println!(
+                "audio output: device={} sampleRate={} channels={} sampleFormat={}",
+                info.device_name, info.sample_rate, info.channels, info.sample_format
+            );
+            backend.keep_alive_for(Duration::from_millis(duration_ms));
+            Ok(())
         }
         Command::Serve { host, port } => serve_runtime(&host, port).await,
     }

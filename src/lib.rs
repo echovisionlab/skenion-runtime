@@ -1,3 +1,4 @@
+mod audio_backend;
 mod contract;
 mod control_state;
 mod control_value;
@@ -19,6 +20,10 @@ mod telemetry;
 mod validation;
 mod visual;
 
+pub use audio_backend::{
+    AudioBackendConfig, AudioBackendError, AudioBackendInfo, RunningAudioBackend,
+    start_default_audio_output_backend,
+};
 pub use contract::{
     ApplyPatchError, CycleValidationV02, DataFlow, DataType, Edge, EdgeSpecV02, ExecutionModel,
     ExecutionModelV02, FanOutPolicyV02, FeedbackBoundaryV02, FeedbackPolicyV02, GraphDocument,
@@ -40,7 +45,8 @@ pub use dsp::{
     AudioDspBlockReport, AudioDspBuffer, AudioDspControlInput, AudioDspPlan, AudioDspPlanEdge,
     AudioDspPlanError, AudioDspPlanNode, AudioDspPlanOptions, AudioDspRenderedBuffer,
     AudioDspSignalInput, AudioDspSignalOutput, AudioDspSnapshot, AudioOfflineDspError,
-    AudioOfflineDspOptions, AudioOfflineDspReport, build_audio_dsp_plan, run_offline_audio_dsp,
+    AudioOfflineDspOptions, AudioOfflineDspReport, AudioRealtimeDspError, AudioRealtimeDspExecutor,
+    AudioRealtimeDspOptions, build_audio_dsp_plan, run_offline_audio_dsp,
 };
 pub use loader::{LoadError, load_graph_document, load_node_definition};
 pub use planner::{
