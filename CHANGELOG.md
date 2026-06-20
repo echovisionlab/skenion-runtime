@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.29.0...skenion-runtime-v0.30.0) (2026-06-20)
+
+
+### Features
+
+* **runtime:** plan audio clock domains ([8d1c334](https://github.com/echovisionlab/skenion-runtime/commit/8d1c3344b301866c058aa8b54e6fdbdf09b33a8c))
+
 ## [0.29.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.28.0...skenion-runtime-v0.29.0) (2026-06-20)
 
 
