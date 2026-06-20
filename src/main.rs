@@ -151,7 +151,7 @@ enum Command {
         /// List MIDI input ports without opening one.
         #[arg(long)]
         list_inputs: bool,
-        /// MIDI input port index to open for live MIDI Clock capture.
+        /// MIDI input port index from --list-inputs. This is not a stable device identity.
         #[arg(long)]
         input_port: Option<usize>,
         /// Runtime clock source id used for live MIDI Clock capture.

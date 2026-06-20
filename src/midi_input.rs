@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -134,7 +134,6 @@ pub fn run_midi_clock_input(request: RuntimeMidiClockInputRequest) -> RuntimeMid
     let adapter = Arc::new(Mutex::new(initial_adapter));
     let store = Arc::new(Mutex::new(initial_store));
     let callback_diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let origin = Instant::now();
     let adapter_for_callback = Arc::clone(&adapter);
     let store_for_callback = Arc::clone(&store);
     let diagnostics_for_callback = Arc::clone(&callback_diagnostics);
@@ -143,7 +142,9 @@ pub fn run_midi_clock_input(request: RuntimeMidiClockInputRequest) -> RuntimeMid
         &midir_port,
         "skenion-runtime-midi-clock-input",
         move |_midir_timestamp, message, _| {
-            let received_host_time_ns = host_monotonic_timestamp_ns(origin);
+            // midir timestamps are backend-defined microseconds, so Runtime stamps
+            // receipt with its own monotonic process clock instead.
+            let received_host_time_ns = host_monotonic_timestamp_ns();
             let snapshot = {
                 let mut adapter = lock_or_recover(&adapter_for_callback);
                 adapter.apply_timestamped_message(TimestampedMidiMessage {
@@ -319,8 +320,13 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-fn host_monotonic_timestamp_ns(origin: Instant) -> u64 {
-    origin.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+fn host_monotonic_timestamp_ns() -> u64 {
+    static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+    PROCESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn push_diagnostics(lines: &mut Vec<String>, diagnostics: &[RuntimeClockDiagnostic]) {
@@ -382,9 +388,9 @@ mod tests {
 
     #[test]
     fn host_monotonic_timestamp_is_elapsed_nanoseconds() {
-        let origin = Instant::now();
+        let first = host_monotonic_timestamp_ns();
         thread::sleep(Duration::from_millis(1));
-        assert!(host_monotonic_timestamp_ns(origin) > 0);
+        assert!(host_monotonic_timestamp_ns() > first);
     }
 
     #[test]
