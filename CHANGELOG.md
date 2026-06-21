@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.34.0...skenion-runtime-v0.35.0) (2026-06-21)
+
+
+### Features
+
+* **runtime:** add runtime IO substrate without global MIDI ([6bcfa56](https://github.com/echovisionlab/skenion-runtime/commit/6bcfa56f4f423da5078021b9fa79fb267696d663))
+
 ## [0.34.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.33.0...skenion-runtime-v0.34.0) (2026-06-20)
 
 
