@@ -146,8 +146,9 @@ pub use session_registry::{
     RuntimeSessionRegistry, SessionEventsQuery,
 };
 pub use sidecar::{
-    RuntimeEndpointConfig, RuntimeSidecarShutdownInfo, RuntimeSidecarShutdownRequest,
-    RuntimeSidecarShutdownResponse, RuntimeSidecarStartupResponse, RuntimeSidecarTokenInfo,
+    RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownInfo,
+    RuntimeSidecarShutdownRequest, RuntimeSidecarShutdownResponse, RuntimeSidecarStartupResponse,
+    RuntimeSidecarTokenInfo,
 };
 pub use telemetry::{
     PREVIEW_TELEMETRY_SCHEMA, PREVIEW_TELEMETRY_SCHEMA_VERSION, PreviewTelemetryHeartbeat,

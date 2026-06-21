@@ -39,11 +39,12 @@ use crate::{
     session_registry::{
         DEFAULT_SESSION_ID, RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry,
         SessionEventsQuery, event_cursor_from_headers, publish_session_event,
-        replay_session_events, session_broadcast_event, session_event, session_event_from_session,
+        replay_session_events, session_broadcast_event, session_event, session_snapshot_event,
     },
     sidecar::{
-        RuntimeEndpointConfig, RuntimeSidecarShutdownResponse, RuntimeSidecarStartupResponse,
-        runtime_connection_profile, sidecar_shutdown_response, sidecar_startup_response,
+        RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
+        RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
+        sidecar_shutdown_response, sidecar_startup_response,
     },
     validate_project, validate_project_request_v02,
 };
@@ -155,6 +156,10 @@ impl RuntimeServerState {
             self.sessions.default_session_id(),
             &self.started_at_wall_clock,
         )
+    }
+
+    pub fn sidecar_health_response(&self) -> RuntimeSidecarHealthResponse {
+        sidecar_health_response(&self.endpoint, &self.started_at_wall_clock)
     }
 }
 
@@ -395,8 +400,8 @@ async fn sidecar_startup(
 
 async fn sidecar_health(
     State(state): State<RuntimeServerState>,
-) -> Json<RuntimeSidecarStartupResponse> {
-    Json(state.sidecar_startup_response())
+) -> Json<RuntimeSidecarHealthResponse> {
+    Json(state.sidecar_health_response())
 }
 
 async fn sidecar_shutdown(
@@ -474,29 +479,19 @@ fn session_events_stream_for(
     query: SessionEventsQuery,
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let after = query
-        .after
-        .or_else(|| event_cursor_from_headers(&headers))
-        .map(|sequence| sequence.max(1));
+    let after = query.after.or_else(|| event_cursor_from_headers(&headers));
     let snapshot = {
         let session = record
             .session
             .read()
             .expect("runtime session lock should not be poisoned");
-        session_event_from_session(
-            &record,
-            RuntimeSessionEventKind::Snapshot,
-            &session,
-            false,
-            None,
-            session.snapshot().diagnostics,
-        )
+        session_snapshot_event(&record, &session)
     };
     let replay_events = replay_session_events(&record, after, snapshot);
     let replay = tokio_stream::iter(replay_events.into_iter().map(session_event));
-    let session_id = record.id.clone();
+    let live_record = record.clone();
     let live = BroadcastStream::new(record.events.subscribe())
-        .map(move |result| session_broadcast_event(result, session_id.clone()));
+        .map(move |result| session_broadcast_event(result, live_record.clone()));
     Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
 }
 
@@ -1969,7 +1964,7 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
-    use skenion_contracts::RuntimeEventReplayMetadata;
+    use skenion_contracts::validate_runtime_session_event;
     use tower::ServiceExt;
 
     use crate::{
@@ -2080,7 +2075,17 @@ mod tests {
         assert_eq!(startup["token"]["required"], false);
         assert_eq!(startup["token"]["header"], "Authorization");
         assert_eq!(startup["shutdown"]["scope"], "owned-child-only");
-        assert_eq!(health["health"]["ok"], true);
+        assert!(startup["defaultSessionUrl"].is_string());
+        assert_eq!(health["schema"], "skenion.runtime.sidecar.health");
+        assert_eq!(health["ok"], true);
+        assert_eq!(health["readiness"], "ready");
+        assert_eq!(health["runtime"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(health["runtime"]["apiVersion"], RUNTIME_API_VERSION);
+        assert_eq!(health["endpoint"]["protocol"], "http");
+        assert_eq!(health["profile"]["mode"], "local-managed");
+        assert!(health.get("token").is_none());
+        assert!(health.get("shutdown").is_none());
+        assert!(health.get("defaultSessionUrl").is_none());
         assert_eq!(empty_shutdown["ok"], true);
         assert_eq!(shutdown["schema"], "skenion.runtime.sidecar.shutdown");
         assert_eq!(shutdown["ok"], true);
@@ -2089,6 +2094,11 @@ mod tests {
         assert_eq!(shutdown["scope"], "owned-child-only");
         assert_eq!(invalid_shutdown["ok"], false);
         assert!(startup_from_state.ok);
+        assert!(
+            runtime_state_with_dry_preview()
+                .sidecar_health_response()
+                .ok
+        );
     }
 
     #[tokio::test]
@@ -2335,6 +2345,15 @@ mod tests {
         assert!(text.contains("\"kind\":\"snapshot\""));
     }
 
+    fn session_event_from_sse_text(text: &str) -> RuntimeSessionEvent {
+        let data = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>()
+            .join("");
+        serde_json::from_str(&data).expect("session SSE event data should parse")
+    }
+
     #[tokio::test]
     async fn session_event_stream_emits_live_events_after_cursor() {
         let state = runtime_state_with_dry_preview();
@@ -2374,7 +2393,88 @@ mod tests {
         let text = std::str::from_utf8(&chunk).expect("session event stream should be utf8");
         assert!(text.contains("event: session"));
         assert!(text.contains("\"sessionId\":\"alpha\""));
-        assert!(text.contains("\"cursor\":\"2\""));
+        assert!(text.contains("\"cursor\":\"1\""));
+        let event = session_event_from_sse_text(text);
+        validate_runtime_session_event(&event).expect("live event should validate");
+    }
+
+    #[tokio::test]
+    async fn session_event_stream_replays_after_query_and_last_event_id() {
+        let state = runtime_state_with_dry_preview();
+        let app = runtime_router_with_state(state.clone());
+        post_json_with(app.clone(), "/v0/sessions/alpha/load", sample_project()).await;
+        post_json_with(
+            app.clone(),
+            "/v0/sessions/alpha/load",
+            sample_shader_project(),
+        )
+        .await;
+
+        let record = state.sessions.get_or_create("alpha");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
+
+        let after_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/alpha/events/stream?after=1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut after_query_stream = after_query.into_body().into_data_stream();
+        let after_query_chunk =
+            tokio::time::timeout(Duration::from_secs(1), after_query_stream.next())
+                .await
+                .expect("session event stream should emit")
+                .expect("session event stream should have a chunk")
+                .expect("session event stream chunk should be ok");
+        let after_query_text =
+            std::str::from_utf8(&after_query_chunk).expect("session event stream should be utf8");
+        let after_query_event = session_event_from_sse_text(after_query_text);
+
+        assert_eq!(after_query_event.sequence, 2);
+        assert!(after_query_event.replay.replayed);
+        validate_runtime_session_event(&after_query_event)
+            .expect("after query replay event should validate");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
+
+        let last_event_id = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/sessions/alpha/events/stream")
+                    .header("last-event-id", "1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let mut last_event_id_stream = last_event_id.into_body().into_data_stream();
+        let last_event_id_chunk =
+            tokio::time::timeout(Duration::from_secs(1), last_event_id_stream.next())
+                .await
+                .expect("session event stream should emit")
+                .expect("session event stream should have a chunk")
+                .expect("session event stream chunk should be ok");
+        let last_event_id_text =
+            std::str::from_utf8(&last_event_id_chunk).expect("session event stream should be utf8");
+        let last_event_id_event = session_event_from_sse_text(last_event_id_text);
+
+        assert_eq!(last_event_id_event.sequence, 2);
+        assert!(last_event_id_event.replay.replayed);
+        validate_runtime_session_event(&last_event_id_event)
+            .expect("Last-Event-ID replay event should validate");
+        assert_eq!(
+            crate::session_registry::current_session_event_sequence(&record),
+            2
+        );
     }
 
     #[test]
@@ -2388,38 +2488,13 @@ mod tests {
             message: "test log".to_owned(),
         };
         let session = RuntimeSession::default();
-        let session_event = RuntimeSessionEvent {
-            schema: "skenion.runtime.session.event",
-            schema_version: "0.1.0",
-            id: "session_event_000001".to_owned(),
-            session_id: DEFAULT_SESSION_ID.to_owned(),
-            sequence: 1,
-            session_revision: 0,
-            kind: RuntimeSessionEventKind::Snapshot,
-            snapshot: session.snapshot(),
-            history: session.history(),
-            mutation: None,
-            replay: RuntimeEventReplayMetadata {
-                cursor: "1".to_owned(),
-                previous_cursor: None,
-                replayed: false,
-                gap: None,
-                overflow: false,
-            },
-            diagnostics: Vec::new(),
-            created_at: "1970-01-01T00:00:00.000Z".to_owned(),
-        };
+        let record = RuntimeSessionRegistry::dry_preview().default_record();
+        let session_event = session_snapshot_event(&record, &session);
 
         assert!(runtime_log_broadcast_event(Ok(log_event)).is_ok());
         assert!(runtime_log_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
-        assert!(session_broadcast_event(Ok(session_event), DEFAULT_SESSION_ID.to_owned()).is_ok());
-        assert!(
-            session_broadcast_event(
-                Err(BroadcastStreamRecvError::Lagged(1)),
-                DEFAULT_SESSION_ID.to_owned()
-            )
-            .is_ok()
-        );
+        assert!(session_broadcast_event(Ok(session_event), record.clone()).is_ok());
+        assert!(session_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1)), record).is_ok());
     }
 
     #[tokio::test]

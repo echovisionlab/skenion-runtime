@@ -5,52 +5,26 @@ use std::{
 };
 
 use axum::{http::HeaderMap, response::sse::Event};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::Value;
 use skenion_contracts::{
     RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEventReplayGap,
     RuntimeEventReplayGapReason, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
+    RuntimeHistory as ContractRuntimeHistory, RuntimeHistoryEntry as ContractRuntimeHistoryEntry,
     RuntimeSessionCapabilitySet, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
+    validate_runtime_session_event,
 };
+pub use skenion_contracts::{RuntimeSessionEvent, RuntimeSessionEventKind};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::{
-    PreviewManager, RuntimeDiagnostic, RuntimeHistoryEntry, RuntimeSession, RuntimeSessionSnapshot,
+    PreviewManager, RuntimeDiagnostic, RuntimeSession, RuntimeSessionSnapshot,
     runtime_time::created_at_now,
 };
 
 pub const DEFAULT_SESSION_ID: &str = "default";
 const SESSION_EVENT_REPLAY_LIMIT: usize = 256;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeSessionEvent {
-    pub schema: &'static str,
-    pub schema_version: &'static str,
-    pub id: String,
-    pub session_id: String,
-    pub sequence: u64,
-    pub session_revision: u64,
-    pub kind: RuntimeSessionEventKind,
-    pub snapshot: RuntimeSessionSnapshot,
-    pub history: crate::RuntimeHistory,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mutation: Option<RuntimeHistoryEntry>,
-    pub replay: RuntimeEventReplayMetadata,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RuntimeSessionEventKind {
-    Snapshot,
-    Load,
-    Clear,
-    Mutate,
-    Undo,
-    Redo,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,7 +134,10 @@ impl RuntimeSessionRecord {
             .lock()
             .expect("runtime session event store lock should not be poisoned");
         let earliest_sequence = store.front().map(|event| event.sequence).unwrap_or(1);
-        let latest_sequence = store.back().map(|event| event.sequence).unwrap_or(1);
+        let latest_sequence = store
+            .back()
+            .map(|event| event.sequence)
+            .unwrap_or_else(|| current_session_event_sequence(self));
         RuntimeEventReplayWindow {
             cursor_kind: "sequence".to_owned(),
             current_cursor: latest_sequence.to_string(),
@@ -207,46 +184,99 @@ pub fn publish_session_event(
     session: &RuntimeSession,
     diagnostics: Vec<RuntimeDiagnostic>,
 ) {
-    let event = session_event_from_session(record, kind, session, false, None, diagnostics);
+    let sequence = next_session_event_sequence(record);
+    let event = session_event_from_session(
+        record,
+        kind,
+        session,
+        event_replay_fields(session_event_id(&record.id, sequence), sequence),
+        diagnostics,
+    );
     store_session_event(record, event.clone());
     let _ = record.events.send(event);
 }
 
-pub fn session_event_from_session(
+fn session_event_from_session(
     record: &RuntimeSessionRecord,
     kind: RuntimeSessionEventKind,
     session: &RuntimeSession,
-    replayed: bool,
-    gap: Option<RuntimeEventReplayGap>,
+    replay: SessionEventReplayFields,
     diagnostics: Vec<RuntimeDiagnostic>,
 ) -> RuntimeSessionEvent {
-    let sequence = next_session_event_sequence(record);
     let snapshot = session.snapshot();
-    let previous_cursor = sequence
-        .checked_sub(1)
-        .map(|previous| previous.to_string())
-        .filter(|previous| previous != "0");
     let history = session.history();
-    RuntimeSessionEvent {
-        schema: "skenion.runtime.session.event",
-        schema_version: "0.1.0",
-        id: format!("{}_event_{sequence:06}", record.id),
+    let event = RuntimeSessionEvent {
+        schema: "skenion.runtime.session.event".to_owned(),
+        schema_version: "0.1.0".to_owned(),
+        id: replay.id,
         session_id: record.id.clone(),
-        sequence,
+        sequence: replay.sequence,
         session_revision: snapshot.session_revision,
         kind,
-        snapshot,
-        mutation: history.entries.last().cloned(),
-        history,
+        snapshot: contract_session_snapshot(&snapshot),
+        mutation: history.entries.last().map(contract_history_entry),
+        history: contract_runtime_history(&history),
         replay: RuntimeEventReplayMetadata {
-            cursor: sequence.to_string(),
+            cursor: replay.cursor,
+            previous_cursor: replay.previous_cursor,
+            replayed: replay.replayed,
+            gap: replay.gap,
+            overflow: replay.overflow,
+        },
+        diagnostics: contract_diagnostics(&diagnostics),
+        created_at: created_at_now(),
+    };
+    validate_runtime_session_event(&event).expect("runtime session event should validate");
+    event
+}
+
+pub fn session_snapshot_event(
+    record: &RuntimeSessionRecord,
+    session: &RuntimeSession,
+) -> RuntimeSessionEvent {
+    let latest_sequence = current_session_event_sequence(record);
+    let sequence = latest_sequence.max(1);
+    let previous_cursor = if latest_sequence == 0 {
+        None
+    } else {
+        previous_cursor_for(latest_sequence)
+    };
+    session_event_from_session(
+        record,
+        RuntimeSessionEventKind::Snapshot,
+        session,
+        SessionEventReplayFields {
+            id: format!("{}_snapshot_{latest_sequence:06}", record.id),
+            sequence,
+            cursor: latest_sequence.to_string(),
             previous_cursor,
-            replayed,
-            gap,
+            replayed: false,
+            gap: None,
             overflow: false,
         },
-        diagnostics,
-        created_at: created_at_now(),
+        Vec::new(),
+    )
+}
+
+struct SessionEventReplayFields {
+    id: String,
+    sequence: u64,
+    cursor: String,
+    previous_cursor: Option<String>,
+    replayed: bool,
+    gap: Option<RuntimeEventReplayGap>,
+    overflow: bool,
+}
+
+fn event_replay_fields(id: String, sequence: u64) -> SessionEventReplayFields {
+    SessionEventReplayFields {
+        id,
+        sequence,
+        cursor: sequence.to_string(),
+        previous_cursor: previous_cursor_for(sequence),
+        replayed: false,
+        gap: None,
+        overflow: false,
     }
 }
 
@@ -258,6 +288,25 @@ fn next_session_event_sequence(record: &RuntimeSessionRecord) -> u64 {
     let current = *sequence;
     *sequence += 1;
     current
+}
+
+pub fn current_session_event_sequence(record: &RuntimeSessionRecord) -> u64 {
+    let next_sequence = record
+        .event_sequence
+        .lock()
+        .expect("runtime session event sequence lock should not be poisoned");
+    next_sequence.saturating_sub(1)
+}
+
+fn previous_cursor_for(sequence: u64) -> Option<String> {
+    sequence
+        .checked_sub(1)
+        .filter(|previous| *previous > 0)
+        .map(|previous| previous.to_string())
+}
+
+fn session_event_id(session_id: &str, sequence: u64) -> String {
+    format!("{session_id}_event_{sequence:06}")
 }
 
 fn store_session_event(record: &RuntimeSessionRecord, event: RuntimeSessionEvent) {
@@ -288,22 +337,51 @@ pub fn replay_session_events(
     for event in store.iter().filter(|event| event.sequence > after) {
         let mut event = event.clone();
         event.replay.replayed = true;
+        validate_runtime_session_event(&event).expect("runtime replay event should validate");
         replay.push(event);
     }
     if let Some(earliest) = earliest
         && after + 1 < earliest
     {
-        let mut gap = snapshot;
-        gap.replay.replayed = true;
-        gap.replay.overflow = true;
-        gap.replay.gap = Some(RuntimeEventReplayGap {
-            expected_sequence: after + 1,
-            actual_sequence: earliest,
-            reason: RuntimeEventReplayGapReason::RetentionOverflow,
-        });
+        let gap = replay_gap_event(
+            snapshot,
+            &record.id,
+            after,
+            earliest,
+            RuntimeEventReplayGapReason::RetentionOverflow,
+        );
         replay.insert(0, gap);
     }
     replay
+}
+
+fn replay_gap_event(
+    mut snapshot: RuntimeSessionEvent,
+    session_id: &str,
+    after: u64,
+    actual_sequence: u64,
+    reason: RuntimeEventReplayGapReason,
+) -> RuntimeSessionEvent {
+    let expected_sequence = after + 1;
+    snapshot.id = format!("{session_id}_gap_{expected_sequence:06}_{actual_sequence:06}");
+    snapshot.sequence = expected_sequence;
+    snapshot.replay = RuntimeEventReplayMetadata {
+        cursor: expected_sequence.to_string(),
+        previous_cursor: if after == 0 {
+            None
+        } else {
+            Some(after.to_string())
+        },
+        replayed: true,
+        gap: Some(RuntimeEventReplayGap {
+            expected_sequence,
+            actual_sequence,
+            reason,
+        }),
+        overflow: true,
+    };
+    validate_runtime_session_event(&snapshot).expect("runtime replay gap event should validate");
+    snapshot
 }
 
 pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
@@ -315,19 +393,13 @@ pub fn event_cursor_from_headers(headers: &HeaderMap) -> Option<u64> {
 
 pub fn session_broadcast_event(
     result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
-    session_id: String,
+    record: RuntimeSessionRecord,
 ) -> Result<Event, Infallible> {
     match result {
         Ok(event) => session_event(event),
-        Err(_) => Ok(Event::default()
-            .event("session-gap")
-            .json_data(serde_json::json!({
-                "schema": "skenion.runtime.session.stream-gap",
-                "schemaVersion": "0.1.0",
-                "sessionId": session_id,
-                "reason": "receiver-lagged"
-            }))
-            .expect("runtime session gap event should serialize")),
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            session_event(session_lag_gap_event(&record, skipped))
+        }
     }
 }
 
@@ -339,6 +411,41 @@ pub fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
         .expect("runtime session event should serialize"))
 }
 
+pub fn session_lag_gap_event(record: &RuntimeSessionRecord, skipped: u64) -> RuntimeSessionEvent {
+    let latest_sequence = current_session_event_sequence(record).max(2);
+    let skipped = skipped.max(1);
+    let mut expected_sequence = latest_sequence.saturating_sub(skipped);
+    if expected_sequence == 0 {
+        expected_sequence = 1;
+    }
+    let session = record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    session_event_from_session(
+        record,
+        RuntimeSessionEventKind::Snapshot,
+        &session,
+        SessionEventReplayFields {
+            id: format!(
+                "{}_stream_gap_{expected_sequence:06}_{latest_sequence:06}",
+                record.id
+            ),
+            sequence: expected_sequence,
+            cursor: expected_sequence.to_string(),
+            previous_cursor: previous_cursor_for(expected_sequence),
+            replayed: true,
+            gap: Some(RuntimeEventReplayGap {
+                expected_sequence,
+                actual_sequence: latest_sequence,
+                reason: RuntimeEventReplayGapReason::StreamReset,
+            }),
+            overflow: true,
+        },
+        Vec::new(),
+    )
+}
+
 fn contract_session_snapshot(
     snapshot: &RuntimeSessionSnapshot,
 ) -> skenion_contracts::RuntimeSessionSnapshot {
@@ -346,6 +453,28 @@ fn contract_session_snapshot(
         serde_json::to_value(snapshot).expect("runtime session snapshot should serialize"),
     )
     .expect("runtime session snapshot should match contract shape")
+}
+
+fn contract_runtime_history(history: &crate::RuntimeHistory) -> ContractRuntimeHistory {
+    serde_json::from_value(serde_json::to_value(history).expect("runtime history should serialize"))
+        .expect("runtime history should match contract shape")
+}
+
+fn contract_history_entry(entry: &crate::RuntimeHistoryEntry) -> ContractRuntimeHistoryEntry {
+    serde_json::from_value(
+        serde_json::to_value(entry).expect("runtime history entry should serialize"),
+    )
+    .expect("runtime history entry should match contract shape")
+}
+
+fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
+    let mut values = Vec::new();
+    for diagnostic in diagnostics {
+        values.push(
+            serde_json::to_value(diagnostic).expect("runtime diagnostic should serialize to JSON"),
+        );
+    }
+    values
 }
 
 fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
@@ -393,14 +522,7 @@ mod tests {
                 Vec::new(),
             );
         }
-        let snapshot = session_event_from_session(
-            &record,
-            RuntimeSessionEventKind::Snapshot,
-            &session,
-            false,
-            None,
-            Vec::new(),
-        );
+        let snapshot = session_snapshot_event(&record, &session);
         let replay = replay_session_events(&record, Some(0), snapshot);
         let gap = replay[0]
             .replay
@@ -408,11 +530,107 @@ mod tests {
             .as_ref()
             .expect("replay should include retention gap");
 
+        assert_eq!(
+            replay
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         assert_eq!(gap.expected_sequence, 1);
         assert_eq!(gap.actual_sequence, 2);
         assert_eq!(gap.reason, RuntimeEventReplayGapReason::RetentionOverflow);
-        assert_eq!(replay[1].sequence, 2);
-        assert_eq!(replay[2].sequence, 3);
+        for event in replay {
+            validate_runtime_session_event(&event).expect("replayed event should validate");
+        }
+    }
+
+    #[test]
+    fn retention_gap_after_nonzero_cursor_preserves_previous_cursor() {
+        let record = RuntimeSessionRecord::new("gap-after-test", 2, true);
+        let session = RuntimeSession::default();
+
+        for _ in 0..4 {
+            publish_session_event(
+                &record,
+                RuntimeSessionEventKind::Snapshot,
+                &session,
+                Vec::new(),
+            );
+        }
+        let replay =
+            replay_session_events(&record, Some(1), session_snapshot_event(&record, &session));
+        let gap = replay[0]
+            .replay
+            .gap
+            .as_ref()
+            .expect("replay should include retention gap");
+
+        assert_eq!(
+            replay
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(replay[0].replay.previous_cursor.as_deref(), Some("1"));
+        assert_eq!(gap.expected_sequence, 2);
+        assert_eq!(gap.actual_sequence, 3);
+    }
+
+    #[test]
+    fn stream_snapshot_does_not_consume_canonical_sequence() {
+        let record = RuntimeSessionRecord::new("snapshot-test", 2, true);
+        let session = RuntimeSession::default();
+
+        let snapshot = session_snapshot_event(&record, &session);
+
+        assert_eq!(current_session_event_sequence(&record), 0);
+        assert_eq!(snapshot.sequence, 1);
+        assert_eq!(snapshot.replay.cursor, "0");
+        validate_runtime_session_event(&snapshot).expect("snapshot event should validate");
+
+        publish_session_event(
+            &record,
+            RuntimeSessionEventKind::Snapshot,
+            &session,
+            vec![RuntimeDiagnostic::warning("covered diagnostic")],
+        );
+        let stored = record
+            .event_store
+            .lock()
+            .expect("event store should not be poisoned")
+            .front()
+            .cloned()
+            .expect("published event should be stored");
+        assert_eq!(stored.sequence, 1);
+        assert_eq!(stored.replay.cursor, "1");
+        assert_eq!(stored.diagnostics[0]["message"], "covered diagnostic");
+        assert_eq!(current_session_event_sequence(&record), 1);
+    }
+
+    #[test]
+    fn live_lag_gap_is_contract_shaped() {
+        let record = RuntimeSessionRecord::new("lag-test", 2, true);
+        let session = RuntimeSession::default();
+        for _ in 0..3 {
+            publish_session_event(
+                &record,
+                RuntimeSessionEventKind::Snapshot,
+                &session,
+                Vec::new(),
+            );
+        }
+
+        let gap = session_lag_gap_event(&record, 99);
+
+        assert_eq!(gap.session_id, "lag-test");
+        assert_eq!(
+            gap.replay.gap.as_ref().unwrap().reason,
+            RuntimeEventReplayGapReason::StreamReset
+        );
+        assert_eq!(gap.replay.gap.as_ref().unwrap().expected_sequence, 1);
+        validate_runtime_session_event(&gap).expect("live lag gap event should validate");
     }
 
     #[test]

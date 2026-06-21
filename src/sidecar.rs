@@ -54,6 +54,19 @@ pub struct RuntimeSidecarHealthInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeSidecarHealthResponse {
+    pub schema: &'static str,
+    pub schema_version: &'static str,
+    pub ok: bool,
+    pub readiness: &'static str,
+    pub runtime: RuntimeSidecarRuntimeInfo,
+    pub endpoint: RuntimeEndpointMetadata,
+    pub profile: RuntimeConnectionProfile,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeSidecarTokenInfo {
     pub required: bool,
     pub header: &'static str,
@@ -121,6 +134,26 @@ pub(crate) fn sidecar_startup_response(
             url: format!("{}/v0/sidecar/shutdown", endpoint.url),
             scope: "owned-child-only",
         },
+        diagnostics: Vec::new(),
+    }
+}
+
+pub(crate) fn sidecar_health_response(
+    endpoint_config: &RuntimeEndpointConfig,
+    started_at_wall_clock: &str,
+) -> RuntimeSidecarHealthResponse {
+    RuntimeSidecarHealthResponse {
+        schema: "skenion.runtime.sidecar.health",
+        schema_version: "0.1.0",
+        ok: true,
+        readiness: "ready",
+        runtime: RuntimeSidecarRuntimeInfo {
+            name: "skenion-runtime",
+            version: env!("CARGO_PKG_VERSION"),
+            api_version: RUNTIME_API_VERSION,
+        },
+        endpoint: runtime_endpoint_metadata(endpoint_config),
+        profile: runtime_connection_profile(endpoint_config, started_at_wall_clock),
         diagnostics: Vec::new(),
     }
 }
@@ -245,6 +278,22 @@ mod tests {
         );
         assert_eq!(response.token.header, "Authorization");
         assert_eq!(response.shutdown.scope, "owned-child-only");
+    }
+
+    #[test]
+    fn health_response_is_not_startup_handshake() {
+        let endpoint = RuntimeEndpointConfig::new("127.0.0.1".to_owned(), 3761);
+        let response = sidecar_health_response(&endpoint, "unix-ms:1");
+        let value = serde_json::to_value(&response).expect("health response should serialize");
+
+        assert!(response.ok);
+        assert_eq!(response.schema, "skenion.runtime.sidecar.health");
+        assert_eq!(response.readiness, "ready");
+        assert_eq!(response.runtime.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(response.endpoint.url, "http://127.0.0.1:3761");
+        assert!(value.get("token").is_none());
+        assert!(value.get("shutdown").is_none());
+        assert!(value.get("defaultSessionUrl").is_none());
     }
 
     #[test]
