@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.37.1...skenion-runtime-v0.38.0) (2026-06-21)
+
+
+### Features
+
+* **graph:** implement paste graph fragment lowering ([#109](https://github.com/echovisionlab/skenion-runtime/issues/109)) ([874e285](https://github.com/echovisionlab/skenion-runtime/commit/874e285ff16dc05eb277ee7063074b91ecdecc73))
+
 ## [0.37.1](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.37.0...skenion-runtime-v0.37.1) (2026-06-21)
 
 
