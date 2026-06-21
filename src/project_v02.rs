@@ -1228,6 +1228,23 @@ mod tests {
         }))
     }
 
+    fn project_document() -> ProjectDocumentV02 {
+        serde_json::from_value(json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.2.0",
+          "id": "render-project",
+          "revision": "1",
+          "graph": subpatch_graph(),
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": { "nodes": {} }
+          },
+          "patchLibrary": [identity_patch()]
+        }))
+        .expect("project document should parse")
+    }
+
     #[test]
     fn validates_and_builds_v02_plan_metadata() {
         let graph = render_graph();
@@ -1323,6 +1340,22 @@ mod tests {
     }
 
     #[test]
+    fn project_document_conversions_default_runtime_fields() {
+        let document = project_document();
+
+        let request: ProjectRequestV02 = document.clone().into();
+        assert_eq!(request.graph.id, "render-subpatch");
+        assert!(request.nodes.is_empty());
+        assert_eq!(request.patch_library[0].id, "identity");
+
+        let run_request: RunProjectRequestV02 = document.into();
+        assert_eq!(run_request.graph.id, "render-subpatch");
+        assert!(run_request.nodes.is_empty());
+        assert_eq!(run_request.patch_library[0].id, "identity");
+        assert_eq!(run_request.frames, None);
+    }
+
+    #[test]
     fn expands_subpatches_before_v02_validation_and_planning() {
         let request = ProjectRequestV02 {
             graph: subpatch_graph(),
@@ -1364,6 +1397,321 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["clear", "fx::pass", "output"]
         );
+    }
+
+    #[test]
+    fn contracts_boundary_edges_and_filters_boundary_only_edges() {
+        let base_edge = render_graph().edges[0].clone();
+        let endpoint = EdgeEndpointV02 {
+            node_id: "same".to_owned(),
+            port_id: "out".to_owned(),
+        };
+        let self_loop_edges = vec![
+            ExpansionEdge {
+                edge: base_edge.clone(),
+                source: ExpansionEndpoint::Node(endpoint.clone()),
+                target: ExpansionEndpoint::Boundary("pin".to_owned()),
+            },
+            ExpansionEdge {
+                edge: base_edge.clone(),
+                source: ExpansionEndpoint::Boundary("pin".to_owned()),
+                target: ExpansionEndpoint::Node(endpoint.clone()),
+            },
+        ];
+
+        let contracted = contract_boundary_edges(
+            self_loop_edges,
+            std::collections::HashSet::from(["pin".to_owned()]),
+        );
+        assert!(contracted.is_empty());
+
+        let mut source_edge = base_edge.clone();
+        source_edge.id = "source_edge".to_owned();
+        source_edge.resolved_type = Some("render.frame".to_owned());
+        let mut target_edge = base_edge.clone();
+        target_edge.id = "target_edge".to_owned();
+        target_edge.resolved_type = None;
+        let merged = contract_boundary_edges(
+            vec![
+                ExpansionEdge {
+                    edge: source_edge,
+                    source: ExpansionEndpoint::Node(EdgeEndpointV02 {
+                        node_id: "source".to_owned(),
+                        port_id: "out".to_owned(),
+                    }),
+                    target: ExpansionEndpoint::Boundary("fx::@inlet::in".to_owned()),
+                },
+                ExpansionEdge {
+                    edge: target_edge,
+                    source: ExpansionEndpoint::Boundary("fx::@inlet::in".to_owned()),
+                    target: ExpansionEndpoint::Node(EdgeEndpointV02 {
+                        node_id: "target".to_owned(),
+                        port_id: "in".to_owned(),
+                    }),
+                },
+            ],
+            std::collections::HashSet::from(["fx::@inlet::in".to_owned()]),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].resolved_type.as_deref(), Some("render.frame"));
+        assert!(merged[0].id.contains("fx___inlet__in"));
+
+        assert!(
+            expansion_edge_to_real_edge(ExpansionEdge {
+                edge: base_edge.clone(),
+                source: ExpansionEndpoint::Boundary("pin".to_owned()),
+                target: ExpansionEndpoint::Node(endpoint.clone()),
+            })
+            .is_none()
+        );
+        assert!(
+            expansion_edge_to_real_edge(ExpansionEdge {
+                edge: base_edge,
+                source: ExpansionEndpoint::Node(endpoint),
+                target: ExpansionEndpoint::Boundary("pin".to_owned()),
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reports_missing_ref_depth_and_duplicate_patch_diagnostics() {
+        let duplicate = ProjectRequestV02 {
+            graph: render_graph(),
+            nodes: vec![clear_definition(), output_definition()],
+            patch_library: vec![identity_patch(), identity_patch()],
+        };
+        let duplicate_diagnostics =
+            validate_project_request_v02(&duplicate).expect_err("duplicate patch ids should fail");
+        assert_eq!(
+            duplicate_diagnostics[0].code.as_deref(),
+            Some("subpatch.duplicate-patch-id")
+        );
+
+        let missing_ref = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.2.0",
+          "id": "missing-ref",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "fx",
+              "kind": "core.subpatch",
+              "kindVersion": "0.2.0",
+              "params": {},
+              "ports": []
+            }
+          ],
+          "edges": []
+        }));
+        let missing_ref_diagnostics =
+            expand_project_graph_v02(&missing_ref, &[]).expect_err("missing ref should fail");
+        assert_eq!(
+            missing_ref_diagnostics[0].code.as_deref(),
+            Some("subpatch.missing-ref")
+        );
+        assert_eq!(
+            missing_ref_diagnostics[0].details.as_ref().unwrap()["patchRef"],
+            Value::Null
+        );
+
+        let mut patch_library = Vec::new();
+        for index in 0..=15 {
+            patch_library.push(
+                serde_json::from_value(json!({
+                  "id": format!("p{index}"),
+                  "revision": "1",
+                  "graph": {
+                    "schema": "skenion.graph",
+                    "schemaVersion": "0.2.0",
+                    "id": format!("p{index}-graph"),
+                    "revision": "1",
+                    "nodes": [
+                      {
+                        "id": "next",
+                        "kind": "core.subpatch",
+                        "kindVersion": "0.2.0",
+                        "params": { "patchRef": format!("p{}", index + 1) },
+                        "ports": []
+                      }
+                    ],
+                    "edges": []
+                  }
+                }))
+                .expect("patch should parse"),
+            );
+        }
+        let depth_root = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.2.0",
+          "id": "depth-root",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "root",
+              "kind": "core.subpatch",
+              "kindVersion": "0.2.0",
+              "params": { "patchRef": "p0" },
+              "ports": []
+            }
+          ],
+          "edges": []
+        }));
+        let depth_diagnostics =
+            expand_project_graph_v02(&depth_root, &patch_library).expect_err("depth should fail");
+        assert_eq!(
+            depth_diagnostics[0].code.as_deref(),
+            Some("subpatch.depth-exceeded")
+        );
+        assert_eq!(depth_diagnostics[0].details.as_ref().unwrap()["depth"], 17);
+    }
+
+    #[test]
+    fn parses_subpatch_aliases_and_reports_missing_boundaries() {
+        assert_eq!(
+            parse_subpatch_object_text("p identity").as_deref(),
+            Some("identity")
+        );
+        assert_eq!(
+            parse_subpatch_object_text("core.subpatch identity").as_deref(),
+            Some("identity")
+        );
+        assert_eq!(parse_subpatch_object_text("object identity"), None);
+        assert_eq!(namespace_prefix(""), "");
+
+        let params = serde_json::Map::from_iter([
+            ("patchId".to_owned(), json!(42)),
+            ("empty".to_owned(), json!("")),
+            ("enabled".to_owned(), json!(true)),
+        ]);
+        assert_eq!(string_param(&params, "patchId").as_deref(), Some("42"));
+        assert_eq!(string_param(&params, "empty"), None);
+        assert_eq!(string_param(&params, "enabled"), None);
+
+        let fallback_boundary = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.2.0",
+          "id": "fallback-boundary",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "plain_inlet",
+              "kind": "core.inlet",
+              "kindVersion": "0.2.0",
+              "params": {},
+              "ports": []
+            }
+          ],
+          "edges": []
+        }));
+        assert_eq!(boundary_key(&fallback_boundary.nodes[0]), "plain_inlet");
+
+        let duplicate_inlet_patch: PatchDefinitionV02 = serde_json::from_value(json!({
+          "id": "alias-patch",
+          "revision": "1",
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.2.0",
+            "id": "alias-patch-graph",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "in_a",
+                "kind": "core.inlet",
+                "kindVersion": "0.2.0",
+                "params": { "portId": "in_a", "label": "shared" },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                ]
+              },
+              {
+                "id": "in_b",
+                "kind": "core.inlet",
+                "kindVersion": "0.2.0",
+                "params": { "portId": "in_b", "label": "shared" },
+                "ports": [
+                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                ]
+              }
+            ],
+            "edges": []
+          }
+        }))
+        .expect("patch should parse");
+        let mut boundary_pins = std::collections::HashSet::new();
+        let mut aliases = std::collections::HashMap::new();
+        let first_pin = register_boundary_node(
+            &duplicate_inlet_patch.graph.nodes[0],
+            "fx",
+            BoundaryKind::Inlet,
+            &mut boundary_pins,
+            &mut aliases,
+        );
+        let second_pin = register_boundary_node(
+            &duplicate_inlet_patch.graph.nodes[0],
+            "fx",
+            BoundaryKind::Inlet,
+            &mut boundary_pins,
+            &mut aliases,
+        );
+        assert_eq!(first_pin, second_pin);
+
+        let root = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.2.0",
+          "id": "alias-root",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "clear",
+              "kind": "render.clear-color",
+              "kindVersion": "0.2.0",
+              "params": {},
+              "ports": [
+                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+              ]
+            },
+            {
+              "id": "fx",
+              "kind": "p",
+              "kindVersion": "0.2.0",
+              "params": { "objectText": "p alias-patch" },
+              "ports": [
+                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" },
+                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+              ]
+            },
+            {
+              "id": "output",
+              "kind": "render.output",
+              "kindVersion": "0.2.0",
+              "params": {},
+              "ports": [
+                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" }
+              ]
+            }
+          ],
+          "edges": [
+            {
+              "id": "edge_clear_fx",
+              "source": { "nodeId": "clear", "portId": "out" },
+              "target": { "nodeId": "fx", "portId": "shared" }
+            },
+            {
+              "id": "edge_fx_output",
+              "source": { "nodeId": "fx", "portId": "out" },
+              "target": { "nodeId": "output", "portId": "in" }
+            }
+          ]
+        }));
+        let diagnostics =
+            expand_project_graph_v02(&root, &[duplicate_inlet_patch]).expect_err("boundaries fail");
+        let codes = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_deref())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&Some("subpatch.missing-inlet")));
+        assert!(codes.contains(&Some("subpatch.missing-outlet")));
     }
 
     #[test]

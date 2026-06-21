@@ -2263,6 +2263,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v02_project_document_payload_reports_decode_and_contract_errors() {
+        let malformed_project = json!({
+          "schema": "skenion.project",
+          "schemaVersion": "0.2.0"
+        });
+        let malformed_response = post_json("/v0/validate", malformed_project).await;
+        assert_eq!(malformed_response["ok"], false);
+        assert!(
+            malformed_response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid project request")
+        );
+
+        let mut duplicate_patch = sample_subpatch_project_document_v02();
+        let patch = duplicate_patch["patchLibrary"][0].clone();
+        duplicate_patch["patchLibrary"]
+            .as_array_mut()
+            .unwrap()
+            .push(patch);
+
+        let response = post_json("/v0/plan", duplicate_patch).await;
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["diagnostics"][0]["code"],
+            json!("project.invalid-v0.2")
+        );
+        assert_eq!(
+            response["diagnostics"][0]["details"]["projectId"],
+            json!("subpatch-project")
+        );
+    }
+
+    #[tokio::test]
     async fn v02_project_endpoints_reject_ambiguous_algebraic_loop() {
         let response = post_json("/v0/validate", sample_ambiguous_loop_project_v02()).await;
 
