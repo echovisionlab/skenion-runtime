@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.38.0...skenion-runtime-v0.39.0) (2026-06-21)
+
+
+### Features
+
+* **runtime:** add session registry and sidecar handshake ([#111](https://github.com/echovisionlab/skenion-runtime/issues/111)) ([fefd50e](https://github.com/echovisionlab/skenion-runtime/commit/fefd50e7bacaf096723ba04c971a6e51fd7f320c))
+
 ## [0.38.0](https://github.com/echovisionlab/skenion-runtime/compare/skenion-runtime-v0.37.1...skenion-runtime-v0.38.0) (2026-06-21)
 
 
