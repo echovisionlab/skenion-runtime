@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -78,7 +78,10 @@ impl RuntimeLogStore {
     }
 
     pub fn snapshot(&self) -> RuntimeLogSnapshotResponse {
-        let inner = lock_or_recover(&self.inner);
+        let inner = self
+            .inner
+            .lock()
+            .expect("runtime log store lock should not be poisoned");
         RuntimeLogSnapshotResponse {
             schema: RUNTIME_LOG_SCHEMA.to_owned(),
             schema_version: RUNTIME_LOG_SCHEMA_VERSION.to_owned(),
@@ -138,7 +141,10 @@ impl RuntimeLogStore {
 
     fn push(&self, level: DiagnosticSeverity, code: Option<String>, message: String) {
         let event = {
-            let mut inner = lock_or_recover(&self.inner);
+            let mut inner = self
+                .inner
+                .lock()
+                .expect("runtime log store lock should not be poisoned");
             let event = RuntimeLogEvent {
                 id: inner.next_id,
                 timestamp: unix_ms_timestamp(),
@@ -192,12 +198,13 @@ fn shader_diagnostic_severity(severity: &ShaderDiagnosticSeverity) -> Diagnostic
     }
 }
 
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|error| error.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::{
+        RuntimeClockDiagnostic, RuntimeClockDiagnosticSeverity, RuntimeIoDiagnostic,
+        RuntimeIoDiagnosticSeverity,
+    };
+
     use super::*;
 
     #[test]
@@ -220,5 +227,72 @@ mod tests {
             snapshot.retention.replay_levels,
             vec![DiagnosticSeverity::Warning, DiagnosticSeverity::Error]
         );
+    }
+
+    #[test]
+    fn runtime_log_store_records_clock_io_and_shader_diagnostics() {
+        let store = RuntimeLogStore::new(8);
+        let mut receiver = store.subscribe();
+
+        store.record_clock_diagnostics(&[
+            RuntimeClockDiagnostic {
+                severity: RuntimeClockDiagnosticSeverity::Warning,
+                code: "clock-drift".to_owned(),
+                message: "clock drifted".to_owned(),
+            },
+            RuntimeClockDiagnostic {
+                severity: RuntimeClockDiagnosticSeverity::Error,
+                code: "clock-lost".to_owned(),
+                message: "clock lost".to_owned(),
+            },
+        ]);
+        store.record_io_diagnostics(&[
+            RuntimeIoDiagnostic {
+                severity: RuntimeIoDiagnosticSeverity::Warning,
+                code: "io-name".to_owned(),
+                message: "device name unavailable".to_owned(),
+            },
+            RuntimeIoDiagnostic {
+                severity: RuntimeIoDiagnosticSeverity::Error,
+                code: "io-host".to_owned(),
+                message: "device host unavailable".to_owned(),
+            },
+        ]);
+        store.record_shader_diagnostics(&[
+            ShaderDiagnostic {
+                severity: ShaderDiagnosticSeverity::Warning,
+                phase: crate::ShaderDiagnosticPhase::InterfaceAnalysis,
+                code: "shader-warning".to_owned(),
+                message: "shader warning".to_owned(),
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                uniform_id: None,
+                source: crate::ShaderDiagnosticSource::User,
+            },
+            ShaderDiagnostic {
+                severity: ShaderDiagnosticSeverity::Info,
+                phase: crate::ShaderDiagnosticPhase::InterfaceAnalysis,
+                code: "shader-info".to_owned(),
+                message: "shader note".to_owned(),
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                uniform_id: None,
+                source: crate::ShaderDiagnosticSource::User,
+            },
+        ]);
+
+        let snapshot = store.snapshot();
+
+        assert_eq!(snapshot.events.len(), 5);
+        assert_eq!(snapshot.events[0].level, DiagnosticSeverity::Warning);
+        assert_eq!(snapshot.events[1].level, DiagnosticSeverity::Error);
+        assert_eq!(snapshot.events[2].code.as_deref(), Some("io-name"));
+        assert_eq!(snapshot.events[3].code.as_deref(), Some("io-host"));
+        assert_eq!(snapshot.events[4].code.as_deref(), Some("shader-warning"));
+        assert_eq!(receiver.try_recv().unwrap().message, "clock drifted");
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(test))]
 use crate::midi_input::{collect_midi_input_ports, create_midi_input};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -85,9 +86,17 @@ pub struct RuntimeIoDeviceManager {
 }
 
 impl RuntimeIoDeviceManager {
+    #[cfg(not(test))]
     pub fn new() -> Self {
         Self {
             devices: Arc::new(MidirRuntimeIoDeviceRegistry),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self {
+            devices: Arc::new(StaticRuntimeIoDeviceRegistry),
         }
     }
 
@@ -111,8 +120,10 @@ pub(crate) trait RuntimeIoDeviceRegistry: Send + Sync {
     fn list_devices(&self) -> RuntimeIoDeviceListResponse;
 }
 
+#[cfg(not(test))]
 struct MidirRuntimeIoDeviceRegistry;
 
+#[cfg(not(test))]
 impl RuntimeIoDeviceRegistry for MidirRuntimeIoDeviceRegistry {
     fn list_devices(&self) -> RuntimeIoDeviceListResponse {
         match create_midi_input("skenion-runtime-io-discovery") {
@@ -144,6 +155,20 @@ impl RuntimeIoDeviceRegistry for MidirRuntimeIoDeviceRegistry {
                 devices: Vec::new(),
                 diagnostics: vec![diagnostic],
             },
+        }
+    }
+}
+
+#[cfg(test)]
+struct StaticRuntimeIoDeviceRegistry;
+
+#[cfg(test)]
+impl RuntimeIoDeviceRegistry for StaticRuntimeIoDeviceRegistry {
+    fn list_devices(&self) -> RuntimeIoDeviceListResponse {
+        RuntimeIoDeviceListResponse {
+            ok: true,
+            devices: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -189,6 +214,15 @@ mod tests {
             response.devices[0].directions,
             vec![RuntimeIoDirection::Input]
         );
+    }
+
+    #[test]
+    fn default_manager_reports_empty_test_registry() {
+        let response = RuntimeIoDeviceManager::default().list_devices();
+
+        assert!(response.ok);
+        assert!(response.devices.is_empty());
+        assert!(response.diagnostics.is_empty());
     }
 
     #[test]

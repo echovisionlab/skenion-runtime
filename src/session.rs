@@ -696,7 +696,10 @@ impl RuntimeSession {
             );
         }
 
-        let previous_view_state = reconcile_view_state_with_graph(&graph, self.view_state.clone());
+        let previous_view_state = runtime_owned_view_state(reconcile_view_state_with_graph(
+            &graph,
+            self.view_state.clone(),
+        ));
         let mut next_view_state =
             reconcile_view_state_with_graph(&next_graph, Some(previous_view_state.clone()));
         let mut inverse_view_patch = None;
@@ -1157,6 +1160,27 @@ mod tests {
     }
 
     #[test]
+    fn validate_current_reports_invalid_stored_project() {
+        let mut session = RuntimeSession {
+            graph: Some(sample_project().graph),
+            registry: Some(NodeRegistry::new()),
+            plan: None,
+            diagnostics: Vec::new(),
+            revision: 1,
+            ..RuntimeSession::default()
+        };
+
+        let response = session.validate_current();
+
+        assert!(!response.ok);
+        assert!(
+            response.diagnostics[0]
+                .message
+                .contains("missing node definition")
+        );
+    }
+
+    #[test]
     fn run_current_rebuilds_missing_plan() {
         let mut session = RuntimeSession::default();
         let loaded = session.load_project(sample_project());
@@ -1557,6 +1581,23 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("no execution plan available")
+        );
+    }
+
+    #[test]
+    fn graph_and_view_state_accessors_return_loaded_project_copies() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+
+        assert!(loaded.ok);
+        assert_eq!(session.graph().unwrap().id, "minimal-value");
+        assert!(
+            session
+                .view_state()
+                .unwrap()
+                .canvas
+                .nodes
+                .contains_key("value_1")
         );
     }
 
@@ -1973,6 +2014,238 @@ mod tests {
         assert_eq!(redone.history.redo_depth, 0);
         assert_eq!(redone.snapshot.view_revision, 4);
         assert_eq!(patch_view_state(&redone), &moved);
+    }
+
+    #[test]
+    fn empty_and_conflicting_view_mutations_are_rejected_without_history() {
+        let mut session = RuntimeSession::default();
+        assert!(session.load_project(sample_project()).ok);
+
+        let empty = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: None,
+            client_id: None,
+            description: None,
+        });
+        let conflict = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 99,
+                ops: Vec::new(),
+            }),
+            client_id: None,
+            description: None,
+        });
+
+        assert!(!empty.ok);
+        assert!(!empty.applied);
+        assert!(empty.diagnostics[0].message.contains("did not include"));
+        assert!(!conflict.ok);
+        assert!(conflict.conflict);
+        assert!(conflict.diagnostics[0].message.contains("baseViewRevision"));
+        assert_eq!(conflict.history.entries.len(), 0);
+    }
+
+    #[test]
+    fn view_patch_set_node_view_success_errors_and_noop_paths() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let start = loaded
+            .snapshot
+            .view_state()
+            .cloned()
+            .expect("loaded view state");
+        let value_view = start.canvas.nodes["value_1"].clone();
+        let mut moved_view = value_view.clone();
+        moved_view.x += 80.0;
+
+        let set = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: Some("set node view".to_owned()),
+        });
+        assert!(set.ok);
+        assert!(set.applied);
+        assert_eq!(patch_view_state(&set).canvas.nodes["value_1"], moved_view);
+
+        let noop = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 2,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: None,
+        });
+        assert!(noop.ok);
+        assert!(!noop.applied);
+
+        let missing_node = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: None,
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 2,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "missing".to_owned(),
+                    view: value_view.clone(),
+                }],
+            }),
+            client_id: None,
+            description: None,
+        });
+        assert!(!missing_node.ok);
+        assert!(
+            missing_node.diagnostics[0]
+                .message
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn view_patch_helper_reports_missing_view_and_from_mismatch() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let graph = session.graph().expect("loaded graph");
+        let mut view_state = loaded
+            .snapshot
+            .view_state()
+            .cloned()
+            .expect("loaded view state");
+        let value_view = view_state.canvas.nodes["value_1"].clone();
+        let mut moved_view = value_view.clone();
+        moved_view.y += 80.0;
+
+        view_state.canvas.nodes.remove("value_1");
+        let missing_set_view = super::apply_view_patch_to_view_state(
+            &graph,
+            view_state.clone(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: moved_view.clone(),
+                }],
+            },
+        );
+        let missing_move_view = super::apply_view_patch_to_view_state(
+            &graph,
+            view_state,
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: None,
+                    to: moved_view.clone(),
+                }],
+            },
+        );
+        let missing_move_node = super::apply_view_patch_to_view_state(
+            &graph,
+            loaded.snapshot.view_state().cloned().unwrap(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "missing".to_owned(),
+                    from: None,
+                    to: moved_view.clone(),
+                }],
+            },
+        );
+
+        let mut mismatched_from = value_view.clone();
+        mismatched_from.x += 1.0;
+        let from_mismatch = super::apply_view_patch_to_view_state(
+            &graph,
+            loaded.snapshot.view_state().cloned().unwrap(),
+            &RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                    node_id: "value_1".to_owned(),
+                    from: Some(mismatched_from),
+                    to: moved_view,
+                }],
+            },
+        );
+
+        assert!(
+            missing_set_view
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("has no view state")
+        );
+        assert!(
+            missing_move_view
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("has no view state")
+        );
+        assert!(
+            missing_move_node
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("does not exist")
+        );
+        assert!(
+            from_mismatch
+                .unwrap_err()
+                .first()
+                .unwrap()
+                .message
+                .contains("from view does not match")
+        );
+    }
+
+    #[test]
+    fn combined_graph_and_noop_view_mutation_keeps_view_revision_stable() {
+        let mut session = RuntimeSession::default();
+        let loaded = session.load_project(sample_project());
+        assert!(loaded.ok);
+        let value_view = loaded.snapshot.view_state().unwrap().canvas.nodes["value_1"].clone();
+
+        let response = session.apply_mutation(RuntimeMutationRequest {
+            graph_patch: Some(set_value_patch("1", 0.5)),
+            view_patch: Some(RuntimeViewPatch {
+                base_view_revision: 1,
+                ops: vec![RuntimeViewPatchOperation::SetNodeView {
+                    node_id: "value_1".to_owned(),
+                    view: value_view,
+                }],
+            }),
+            client_id: None,
+            description: Some("set graph without moving view".to_owned()),
+        });
+
+        assert!(response.ok);
+        assert!(response.applied);
+        assert_eq!(response.snapshot.graph_revision(), Some("2"));
+        assert_eq!(response.snapshot.view_revision, 1);
+        assert_eq!(
+            latest_history_entry(&response)
+                .unwrap()
+                .inverse_mutation
+                .view_patch
+                .as_ref()
+                .unwrap()
+                .base_view_revision,
+            1
+        );
     }
 
     #[test]

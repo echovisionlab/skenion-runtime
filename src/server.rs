@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::{
     Stream, StreamExt,
-    wrappers::{BroadcastStream, IntervalStream},
+    wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -312,13 +312,19 @@ async fn runtime_logs_stream(
             .into_iter()
             .map(runtime_log_event),
     );
-    let live = BroadcastStream::new(receiver).map(|result| match result {
+    let live = BroadcastStream::new(receiver).map(runtime_log_broadcast_event);
+    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
+}
+
+fn runtime_log_broadcast_event(
+    result: Result<crate::RuntimeLogEvent, BroadcastStreamRecvError>,
+) -> Result<Event, Infallible> {
+    match result {
         Ok(event) => runtime_log_event(event),
         Err(_) => Ok(Event::default()
             .event("log-gap")
             .data("runtime log stream receiver lagged")),
-    });
-    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
+    }
 }
 
 fn runtime_log_event(event: crate::RuntimeLogEvent) -> Result<Event, Infallible> {
@@ -344,13 +350,19 @@ async fn session_events_stream(
         )
     };
     let replay = tokio_stream::iter([session_event(snapshot)]);
-    let live = BroadcastStream::new(state.session_events.subscribe()).map(|result| match result {
+    let live = BroadcastStream::new(state.session_events.subscribe()).map(session_broadcast_event);
+    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
+}
+
+fn session_broadcast_event(
+    result: Result<RuntimeSessionEvent, BroadcastStreamRecvError>,
+) -> Result<Event, Infallible> {
+    match result {
         Ok(event) => session_event(event),
         Err(_) => Ok(Event::default()
             .event("session-gap")
             .data("runtime session stream receiver lagged")),
-    });
-    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
+    }
 }
 
 fn session_event(event: RuntimeSessionEvent) -> Result<Event, Infallible> {
@@ -1387,7 +1399,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
+        RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse, RuntimeLogEvent, RuntimeLogSource,
         io_device_manager::RuntimeIoDeviceRegistry,
     };
 
@@ -1521,6 +1533,63 @@ mod tests {
         let text = std::str::from_utf8(&chunk).expect("runtime log stream should be utf8");
         assert!(text.contains("event: log"));
         assert!(text.contains("available to undo"));
+    }
+
+    #[tokio::test]
+    async fn session_event_stream_replays_current_snapshot_as_sse() {
+        let app = runtime_router_with_fake_io_devices(Vec::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/session/events/stream")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("session event stream should emit")
+            .expect("session event stream should have a chunk")
+            .expect("session event stream chunk should be ok");
+        let text = std::str::from_utf8(&chunk).expect("session event stream should be utf8");
+        assert!(text.contains("event: session"));
+        assert!(text.contains("skenion.runtime.session.event"));
+        assert!(text.contains("\"kind\":\"snapshot\""));
+    }
+
+    #[test]
+    fn stream_broadcast_helpers_format_live_and_gap_events() {
+        let log_event = RuntimeLogEvent {
+            id: 1,
+            timestamp: "1970-01-01T00:00:00.000Z".to_owned(),
+            source: RuntimeLogSource::Runtime,
+            level: DiagnosticSeverity::Warning,
+            code: Some("test-log".to_owned()),
+            message: "test log".to_owned(),
+        };
+        let session = RuntimeSession::default();
+        let session_event = RuntimeSessionEvent {
+            schema: "skenion.runtime.session.event",
+            schema_version: "0.1.0",
+            id: "session_event_000001".to_owned(),
+            sequence: 1,
+            kind: RuntimeSessionEventKind::Snapshot,
+            snapshot: session.snapshot(),
+            history: session.history(),
+            mutation: None,
+            diagnostics: Vec::new(),
+            created_at: "1970-01-01T00:00:00.000Z".to_owned(),
+        };
+
+        assert!(runtime_log_broadcast_event(Ok(log_event)).is_ok());
+        assert!(runtime_log_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
+        assert!(session_broadcast_event(Ok(session_event)).is_ok());
+        assert!(session_broadcast_event(Err(BroadcastStreamRecvError::Lagged(1))).is_ok());
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ mod dsp;
 mod io_device_manager;
 mod loader;
 mod log_store;
+#[cfg(not(test))]
 mod midi_input;
 mod planner;
 mod preview_control_state;
