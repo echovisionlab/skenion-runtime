@@ -1,11 +1,19 @@
 # Changelog
 
-## [0.44.0](https://github.com/skenion/skenion-runtime/compare/skenion-runtime-v0.43.0...skenion-runtime-v0.44.0) (2026-06-23)
+## [0.45.0](https://github.com/skenion/skenion-runtime/compare/skenion-runtime-v0.43.0...skenion-runtime-v0.45.0) (2026-06-23)
 
 
-### Miscellaneous Chores
+### Features
 
-* release lockstep Runtime artifacts for Skenion train 0.44.0
+* **runtime:** expose contracts line metadata ([eadfe7f](https://github.com/skenion/skenion-runtime/commit/eadfe7f20e91aba05c336b3e3504e95d2a070f94))
+
+
+### Bug Fixes
+
+* **ci:** add User-Agent to crates.io publish checks ([27ff86c](https://github.com/skenion/skenion-runtime/commit/27ff86c0d343fb7a448db34cd5d791c5796c6b18))
+* **ci:** attest release assets ([26e1885](https://github.com/skenion/skenion-runtime/commit/26e1885129fb14b05acf94325c5ab09e8c84f3b1))
+* **ci:** migrate runtime release assets to skenion org ([07f2e34](https://github.com/skenion/skenion-runtime/commit/07f2e34f7fb57d96d7d7243e8f3ecec4f71318d8))
+* **ci:** remove release fallback ([2b1691e](https://github.com/skenion/skenion-runtime/commit/2b1691eead43962a633441c3af1c2806c1459f18))
 
 ## [0.43.0](https://github.com/skenion/skenion-runtime/compare/skenion-runtime-v0.41.1...skenion-runtime-v0.43.0) (2026-06-22)
 
