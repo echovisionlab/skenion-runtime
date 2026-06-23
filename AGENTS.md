@@ -42,6 +42,17 @@ Registry publishing and binary release artifacts must be produced only through
 GitHub Actions release workflows and Release Please. Local verification may use
 dry-run/build commands, but never publish locally.
 
+All release-state writes must happen inside GitHub Actions as well. Do not
+create, edit, delete, promote, demote, or repair GitHub Releases, release
+assets, tags, prerelease/draft flags, release notes, compatibility matrices,
+Runtime binary evidence, npm packages, or crates from a local shell. This
+includes `gh release edit`, `gh release upload`, `gh release delete`, manual tag
+mutation, local registry publish, or ad hoc release metadata patches with a
+locally exported token. Local commands may inspect state, run dry-run/build
+checks, create normal code PRs, or trigger approved `workflow_dispatch` jobs;
+the actual release mutation must run in CI with reviewed workflow code and
+auditable logs.
+
 Workflows that need cross-repository or release automation credentials must use
 the organization Actions secret `GH_TOKEN`. Do not add `RELEASE_PLEASE_TOKEN`,
 `SKENION_RELEASE_TRAIN_TOKEN`, or default Actions-token fallbacks for release,
