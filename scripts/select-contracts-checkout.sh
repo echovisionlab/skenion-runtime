@@ -2,8 +2,8 @@
 set -euo pipefail
 
 runtime_manifest="${RUNTIME_MANIFEST:-Cargo.toml}"
-contracts_checkout="${CONTRACTS_CHECKOUT:-.deps/skenion-contracts}"
-candidate_branch="${CONTRACTS_BRANCH:-${GITHUB_HEAD_REF:-}}"
+contracts_checkout="${CONTRACTS_CHECKOUT:-}"
+contracts_ref="${CONTRACTS_REF:-${CONTRACTS_BRANCH:-}}"
 
 ci_error() {
   echo "::error::$*" >&2
@@ -17,17 +17,37 @@ from pathlib import Path
 
 manifest = Path(sys.argv[1])
 section = ""
+found_dependency = False
+
 for line in manifest.read_text(encoding="utf-8").splitlines():
     stripped = line.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
-        section = stripped
+    header = re.match(r"^\[([^\]]+)\]\s*(?:#.*)?$", stripped)
+    if header:
+        section = header.group(1).strip()
         continue
-    if section == "[dependencies]" and re.match(r"^\s*skenion-contracts\s*=", line):
-        match = re.search(r'version\s*=\s*"([^"]+)"', line)
+
+    if section == "dependencies" and re.match(r"^\s*skenion-contracts\s*=", line):
+        found_dependency = True
+        dependency = line.split("=", 1)[1].strip()
+        match = re.match(r'^"([^"]+)"', dependency)
+        if not match:
+            match = re.search(r'\bversion\s*=\s*"([^"]+)"', dependency)
         if not match:
             raise SystemExit("skenion-contracts dependency must declare a version")
         print(match.group(1))
         raise SystemExit(0)
+
+    if section in {"dependencies.skenion-contracts", 'dependencies."skenion-contracts"'}:
+        found_dependency = True
+        if re.match(r"^\s*version\s*=", line):
+            match = re.search(r'"([^"]+)"', line)
+            if not match:
+                raise SystemExit("skenion-contracts dependency version line is malformed")
+            print(match.group(1))
+            raise SystemExit(0)
+
+if found_dependency:
+    raise SystemExit("skenion-contracts dependency must declare a version")
 
 raise SystemExit("skenion-contracts dependency was not found")
 PY
@@ -59,7 +79,19 @@ PY
 }
 
 required_version="$(read_required_version)"
-required_tag="skenion-contracts-v${required_version}"
+echo "Runtime Cargo manifest requires skenion-contracts ${required_version}."
+
+if [[ -z "${contracts_checkout}" ]]; then
+  ci_error "select-contracts-checkout.sh is only for explicit Contracts integration/evidence checks."
+  ci_error "Set CONTRACTS_CHECKOUT to a skenion-contracts git checkout; normal Runtime builds use the crates.io dependency."
+  exit 1
+fi
+
+if [[ -z "${contracts_ref}" ]]; then
+  ci_error "Set CONTRACTS_REF or CONTRACTS_BRANCH to the exact Contracts branch, tag, or local ref to validate."
+  ci_error "Refusing to fall back to main."
+  exit 1
+fi
 
 if [[ ! -d "${contracts_checkout}/.git" ]]; then
   ci_error "Contracts checkout '${contracts_checkout}' is not a git repository."
@@ -69,20 +101,19 @@ fi
 cd "${contracts_checkout}"
 
 selected_ref=""
-if [[ -n "${candidate_branch}" ]] && git ls-remote --exit-code origin "refs/heads/${candidate_branch}" >/dev/null 2>&1; then
-  git fetch --depth=1 origin "+refs/heads/${candidate_branch}:refs/remotes/origin/${candidate_branch}"
-  git switch --detach "refs/remotes/origin/${candidate_branch}"
-  selected_ref="branch ${candidate_branch}"
-elif git ls-remote --exit-code origin "refs/tags/${required_tag}" >/dev/null 2>&1; then
-  git fetch --depth=1 origin "+refs/tags/${required_tag}:refs/tags/${required_tag}"
-  git switch --detach "${required_tag}"
-  selected_ref="tag ${required_tag}"
+if git ls-remote --exit-code origin "refs/heads/${contracts_ref}" >/dev/null 2>&1; then
+  git fetch --depth=1 origin "+refs/heads/${contracts_ref}:refs/remotes/origin/${contracts_ref}"
+  git switch --detach "refs/remotes/origin/${contracts_ref}"
+  selected_ref="branch ${contracts_ref}"
+elif git ls-remote --exit-code origin "refs/tags/${contracts_ref}" >/dev/null 2>&1; then
+  git fetch --depth=1 origin "+refs/tags/${contracts_ref}:refs/tags/${contracts_ref}"
+  git switch --detach "${contracts_ref}"
+  selected_ref="tag ${contracts_ref}"
+elif git cat-file -e "${contracts_ref}^{commit}" 2>/dev/null; then
+  git switch --detach "${contracts_ref}"
+  selected_ref="local ref ${contracts_ref}"
 else
-  if [[ -n "${candidate_branch}" ]]; then
-    ci_error "No Contracts branch '${candidate_branch}' or tag '${required_tag}' exists."
-  else
-    ci_error "No Contracts tag '${required_tag}' exists."
-  fi
+  ci_error "No Contracts branch, tag, or local ref '${contracts_ref}' exists."
   ci_error "Runtime requires skenion-contracts ${required_version}; refusing to fall back to main."
   exit 1
 fi

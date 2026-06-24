@@ -22,15 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-      - uses: actions/checkout@v6
-        with:
-          repository: skenion/skenion-contracts
-          path: .deps/skenion-contracts
-      - name: Select compatible contracts checkout
-        env:
-          CONTRACTS_BRANCH: ${{ github.head_ref }}
-        run: bash scripts/select-contracts-checkout.sh
-      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -128,20 +119,11 @@ jobs:
           fi
 
   coverage:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-      - uses: actions/checkout@v6
-        with:
-          repository: skenion/skenion-contracts
-          path: .deps/skenion-contracts
-      - name: Select compatible contracts checkout
-        env:
-          CONTRACTS_BRANCH: ${{ github.head_ref }}
-        run: bash scripts/select-contracts-checkout.sh
-      - run: ln -sfn "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:

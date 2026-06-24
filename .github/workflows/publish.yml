@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to publish, for example skenion-runtime-v0.37.0
+        description: Release tag to publish, for example v0.37.0
         required: true
         type: string
 
@@ -26,27 +26,25 @@ jobs:
   release:
     name: release metadata
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'skenion-runtime-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     outputs:
       tag: ${{ steps.request.outputs.tag }}
       tag_ref: ${{ steps.request.outputs.tag_ref }}
       version: ${{ steps.package.outputs.version }}
       contracts_version: ${{ steps.package.outputs.contracts_version }}
       contracts_line: ${{ steps.package.outputs.contracts_line }}
-      contracts_tag: ${{ steps.package.outputs.contracts_tag }}
-      contracts_tag_ref: ${{ steps.package.outputs.contracts_tag_ref }}
     steps:
       - id: request
         name: Validate release tag input
         env:
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
-          if [[ ! "${RELEASE_TAG}" =~ ^skenion-runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::release tag must be skenion-runtime-vx.y.z; got '${RELEASE_TAG}'."
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tag must be vx.y.z; got '${RELEASE_TAG}'."
             exit 1
           fi
 
-          runtime_version="${RELEASE_TAG#skenion-runtime-v}"
+          runtime_version="${RELEASE_TAG#v}"
           echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "tag_ref=refs/tags/${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "runtime_version=${runtime_version}" >> "${GITHUB_OUTPUT}"
@@ -127,13 +125,10 @@ jobs:
                   f"{contracts_version}; found {sorted(locked_contracts_versions)}."
               )
 
-          contracts_tag = f"skenion-contracts-v{contracts_version}"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"version={runtime_version}", file=output)
               print(f"contracts_version={contracts_version}", file=output)
               print(f"contracts_line={contracts_line}", file=output)
-              print(f"contracts_tag={contracts_tag}", file=output)
-              print(f"contracts_tag_ref=refs/tags/{contracts_tag}", file=output)
           PY
       - name: Summarize runtime release inputs
         run: |
@@ -143,52 +138,9 @@ jobs:
             echo "- Runtime tag: ${{ steps.request.outputs.tag }}"
             echo "- Runtime version: ${{ steps.package.outputs.version }}"
             echo "- Contracts line: ${{ steps.package.outputs.contracts_line }}"
-            echo "- Contracts tag: ${{ steps.package.outputs.contracts_tag }}"
             echo "- Contracts dependency version: ${{ steps.package.outputs.contracts_version }}"
             echo "- Distribution: GitHub Release multi-arch binary assets"
           } >> "${GITHUB_STEP_SUMMARY}"
-      - uses: actions/checkout@v6
-        with:
-          repository: skenion/skenion-contracts
-          ref: ${{ steps.package.outputs.contracts_tag_ref }}
-          path: .deps/skenion-contracts
-      - name: Validate contracts release checkout
-        env:
-          EXPECTED_CONTRACTS_TAG: ${{ steps.package.outputs.contracts_tag }}
-          EXPECTED_CONTRACTS_VERSION: ${{ steps.package.outputs.contracts_version }}
-        run: |
-          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
-          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
-            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
-            exit 1
-          fi
-
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-          import sys
-          import tomllib
-
-          expected = os.environ["EXPECTED_CONTRACTS_VERSION"]
-          root = pathlib.Path(".deps/skenion-contracts")
-
-          def fail(message):
-              print(f"::error::{message}", file=sys.stderr)
-              raise SystemExit(1)
-
-          with open(root / "packages/rust/Cargo.toml", "rb") as fh:
-              crate_version = tomllib.load(fh)["package"]["version"]
-
-          if crate_version != expected:
-              fail(f"Contracts crate version {crate_version} does not match {expected}.")
-
-          package_json = root / "packages/ts/package.json"
-          if package_json.exists():
-              package_version = json.loads(package_json.read_text(encoding="utf-8"))["version"]
-              if package_version != expected:
-                  fail(f"Contracts package version {package_version} does not match {expected}.")
-          PY
       - name: Verify released contracts crate
         run: |
           if ! curl --fail --silent -H "User-Agent: skenion-runtime-publish/0.1" "https://crates.io/api/v1/crates/skenion-contracts/${{ steps.package.outputs.contracts_version }}" >/dev/null; then
@@ -245,24 +197,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag_ref }}
-      - uses: actions/checkout@v6
-        with:
-          repository: skenion/skenion-contracts
-          ref: ${{ needs.release.outputs.contracts_tag_ref }}
-          path: .deps/skenion-contracts
-      - name: Validate contracts release checkout
-        env:
-          EXPECTED_CONTRACTS_TAG: ${{ needs.release.outputs.contracts_tag }}
-        run: |
-          actual_tag="$(git -C .deps/skenion-contracts describe --tags --exact-match)"
-          if [[ "${actual_tag}" != "${EXPECTED_CONTRACTS_TAG}" ]]; then
-            echo "::error::checked out Contracts tag ${actual_tag} does not match ${EXPECTED_CONTRACTS_TAG}."
-            exit 1
-          fi
-      - name: Place released contracts dependency
-        run: |
-          rm -rf "${GITHUB_WORKSPACE}/../Skenion-contracts"
-          cp -R "${GITHUB_WORKSPACE}/.deps/skenion-contracts" "${GITHUB_WORKSPACE}/../Skenion-contracts"
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
