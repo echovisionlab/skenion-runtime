@@ -34,9 +34,9 @@ jobs:
           SKENION_RELEASE_S3_PREFIX: releases
           SKENION_RELEASE_S3_FORCE_PATH_STYLE: "true"
           SKENION_RELEASE_PUBLIC_BASE_URL: https://cdn.dsub.io/skenion/releases
-          SOURCE_COMMIT: 0000000000000000000000000000000000000000
+          SOURCE_COMMIT: "0000000000000000000000000000000000000000"
           RELEASE_TIER: release-blocking
-          CONTRACTS_VERSION: 0.46.0
+          CONTRACTS_VERSION: "0.46.0"
           CONTRACTS_LINE: "0.46"
         run: |
           mkdir -p dist
