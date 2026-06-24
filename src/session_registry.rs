@@ -6,9 +6,9 @@ use std::{
 
 use axum::{http::HeaderMap, response::sse::Event};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use skenion_contracts::{
-    RuntimeConnectionProfile, RuntimeConnectionProfileMode,
-    RuntimeDiagnostic as ContractRuntimeDiagnostic, RuntimeEventReplayGap,
+    RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEventReplayGap,
     RuntimeEventReplayGapReason, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
     RuntimeHistory as ContractRuntimeHistory, RuntimeHistoryEntry as ContractRuntimeHistoryEntry,
     RuntimeSessionCapabilitySet, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
@@ -163,19 +163,19 @@ impl RuntimeSessionRecord {
                 .expect("runtime session lock should not be poisoned");
             session.snapshot()
         };
-        let diagnostics = contract_diagnostics(&snapshot.diagnostics);
-        RuntimeSessionInfoResponse {
-            schema: "skenion.runtime.session.info".to_owned(),
-            schema_version: "0.1.0".to_owned(),
-            ok: true,
-            session_id: self.id.clone(),
-            lifecycle: RuntimeSessionLifecycleState::Ready,
-            snapshot: contract_session_snapshot(&snapshot),
-            profile,
-            capabilities: runtime_session_capabilities(),
-            event_replay: self.event_replay_window(),
-            diagnostics,
-        }
+        serde_json::from_value(json!({
+            "schema": "skenion.runtime.session.info",
+            "schemaVersion": "0.1.0",
+            "ok": true,
+            "sessionId": self.id.clone(),
+            "lifecycle": RuntimeSessionLifecycleState::Ready,
+            "snapshot": contract_session_snapshot(&snapshot),
+            "profile": profile,
+            "capabilities": runtime_session_capabilities(),
+            "eventReplay": self.event_replay_window(),
+            "diagnostics": contract_diagnostics(&snapshot.diagnostics),
+        }))
+        .expect("runtime session info response should match contract shape")
     }
 }
 
@@ -206,27 +206,28 @@ fn session_event_from_session(
 ) -> RuntimeSessionEvent {
     let snapshot = session.snapshot();
     let history = session.history();
-    let event = RuntimeSessionEvent {
-        schema: "skenion.runtime.session.event".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: replay.id,
-        session_id: record.id.clone(),
-        sequence: replay.sequence,
-        session_revision: snapshot.session_revision,
-        kind,
-        snapshot: contract_session_snapshot(&snapshot),
-        mutation: history.entries.last().map(contract_history_entry),
-        history: contract_runtime_history(&history),
-        replay: RuntimeEventReplayMetadata {
+    let event = serde_json::from_value(json!({
+        "schema": "skenion.runtime.session.event",
+        "schemaVersion": "0.1.0",
+        "id": replay.id,
+        "sessionId": record.id.clone(),
+        "sequence": replay.sequence,
+        "sessionRevision": snapshot.session_revision,
+        "kind": kind,
+        "snapshot": contract_session_snapshot(&snapshot),
+        "mutation": history.entries.last().map(contract_history_entry),
+        "history": contract_runtime_history(&history),
+        "replay": RuntimeEventReplayMetadata {
             cursor: replay.cursor,
             previous_cursor: replay.previous_cursor,
             replayed: replay.replayed,
             gap: replay.gap,
             overflow: replay.overflow,
         },
-        diagnostics: contract_diagnostics(&diagnostics),
-        created_at: created_at_now(),
-    };
+        "diagnostics": contract_diagnostics(&diagnostics),
+        "createdAt": created_at_now(),
+    }))
+    .expect("runtime session event should match contract shape");
     validate_runtime_session_event(&event).expect("runtime session event should validate");
     event
 }
@@ -495,15 +496,11 @@ fn contract_history_entry(entry: &crate::RuntimeHistoryEntry) -> ContractRuntime
     .expect("runtime history entry should match contract shape")
 }
 
-fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<ContractRuntimeDiagnostic> {
+fn contract_diagnostics(diagnostics: &[RuntimeDiagnostic]) -> Vec<Value> {
     let mut values = Vec::new();
     for diagnostic in diagnostics {
         values.push(
-            serde_json::from_value(
-                serde_json::to_value(diagnostic)
-                    .expect("runtime diagnostic should serialize to JSON"),
-            )
-            .expect("runtime diagnostic should match contract shape"),
+            serde_json::to_value(diagnostic).expect("runtime diagnostic should serialize to JSON"),
         );
     }
     values
@@ -645,7 +642,10 @@ mod tests {
             .expect("published event should be stored");
         assert_eq!(stored.sequence, 1);
         assert_eq!(stored.replay.cursor, "1");
-        assert_eq!(stored.diagnostics[0].message, "covered diagnostic");
+        assert_eq!(
+            serde_json::to_value(&stored.diagnostics[0]).unwrap()["message"],
+            "covered diagnostic"
+        );
         assert_eq!(current_session_event_sequence(&record), 1);
     }
 
@@ -829,7 +829,7 @@ mod tests {
 
         assert_eq!(response.diagnostics.len(), 1);
         assert_eq!(
-            response.diagnostics[0].message,
+            serde_json::to_value(&response.diagnostics[0]).unwrap()["message"],
             "no project loaded in runtime session"
         );
     }

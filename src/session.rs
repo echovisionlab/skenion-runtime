@@ -4,6 +4,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
@@ -1717,22 +1718,16 @@ fn project_document_from_request_current(
         .view_state
         .clone()
         .unwrap_or_else(|| reconcile_view_state_with_graph_current(&graph, None));
-    ProjectDocumentCurrent {
-        schema: "skenion.project".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: graph.id.clone(),
-        revision: graph.revision.clone(),
-        metadata: None,
-        graph,
-        view_state,
-        patch_library: request.patch_library.clone(),
-        package_dependencies: Vec::new(),
-        package_lock: Vec::new(),
-        resource_lock: Vec::new(),
-        provider_refs: Vec::new(),
-        tutorial: None,
-        help: None,
-    }
+    serde_json::from_value(json!({
+        "schema": "skenion.project",
+        "schemaVersion": "0.1.0",
+        "id": graph.id.clone(),
+        "revision": graph.revision.clone(),
+        "graph": graph,
+        "viewState": view_state,
+        "patchLibrary": request.patch_library.clone(),
+    }))
+    .expect("synthesized current project document should match contract shape")
 }
 
 fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
