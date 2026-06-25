@@ -295,6 +295,17 @@ else
     aws configure set default.s3.addressing_style path
   fi
 
+  public_verify_attempts="${SKENION_PUBLIC_VERIFY_ATTEMPTS:-24}"
+  public_verify_sleep_seconds="${SKENION_PUBLIC_VERIFY_SLEEP_SECONDS:-5}"
+  if [[ ! "${public_verify_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SKENION_PUBLIC_VERIFY_ATTEMPTS must be a positive integer." >&2
+    exit 1
+  fi
+  if [[ ! "${public_verify_sleep_seconds}" =~ ^[0-9]+$ ]]; then
+    echo "SKENION_PUBLIC_VERIFY_SLEEP_SECONDS must be a non-negative integer." >&2
+    exit 1
+  fi
+
   head_json="$(mktemp)"
   head_err="$(mktemp)"
   cleanup_head() {
@@ -453,31 +464,47 @@ PY
     local label="$3"
     local headers_path
     local actual_size
+    local attempt
+    local last_error
 
-    headers_path="$(mktemp)"
-    if ! curl --fail --silent --show-error --location --head \
-      --dump-header "${headers_path}" \
-      --output /dev/null \
-      "${url}"; then
-      rm -f "${headers_path}"
+    for ((attempt = 1; attempt <= public_verify_attempts; attempt++)); do
+      headers_path="$(mktemp)"
+      if curl --fail --silent --show-error --location --head \
+        --dump-header "${headers_path}" \
+        --output /dev/null \
+        "${url}"; then
+        actual_size="$(awk 'BEGIN { IGNORECASE = 1 } /^Content-Length:/ { gsub("\r", "", $2); value = $2 } END { print value }' "${headers_path}")"
+        rm -f "${headers_path}"
+
+        if [[ -z "${actual_size}" ]]; then
+          last_error="missing Content-Length"
+        elif [[ "${actual_size}" != "${expected_size}" ]]; then
+          last_error="Content-Length mismatch: expected size=${expected_size} actual size=${actual_size}"
+        else
+          return 0
+        fi
+      else
+        rm -f "${headers_path}"
+        last_error="HEAD request failed"
+      fi
+
+      if ((attempt < public_verify_attempts)); then
+        echo "public Runtime release ${label} is not ready on attempt ${attempt}/${public_verify_attempts}: ${last_error}; retrying in ${public_verify_sleep_seconds}s: ${url}" >&2
+        if ((public_verify_sleep_seconds > 0)); then
+          sleep "${public_verify_sleep_seconds}"
+        fi
+      fi
+    done
+
+    if [[ "${last_error}" == HEAD\ request\ failed ]]; then
       echo "failed to verify public Runtime release ${label}: ${url}" >&2
-      exit 1
-    fi
-
-    actual_size="$(awk 'BEGIN { IGNORECASE = 1 } /^Content-Length:/ { gsub("\r", "", $2); value = $2 } END { print value }' "${headers_path}")"
-    rm -f "${headers_path}"
-
-    if [[ -z "${actual_size}" ]]; then
+    elif [[ "${last_error}" == missing\ Content-Length ]]; then
       echo "public Runtime release ${label} is missing Content-Length: ${url}" >&2
-      exit 1
-    fi
-
-    if [[ "${actual_size}" != "${expected_size}" ]]; then
+    else
       echo "public Runtime release ${label} Content-Length does not match local file: ${url}" >&2
-      echo "expected size=${expected_size}" >&2
-      echo "actual size=${actual_size}" >&2
-      exit 1
+      echo "${last_error}" >&2
     fi
+    exit 1
   }
 
   verify_public_file_matches() {
@@ -487,27 +514,42 @@ PY
     local body_path
     local expected_sha
     local actual_sha
+    local attempt
+    local last_error
 
-    body_path="$(mktemp)"
-    if ! curl --fail --silent --show-error --location \
-      --output "${body_path}" \
-      "${url}"; then
+    for ((attempt = 1; attempt <= public_verify_attempts; attempt++)); do
+      body_path="$(mktemp)"
+      if curl --fail --silent --show-error --location \
+        --output "${body_path}" \
+        "${url}"; then
+        if cmp -s "${expected_path}" "${body_path}"; then
+          rm -f "${body_path}"
+          return 0
+        fi
+
+        expected_sha="$(sha256_file "${expected_path}")"
+        actual_sha="$(sha256_file "${body_path}")"
+        last_error="content mismatch: expected sha256=${expected_sha} actual sha256=${actual_sha}"
+      else
+        last_error="download failed"
+      fi
       rm -f "${body_path}"
+
+      if ((attempt < public_verify_attempts)); then
+        echo "public Runtime release ${label} is not ready on attempt ${attempt}/${public_verify_attempts}: ${last_error}; retrying in ${public_verify_sleep_seconds}s: ${url}" >&2
+        if ((public_verify_sleep_seconds > 0)); then
+          sleep "${public_verify_sleep_seconds}"
+        fi
+      fi
+    done
+
+    if [[ "${last_error}" == download\ failed ]]; then
       echo "failed to download public Runtime release ${label}: ${url}" >&2
-      exit 1
-    fi
-
-    if ! cmp -s "${expected_path}" "${body_path}"; then
-      expected_sha="$(sha256_file "${expected_path}")"
-      actual_sha="$(sha256_file "${body_path}")"
-      rm -f "${body_path}"
+    else
       echo "public Runtime release ${label} content does not match local file: ${url}" >&2
-      echo "expected sha256=${expected_sha}" >&2
-      echo "actual sha256=${actual_sha}" >&2
-      exit 1
+      echo "${last_error}" >&2
     fi
-
-    rm -f "${body_path}"
+    exit 1
   }
 
   upload_object "${asset_path}" "${asset_key}" "${asset_sha}" "${asset_size}" "application/gzip"

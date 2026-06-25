@@ -261,6 +261,7 @@ set -euo pipefail
 log="${STUB_CURL_LOG:?}"
 public_base="${STUB_PUBLIC_BASE_URL:?}"
 public_root="${STUB_PUBLIC_ROOT:?}"
+state_root="${STUB_CURL_STATE_DIR:?}"
 method="GET"
 output=""
 dump_header=""
@@ -304,6 +305,25 @@ fi
 
 echo "${method} ${relative_key}" >>"${log}"
 size="$(wc -c <"${path}" | tr -d '[:space:]')"
+mkdir -p "${state_root}"
+counter_name="$(printf '%s' "${method}_${relative_key}" | tr -c '[:alnum:]' '_')"
+counter_path="${state_root}/${counter_name}.count"
+attempt=0
+if [[ -f "${counter_path}" ]]; then
+  attempt="$(sed -n '1p' "${counter_path}")"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "${attempt}" >"${counter_path}"
+
+if [[ "${method}" == "HEAD" && "${attempt}" -le "${STUB_CURL_FAIL_HEAD_ATTEMPTS:-0}" ]]; then
+  echo "curl: (22) The requested URL returned error: 403" >&2
+  exit 22
+fi
+
+if [[ "${method}" == "GET" && "${attempt}" -le "${STUB_CURL_FAIL_GET_ATTEMPTS:-0}" ]]; then
+  echo "curl: (22) The requested URL returned error: 403" >&2
+  exit 22
+fi
 
 if [[ "${method}" == "HEAD" ]]; then
   if [[ -n "${dump_header}" ]]; then
@@ -378,6 +398,7 @@ run_publisher() {
     "STUB_AWS_LOG=${case_dir}/aws.log"
     "STUB_CURL_LOG=${case_dir}/curl.log"
     "STUB_S3_ROOT=${case_dir}/s3"
+    "STUB_CURL_STATE_DIR=${case_dir}/curl-state"
     "STUB_PUBLIC_BASE_URL=${public_base}"
     "STUB_PUBLIC_ROOT=${case_dir}/s3/${bucket}/${prefix}"
     "GITHUB_ACTIONS=true"
@@ -390,6 +411,8 @@ run_publisher() {
     "SKENION_RELEASE_S3_SECRET_ACCESS_KEY=test-secret-key"
     "SKENION_RELEASE_S3_FORCE_PATH_STYLE=true"
     "SKENION_RELEASE_PUBLIC_BASE_URL=${public_base}"
+    "SKENION_PUBLIC_VERIFY_ATTEMPTS=3"
+    "SKENION_PUBLIC_VERIFY_SLEEP_SECONDS=0"
     "SOURCE_COMMIT=1111111111111111111111111111111111111111"
     "RELEASE_TIER=release-blocking"
     "CONTRACTS_VERSION=1.2.0"
@@ -478,6 +501,62 @@ PY
   grep -q '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log"
   grep -q '^GET skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.sha256$' "${case_dir}/curl.log"
   grep -q '^GET skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.manifest\.json$' "${case_dir}/curl.log"
+}
+
+assert_public_head_retry_case() {
+  local case_dir="${tmp_root}/public-head-retry"
+  local head_count
+
+  prepare_case "${case_dir}" "runtime public head retry artifact"
+  run_publisher "${case_dir}" STUB_CURL_FAIL_HEAD_ATTEMPTS=2 >"${case_dir}/output.log" 2>&1
+
+  grep -q 'public Runtime release asset .* is not ready on attempt 1/3: HEAD request failed; retrying in 0s' "${case_dir}/output.log"
+  grep -q 'public Runtime release asset .* is not ready on attempt 2/3: HEAD request failed; retrying in 0s' "${case_dir}/output.log"
+  head_count="$(grep -c '^HEAD skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.tar\.gz$' "${case_dir}/curl.log")"
+  if [[ "${head_count}" != "3" ]]; then
+    echo "expected public asset HEAD to be retried until third attempt, saw ${head_count}" >&2
+    exit 1
+  fi
+}
+
+assert_public_get_retry_case() {
+  local case_dir="${tmp_root}/public-get-retry"
+  local checksum_get_count
+  local manifest_get_count
+
+  prepare_case "${case_dir}" "runtime public get retry artifact"
+  run_publisher "${case_dir}" STUB_CURL_FAIL_GET_ATTEMPTS=2 >"${case_dir}/output.log" 2>&1
+
+  grep -q 'public Runtime release checksum .* is not ready on attempt 1/3: download failed; retrying in 0s' "${case_dir}/output.log"
+  grep -q 'public Runtime release checksum .* is not ready on attempt 2/3: download failed; retrying in 0s' "${case_dir}/output.log"
+  checksum_get_count="$(grep -c '^GET skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.sha256$' "${case_dir}/curl.log")"
+  manifest_get_count="$(grep -c '^GET skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.manifest\.json$' "${case_dir}/curl.log")"
+  if [[ "${checksum_get_count}" != "3" ]]; then
+    echo "expected public checksum GET to be retried until third attempt, saw ${checksum_get_count}" >&2
+    exit 1
+  fi
+  if [[ "${manifest_get_count}" != "3" ]]; then
+    echo "expected public manifest GET to be retried until third attempt, saw ${manifest_get_count}" >&2
+    exit 1
+  fi
+}
+
+assert_public_get_permanent_failure_case() {
+  local case_dir="${tmp_root}/public-get-permanent-failure"
+  local checksum_get_count
+
+  prepare_case "${case_dir}" "runtime public get permanent failure artifact"
+  if run_publisher "${case_dir}" STUB_CURL_FAIL_GET_ATTEMPTS=99 >"${case_dir}/output.log" 2>&1; then
+    echo "expected permanent public GET failure case to fail" >&2
+    exit 1
+  fi
+
+  grep -q 'failed to download public Runtime release checksum' "${case_dir}/output.log"
+  checksum_get_count="$(grep -c '^GET skenion-runtime/v1.2.3/x86_64-unknown-linux-gnu/.*\.sha256$' "${case_dir}/curl.log")"
+  if [[ "${checksum_get_count}" != "3" ]]; then
+    echo "expected permanent public GET failure to stop after bounded attempts, saw ${checksum_get_count}" >&2
+    exit 1
+  fi
 }
 
 assert_no_clobber_case() {
@@ -639,6 +718,9 @@ assert_public_manifest_failure_case() {
 install_stubs "${tmp_root}/bin"
 assert_github_actions_guard_case
 assert_success_case
+assert_public_head_retry_case
+assert_public_get_retry_case
+assert_public_get_permanent_failure_case
 assert_no_clobber_case
 assert_missing_metadata_download_verification_case
 assert_existing_object_missing_metadata_same_content_case
