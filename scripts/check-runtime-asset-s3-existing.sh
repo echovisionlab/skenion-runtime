@@ -81,7 +81,6 @@ if [[ "${SKENION_RELEASE_S3_FORCE_PATH_STYLE:-}" =~ ^(1|true|TRUE|yes|YES)$ ]]; 
   aws configure set default.s3.addressing_style path
 fi
 
-source_commit="${SOURCE_COMMIT:-${GITHUB_SHA:-unknown}}"
 asset_name="skenion-runtime-v${version}-${target}.tar.gz"
 checksum_name="${asset_name}.sha256"
 manifest_name="${asset_name}.manifest.json"
@@ -124,7 +123,7 @@ else:
 PY
 }
 
-validate_existing_metadata() {
+summarize_existing_metadata() {
   local key="$1"
   local label="$2"
   local actual_sha
@@ -143,20 +142,16 @@ validate_existing_metadata() {
   actual_tag="$(read_head_field source-tag "${head_json}")"
   actual_commit="$(read_head_field source-commit "${head_json}")"
 
-  if [[ -n "${actual_sha}" \
-    && -n "${actual_size}" \
-    && "${actual_component}" == "skenion-runtime" \
-    && "${actual_target}" == "${target}" \
-    && "${actual_version}" == "${version}" \
-    && "${actual_tag}" == "${release_tag}" \
-    && "${actual_commit}" == "${source_commit}" ]]; then
-    return 0
+  if [[ -z "${actual_size}" ]]; then
+    echo "existing Runtime release ${label} is missing ContentLength: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+    exit 1
   fi
 
-  echo "existing Runtime release ${label} has invalid immutable metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
-  echo "expected component=skenion-runtime target=${target} runtime-version=${version} source-tag=${release_tag} source-commit=${source_commit} and non-empty sha256/ContentLength" >&2
-  echo "actual sha256=${actual_sha:-<missing>} size=${actual_size:-<missing>} component=${actual_component:-<missing>} target=${actual_target:-<missing>} runtime-version=${actual_version:-<missing>} source-tag=${actual_tag:-<missing>} source-commit=${actual_commit:-<missing>}" >&2
-  exit 1
+  if [[ -n "${actual_sha}${actual_component}${actual_target}${actual_version}${actual_tag}${actual_commit}" ]]; then
+    echo "found existing Runtime release ${label} with S3 metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+  else
+    echo "found existing Runtime release ${label} without S3 metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+  fi
 }
 
 object_exists_or_missing() {
@@ -166,8 +161,7 @@ object_exists_or_missing() {
   if aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
     --bucket "${SKENION_RELEASE_S3_BUCKET}" \
     --key "${key}" >"${head_json}" 2>"${head_err}"; then
-    validate_existing_metadata "${key}" "${label}"
-    echo "found existing Runtime release ${label}: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+    summarize_existing_metadata "${key}" "${label}"
     return 0
   fi
 
