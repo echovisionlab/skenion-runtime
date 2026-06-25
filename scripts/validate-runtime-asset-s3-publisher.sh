@@ -363,7 +363,21 @@ run_publisher() {
   local asset_path
   local checksum_path
   local -a base_env
+  local -a publisher_args=()
   shift
+
+  while [[ "${1:-}" == --publisher-* ]]; do
+    case "$1" in
+      --publisher-skip-public-verification)
+        publisher_args+=(--skip-public-verification)
+        ;;
+      *)
+        echo "unknown run_publisher option: $1" >&2
+        exit 2
+        ;;
+    esac
+    shift
+  done
 
   mkdir -p "${case_dir}/s3/${bucket}/${prefix}"
   : >"${case_dir}/aws.log"
@@ -410,6 +424,7 @@ run_publisher() {
     "$@" \
     "${publisher}" \
     --use-existing-manifest \
+    "${publisher_args[@]}" \
     "${target}" \
     "${version}" \
     "${release_tag}" \
@@ -615,11 +630,11 @@ assert_existing_matching_metadata_skips_upload_case() {
 
   prepare_case "${case_dir}" "runtime existing matching metadata artifact"
   run_publisher "${case_dir}" >/dev/null 2>&1
-  run_publisher "${case_dir}" >"${case_dir}/output.log" 2>&1
+  run_publisher "${case_dir}" --publisher-skip-public-verification >"${case_dir}/output.log" 2>&1
   assert_no_body_downloads "${case_dir}"
 
-  grep -q 'object already exists with matching immutable metadata' "${case_dir}/output.log"
-  matching_count="$(grep -c 'object already exists with matching immutable metadata' "${case_dir}/output.log")"
+  grep -q 'object already exists and will not be overwritten' "${case_dir}/output.log"
+  matching_count="$(grep -c 'object already exists and will not be overwritten' "${case_dir}/output.log")"
   if [[ "${matching_count}" != "3" ]]; then
     echo "expected all three existing release objects to match by metadata; saw ${matching_count}" >&2
     exit 1
@@ -630,7 +645,7 @@ assert_existing_matching_metadata_skips_upload_case() {
   fi
 }
 
-assert_existing_missing_metadata_fails_case() {
+assert_existing_missing_metadata_skips_matching_asset_case() {
   local case_dir="${tmp_root}/existing-missing-metadata"
   local asset
   local asset_key
@@ -643,18 +658,17 @@ assert_existing_missing_metadata_fails_case() {
   mkdir -p "$(dirname "${existing}")"
   command cp "${asset}" "${existing}"
 
-  if run_publisher "${case_dir}" >"${case_dir}/output.log" 2>&1; then
-    echo "expected existing missing metadata case to fail" >&2
-    exit 1
-  fi
+  run_publisher "${case_dir}" --publisher-skip-public-verification >"${case_dir}/output.log" 2>&1
   assert_no_body_downloads "${case_dir}"
 
-  grep -q 'S3 metadata does not match expected immutable artifact' "${case_dir}/output.log"
-  grep -q 'refusing to overwrite existing Runtime release artifact' "${case_dir}/output.log"
+  grep -q 'object already exists without immutable metadata and matching size' "${case_dir}/output.log"
+  grep -q 'object already exists and will not be overwritten' "${case_dir}/output.log"
   if grep -q "^put ${bucket}/${asset_key}$" "${case_dir}/aws.log"; then
     echo "publisher uploaded despite existing missing metadata" >&2
     exit 1
   fi
+  grep -q "^put ${bucket}/${asset_key}\\.sha256$" "${case_dir}/aws.log"
+  grep -q "^put ${bucket}/${asset_key}\\.manifest\\.json$" "${case_dir}/aws.log"
 }
 
 assert_existing_mismatched_metadata_fails_case() {
@@ -745,8 +759,8 @@ assert_existing_checker_valid_objects_case() {
   fi
 }
 
-assert_existing_checker_invalid_metadata_fails_case() {
-  local case_dir="${tmp_root}/existing-checker-invalid-metadata"
+assert_existing_checker_metadata_free_objects_case() {
+  local case_dir="${tmp_root}/existing-checker-metadata-free"
   local asset
   local asset_key
   local asset_object
@@ -758,17 +772,15 @@ assert_existing_checker_invalid_metadata_fails_case() {
   asset_object="$(object_path_for_key "${case_dir}" "${asset_key}")"
   : >"$(metadata_path_for "${asset_object}")"
 
-  if run_existing_checker "${case_dir}" >"${case_dir}/output.log" 2>&1; then
-    echo "expected existing checker invalid metadata case to fail" >&2
-    exit 1
-  fi
-  grep -q 'invalid immutable metadata' "${case_dir}/output.log"
+  run_existing_checker "${case_dir}" >"${case_dir}/output.log" 2>&1
+  grep -q 'runtime_asset_exists=true' "${case_dir}/output.log"
+  grep -q 'found existing Runtime release asset without S3 metadata' "${case_dir}/output.log"
   if grep -q '^put ' "${case_dir}/aws.log"; then
-    echo "existing checker uploaded despite invalid existing metadata" >&2
+    echo "existing checker uploaded despite metadata-free existing object" >&2
     exit 1
   fi
   if [[ -s "${case_dir}/curl.log" ]]; then
-    echo "existing checker touched public CDN despite invalid metadata" >&2
+    echo "existing checker touched public CDN despite metadata-free existing object" >&2
     exit 1
   fi
 }
@@ -780,11 +792,11 @@ assert_public_head_retry_case
 assert_public_missing_metadata_failure_case
 assert_public_mismatched_metadata_failure_case
 assert_existing_matching_metadata_skips_upload_case
-assert_existing_missing_metadata_fails_case
+assert_existing_missing_metadata_skips_matching_asset_case
 assert_existing_mismatched_metadata_fails_case
 assert_head_miss_concurrent_put_race_case
 assert_existing_checker_missing_objects_case
 assert_existing_checker_valid_objects_case
-assert_existing_checker_invalid_metadata_fails_case
+assert_existing_checker_metadata_free_objects_case
 
 echo "Runtime DSUB S3 publisher validation passed."

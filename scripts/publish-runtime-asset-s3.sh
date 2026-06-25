@@ -377,6 +377,41 @@ PY
     return 1
   }
 
+  s3_existing_object_can_be_reused() {
+    local key="$1"
+    local expected_sha="$2"
+    local expected_size="$3"
+    local actual_sha
+    local actual_size
+    local actual_component
+    local actual_target
+    local actual_version
+    local actual_tag
+    local actual_commit
+
+    actual_sha="$(read_s3_head_field sha256 "${head_json}")"
+    actual_size="$(read_s3_head_field size "${head_json}")"
+    actual_component="$(read_s3_head_field component "${head_json}")"
+    actual_target="$(read_s3_head_field target "${head_json}")"
+    actual_version="$(read_s3_head_field runtime-version "${head_json}")"
+    actual_tag="$(read_s3_head_field source-tag "${head_json}")"
+    actual_commit="$(read_s3_head_field source-commit "${head_json}")"
+
+    if [[ "${actual_size}" != "${expected_size}" ]]; then
+      echo "Runtime release existing S3 object size does not match expected artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
+      echo "expected size=${expected_size}" >&2
+      echo "actual size=${actual_size:-<missing>}" >&2
+      return 1
+    fi
+
+    if [[ -z "${actual_sha}${actual_component}${actual_target}${actual_version}${actual_tag}${actual_commit}" ]]; then
+      echo "object already exists without immutable metadata and matching size: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+      return 0
+    fi
+
+    s3_head_metadata_matches_expected "${key}" "${expected_sha}" "${expected_size}" "existing object"
+  }
+
   object_exists_with_same_metadata() {
     local key="$1"
     local expected_sha="$2"
@@ -385,8 +420,8 @@ PY
     if aws --endpoint-url "${SKENION_RELEASE_S3_ENDPOINT}" s3api head-object \
       --bucket "${SKENION_RELEASE_S3_BUCKET}" \
       --key "${key}" >"${head_json}" 2>"${head_err}"; then
-      if s3_head_metadata_matches_expected "${key}" "${expected_sha}" "${expected_size}" "existing object"; then
-        echo "object already exists with matching immutable metadata: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
+      if s3_existing_object_can_be_reused "${key}" "${expected_sha}" "${expected_size}"; then
+        echo "object already exists and will not be overwritten: s3://${SKENION_RELEASE_S3_BUCKET}/${key}"
         return 0
       fi
       echo "refusing to overwrite existing Runtime release artifact: s3://${SKENION_RELEASE_S3_BUCKET}/${key}" >&2
