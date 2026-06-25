@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0](https://github.com/skenion/skenion-runtime/compare/v0.46.0...v0.47.0) (2026-06-25)
+
+
+### Features
+
+* **runtime:** consume package registry contracts 0.49 ([#168](https://github.com/skenion/skenion-runtime/issues/168)) ([dd6491b](https://github.com/skenion/skenion-runtime/commit/dd6491b30d6a15f85836354a7472d9c2a2092586))
+
 ## [0.46.0](https://github.com/skenion/skenion-runtime/compare/v0.45.0...v0.46.0) (2026-06-24)
 
 
