@@ -12,7 +12,7 @@ use crate::{
     GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent, GraphPatch,
     GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition, NodeDefinitionCurrent,
     NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
-    Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
+    PlanError, Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
     PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot, ProjectDocumentCurrent,
     ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEventRequest,
     RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
@@ -948,9 +948,16 @@ impl RuntimeSession {
             return self.patch_response(true, false, false, Vec::new());
         }
 
-        let diagnostics = unresolved_object_diagnostics(&next_graph);
         let plan =
-            build_execution_plan(&next_graph, &registry).expect("validated project should plan");
+            match build_session_execution_plan(&next_graph, &registry, "session-mutation-plan") {
+                Ok(plan) => plan,
+                Err(diagnostics) => {
+                    self.plan = None;
+                    self.diagnostics = diagnostics.clone();
+                    return self.patch_response(false, false, false, diagnostics);
+                }
+            };
+        let diagnostics = unresolved_object_diagnostics(&next_graph);
         let control_state = ControlState::from_graph(&next_graph);
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
@@ -2898,6 +2905,55 @@ fn unresolved_object_diagnostics_current(graph: &GraphDocumentCurrent) -> Vec<Ru
         .collect()
 }
 
+fn build_session_execution_plan(
+    graph: &GraphDocument,
+    registry: &NodeRegistry,
+    surface: &'static str,
+) -> Result<ExecutionPlan, Vec<RuntimeDiagnostic>> {
+    build_execution_plan(graph, registry).map_err(|error| {
+        let mut diagnostics = plan_error_diagnostics(error, surface, graph);
+        diagnostics.extend(unresolved_object_diagnostics(graph));
+        diagnostics
+    })
+}
+
+fn plan_error_diagnostics(
+    error: PlanError,
+    surface: &'static str,
+    graph: &GraphDocument,
+) -> Vec<RuntimeDiagnostic> {
+    let details = || {
+        json!({
+            "surface": surface,
+            "graphId": graph.id,
+            "graphRevision": graph.revision,
+        })
+    };
+    match error {
+        PlanError::InvalidProject(report) => report
+            .errors()
+            .iter()
+            .map(|error| {
+                RuntimeDiagnostic::structured_error(
+                    "session.plan.invalid-project",
+                    error.message.clone(),
+                    details(),
+                )
+            })
+            .collect(),
+        PlanError::Cycle { nodes } => vec![RuntimeDiagnostic::structured_error(
+            "session.plan.cycle",
+            format!("cycle detected: {nodes}"),
+            json!({
+                "surface": surface,
+                "graphId": graph.id,
+                "graphRevision": graph.revision,
+                "nodes": nodes,
+            }),
+        )],
+    }
+}
+
 fn created_at_now() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3850,6 +3906,74 @@ mod tests {
                 .message
                 .contains("does not exist")
         );
+    }
+
+    #[test]
+    fn view_mutation_on_invalid_stored_graph_returns_diagnostics_without_panic() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        assert!(loaded.snapshot.plan.is_some());
+        let start = loaded
+            .snapshot
+            .view_state()
+            .expect("loaded view state")
+            .canvas
+            .nodes["value_1"]
+            .clone();
+        let mut moved = start.clone();
+        moved.x += 24.0;
+
+        let mut invalid_graph = session.graph().expect("loaded graph");
+        invalid_graph.edges[0].to.port = "in".to_owned();
+        session.graph = Some(invalid_graph);
+
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.apply_mutation(RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: Some(RuntimeViewPatch {
+                    base_view_revision: loaded.snapshot.view_revision,
+                    ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                        node_id: "value_1".to_owned(),
+                        from: Some(start),
+                        to: moved,
+                    }],
+                }),
+                actor_id: None,
+                client_id: Some("studio-a".to_owned()),
+                description: Some("drag invalid stored graph".to_owned()),
+            })
+        }))
+        .expect("invalid stored graph should return diagnostics instead of panicking");
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(!response.conflict);
+        assert_eq!(
+            response.snapshot.session_revision,
+            loaded.snapshot.session_revision
+        );
+        assert_eq!(
+            response.snapshot.view_revision,
+            loaded.snapshot.view_revision
+        );
+        assert!(response.snapshot.plan.is_none());
+        assert!(
+            response.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some("session.plan.invalid-project")
+                    && diagnostic.message.contains(
+                        "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                    )
+            })
+        );
+        assert!(
+            response.snapshot.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains(
+                    "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                )
+            })
+        );
+        assert_eq!(response.history.entries.len(), 0);
     }
 
     #[test]

@@ -4509,6 +4509,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
+        let app = runtime_router();
+        let mut invalid = sample_project_document_current();
+        invalid["graph"]["edges"][0]["target"]["portId"] = json!("in");
+
+        let response = post_json_with(app.clone(), "/v0/sessions/default/load", invalid).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(response["snapshot"]["plan"], Value::Null);
+        assert!(
+            response["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(
+                        "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+                    ))
+        );
+
+        let health = get_json_with(app.clone(), "/health").await;
+        assert_eq!(health["ok"], true);
+
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["snapshot"]["project"], Value::Null);
+        assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
+
+        let logs = get_json_with(app, "/v0/runtime/logs").await;
+        assert!(logs["events"].as_array().unwrap().iter().any(|event| {
+            event["message"].as_str().unwrap().contains(
+                "incompatible edge value_1:value value<number.float> -> target_1:in event<message.any>",
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn session_validate_plan_and_run_use_loaded_project_document_patch_library() {
         let app = runtime_router();
         post_json_with(

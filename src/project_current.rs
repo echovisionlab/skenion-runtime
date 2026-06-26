@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::{
-    CycleValidationCurrent, EdgeEndpointCurrent, EdgeSpecCurrent, ExecutionGroup, ExecutionModel,
-    ExecutionModelCurrent, FanOutPolicyCurrent, GraphDocumentCurrent, GraphNodeCurrent,
-    GraphValidationResultCurrent, MergePolicyCurrent, NodeDefinitionCurrent,
-    PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode, ProjectDocumentCurrent,
-    RuntimeDiagnostic, ViewState,
+    CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
+    ExecutionGroup, ExecutionModel, ExecutionModelCurrent, FanOutPolicyCurrent,
+    GraphDocumentCurrent, GraphNodeCurrent, GraphValidationResultCurrent, MergePolicyCurrent,
+    NodeDefinitionCurrent, PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode,
+    PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
+    RuntimeDiagnostic, StringOrStrings, ViewState, compatible_data_types, type_label,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -860,6 +861,7 @@ pub fn validate_project_current(
             )),
         }
     }
+    validate_edges_current(graph, &mut diagnostics);
 
     if diagnostics
         .iter()
@@ -1208,6 +1210,127 @@ fn validate_node_snapshot_current(
     }
 }
 
+fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<RuntimeDiagnostic>) {
+    for edge in &graph.edges {
+        let Some(source) = find_port(graph, &edge.source.node_id, &edge.source.port_id) else {
+            continue;
+        };
+        let Some(target) = find_port(graph, &edge.target.node_id, &edge.target.port_id) else {
+            continue;
+        };
+
+        if source.direction != PortDirectionCurrent::Output {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-source-direction",
+                format!(
+                    "edge source {}:{} is not an output port",
+                    edge.source.node_id, edge.source.port_id
+                ),
+                edge,
+            ));
+        }
+        if target.direction != PortDirectionCurrent::Input {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-target-direction",
+                format!(
+                    "edge target {}:{} is not an input port",
+                    edge.target.node_id, edge.target.port_id
+                ),
+                edge,
+            ));
+        }
+
+        let source_type = data_type_from_port_spec_current(source);
+        let target_type = data_type_from_port_spec_current(target);
+        if !compatible_data_types(&source_type, &target_type) {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-incompatible-type",
+                format!(
+                    "incompatible edge {}:{} {} -> {}:{} {}",
+                    edge.source.node_id,
+                    edge.source.port_id,
+                    type_label(&source_type),
+                    edge.target.node_id,
+                    edge.target.port_id,
+                    type_label(&target_type)
+                ),
+                edge,
+            ));
+        }
+    }
+}
+
+fn edge_diagnostic(
+    code: &'static str,
+    message: String,
+    edge: &EdgeSpecCurrent,
+) -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        code,
+        message,
+        json!({
+            "surface": "graph-edge",
+            "edgeId": edge.id,
+            "source": {
+                "nodeId": edge.source.node_id,
+                "portId": edge.source.port_id,
+            },
+            "target": {
+                "nodeId": edge.target.node_id,
+                "portId": edge.target.port_id,
+            },
+        }),
+    )
+}
+
+fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
+    let data_kind = normalize_current_port_type(&port.port_type);
+    let format = match data_kind.as_str() {
+        "number.float" => Some(StringOrStrings::One("f32".to_owned())),
+        "gpu.texture2d" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
+        _ => None,
+    };
+    let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
+    DataType {
+        flow: match port.rate {
+            Some(PortRateCurrent::Event) => DataFlow::Event,
+            Some(PortRateCurrent::Audio) => DataFlow::Signal,
+            Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
+            Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
+            | None => {
+                if port.port_type == "message.any" {
+                    DataFlow::Event
+                } else if data_kind == "gpu.texture2d" {
+                    DataFlow::Resource
+                } else {
+                    DataFlow::Value
+                }
+            }
+        },
+        data_kind,
+        unit: None,
+        range: None,
+        shape: None,
+        channels: None,
+        sample_rate: None,
+        format,
+        color_space,
+        frame_rate: None,
+        alpha_policy: None,
+        values: None,
+    }
+}
+
+fn normalize_current_port_type(port_type: &str) -> String {
+    match port_type {
+        "value.number" => "number.float".to_owned(),
+        other => other
+            .strip_prefix("value.")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| other.to_owned()),
+    }
+}
+
 fn node_snapshot_diagnostic(
     code: &'static str,
     message: String,
@@ -1261,7 +1384,7 @@ fn find_port<'a>(
     graph: &'a GraphDocumentCurrent,
     node_id: &str,
     port_id: &str,
-) -> Option<&'a crate::PortSpecCurrent> {
+) -> Option<&'a PortSpecCurrent> {
     graph
         .nodes
         .iter()
@@ -2325,6 +2448,19 @@ mod tests {
         assert!(messages.contains("type value.number"));
         assert!(messages.contains("missing source port"));
         assert!(messages.contains("missing manifest port: output.extra"));
+
+        let mut incompatible = render_graph();
+        incompatible.nodes[1].ports[0].port_type = "message.any".to_owned();
+        incompatible.nodes[1].ports[0].rate = Some(PortRateCurrent::Event);
+        let incompatible_result =
+            validate_project_current(&incompatible, &[clear_definition(), output_definition()])
+                .expect_err("incompatible edge type should fail");
+        assert!(incompatible_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("graph.edge-incompatible-type")
+                && diagnostic
+                    .message
+                    .contains("incompatible edge clear:out value<render.frame> -> output:in event<message.any>")
+        }));
     }
 
     #[test]
