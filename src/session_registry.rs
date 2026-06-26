@@ -19,8 +19,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::{
-    COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RuntimeCollaborationLog, RuntimeDiagnostic,
-    RuntimeSession, RuntimeSessionSnapshot, runtime_time::created_at_now,
+    COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
+    RuntimeCollaborationLog, RuntimeDiagnostic, RuntimeRealtimeState, RuntimeSession,
+    RuntimeSessionSnapshot, runtime_time::created_at_now,
 };
 
 pub const DEFAULT_SESSION_ID: &str = "default";
@@ -104,6 +105,7 @@ pub struct RuntimeSessionRecord {
     pub session: Arc<RwLock<RuntimeSession>>,
     pub events: broadcast::Sender<RuntimeSessionEvent>,
     pub collaboration: Arc<RuntimeCollaborationLog>,
+    pub realtime: Arc<RuntimeRealtimeState>,
     pub event_store: Arc<Mutex<VecDeque<RuntimeSessionEvent>>>,
     pub event_sequence: Arc<Mutex<u64>>,
     pub preview: Arc<Mutex<PreviewManager>>,
@@ -124,6 +126,7 @@ impl RuntimeSessionRecord {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
             events,
             collaboration: RuntimeCollaborationLog::new(COLLABORATION_EVENT_REPLAY_LIMIT),
+            realtime: RuntimeRealtimeState::new(session_id, RUNTIME_REALTIME_REPLAY_LIMIT),
             event_store: Arc::new(Mutex::new(VecDeque::new())),
             event_sequence: Arc::new(Mutex::new(1)),
             preview: Arc::new(Mutex::new(if dry_preview {

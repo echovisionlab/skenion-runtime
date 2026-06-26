@@ -11,8 +11,14 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    extract::{
+        DefaultBodyLimit, Multipart, Path, Query, State,
+        ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
+    },
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{CONTENT_TYPE, UPGRADE},
+    },
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -58,6 +64,7 @@ use crate::{
     build_execution_plan_run_request_current, collaboration_broadcast_event_after_high_water,
     collaboration_event, generated_shader_response_from_preview_document,
     project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    realtime::handle_runtime_realtime_socket,
     run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
@@ -262,9 +269,13 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/run", post(run_project_endpoint))
         .route(
             "/v0/sessions/{session_id}",
-            get(session_snapshot_by_id).delete(clear_session_by_id),
+            get(realtime_session_by_id).delete(clear_session_by_id),
         )
         .route("/v0/sessions/{session_id}/info", get(session_info_by_id))
+        .route(
+            "/v0/sessions/{session_id}/snapshot",
+            get(session_snapshot_by_id),
+        )
         .route(
             "/v0/sessions/{session_id}/events/stream",
             get(session_events_stream_by_id),
@@ -384,6 +395,8 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "dummy.run",
             "session.load",
             "session.load.v0.1",
+            "session.realtime.websocket",
+            "session.realtime.v0",
             "session.project",
             "session.project.v0.1",
             "session.events.stream",
@@ -732,19 +745,36 @@ async fn run_project_endpoint(
     }
 }
 
-async fn session_snapshot_by_id(
+async fn realtime_session_by_id(
     State(state): State<RuntimeServerState>,
     Path(session_id): Path<String>,
-) -> Json<crate::RuntimeSessionResponse> {
-    session_snapshot_for(state.sessions.get_or_create(&session_id))
-}
-
-fn session_snapshot_for(record: RuntimeSessionRecord) -> Json<crate::RuntimeSessionResponse> {
-    let session = record
-        .session
-        .read()
-        .expect("runtime session lock should not be poisoned");
-    Json(session.response(true, session.snapshot().diagnostics, None))
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    let record = state.sessions.get_or_create(&session_id);
+    match ws {
+        Ok(ws) => ws
+            .on_upgrade(move |socket| handle_runtime_realtime_socket(record, socket))
+            .into_response(),
+        Err(_) => (
+            StatusCode::UPGRADE_REQUIRED,
+            [(UPGRADE, HeaderValue::from_static("websocket"))],
+            Json(serde_json::json!({
+                "schema": "skenion.runtime.realtime.upgradeRequired",
+                "schemaVersion": "0.1.0",
+                "ok": false,
+                "sessionId": session_id,
+                "diagnostic": {
+                    "code": "realtime.websocket-upgrade-required",
+                    "message": "GET /v0/sessions/{sessionId} is the Runtime realtime WebSocket endpoint; send a WebSocket Upgrade request.",
+                    "details": {
+                        "endpoint": "/v0/sessions/{sessionId}",
+                        "upgrade": "websocket"
+                    }
+                }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn session_info_by_id(
@@ -763,6 +793,24 @@ fn session_info_for(
 ) -> RuntimeSessionInfoResponse {
     let profile = runtime_connection_profile(&state.endpoint, &state.started_at_wall_clock);
     record.info_response(profile)
+}
+
+async fn session_snapshot_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    session_snapshot_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn session_snapshot_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimeSessionResponse> {
+    let session = record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    session_json(state, session.response(true, Vec::new(), None))
 }
 
 async fn load_session_by_id(
@@ -4229,7 +4277,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_endpoint_returns_empty_state() {
-        let response = get_json("/v0/sessions/default").await;
+        let response = get_json("/v0/sessions/default/snapshot").await;
 
         assert_eq!(response["ok"], true);
         assert_eq!(response["snapshot"]["project"], Value::Null);
@@ -4245,7 +4293,7 @@ mod tests {
     async fn session_snapshot_returns_loaded_project() {
         let app = runtime_router();
 
-        let empty = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let empty = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         assert_eq!(empty["ok"], true);
         assert_eq!(empty["snapshot"]["project"], Value::Null);
 
@@ -4255,7 +4303,7 @@ mod tests {
             sample_project_document_current(),
         )
         .await;
-        let project = get_json_with(app, "/v0/sessions/default").await;
+        let project = get_json_with(app, "/v0/sessions/default/snapshot").await;
 
         assert_eq!(project["ok"], true);
         assert_eq!(
@@ -4318,7 +4366,7 @@ mod tests {
             "subpatch-project-root"
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(
             snapshot["snapshot"]["project"]["graph"]["id"],
             "subpatch-project-root"
@@ -4369,7 +4417,10 @@ mod tests {
         assert_eq!(default_status, StatusCode::NOT_FOUND);
         assert_eq!(named_status, StatusCode::NOT_FOUND);
 
-        for path in ["/v0/sessions/default", "/v0/sessions/alpha"] {
+        for path in [
+            "/v0/sessions/default/snapshot",
+            "/v0/sessions/alpha/snapshot",
+        ] {
             let snapshot = get_json_with(app.clone(), path).await;
             assert_eq!(snapshot["snapshot"]["project"], Value::Null);
             assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
@@ -4395,7 +4446,7 @@ mod tests {
             sample_project_document_current(),
         )
         .await;
-        let explicit = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let explicit = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         let info = get_json_with(app, "/v0/sessions/default/info").await;
 
         assert_eq!(loaded["ok"], true);
@@ -4445,8 +4496,8 @@ mod tests {
         )
         .await;
 
-        let alpha = get_json_with(app.clone(), "/v0/sessions/alpha").await;
-        let beta = get_json_with(app.clone(), "/v0/sessions/beta").await;
+        let alpha = get_json_with(app.clone(), "/v0/sessions/alpha/snapshot").await;
+        let beta = get_json_with(app.clone(), "/v0/sessions/beta/snapshot").await;
         let alpha_history = get_json_with(app.clone(), "/v0/sessions/alpha/history").await;
         let beta_history = get_json_with(app.clone(), "/v0/sessions/beta/history").await;
         let beta_control = get_json_with(app, "/v0/sessions/beta/control/state").await;
@@ -4492,7 +4543,7 @@ mod tests {
                 .contains("missing node definition")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["ok"], true);
         assert_eq!(
             snapshot["snapshot"]["project"]["graph"]["id"],
@@ -4534,7 +4585,7 @@ mod tests {
         let health = get_json_with(app.clone(), "/health").await;
         assert_eq!(health["ok"], true);
 
-        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["ok"], true);
         assert_eq!(snapshot["snapshot"]["project"], Value::Null);
         assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
@@ -4608,7 +4659,7 @@ mod tests {
         assert_eq!(patched["revisionBefore"], "1");
         assert_eq!(patched["revisionAfter"], "2");
 
-        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         let history = get_json_with(app.clone(), "/v0/sessions/default/history").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert_eq!(history["entries"][0]["kind"], "apply");
@@ -4701,7 +4752,7 @@ mod tests {
             json!("edge_value_to_pasted")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["edges"]
@@ -4743,7 +4794,7 @@ mod tests {
             "project-patch-definition"
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "1");
         assert_eq!(
             snapshot["snapshot"]["project"]["patchLibrary"][0]["revision"],
@@ -4839,7 +4890,7 @@ mod tests {
         );
         assert_eq!(result.operation_id, "op-collab-paste");
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
 
         let replay = state
@@ -4890,7 +4941,7 @@ mod tests {
             result.nack.as_ref().map(|nack| nack.reason.clone()),
             Some(RuntimeCollaborationNackReason::DuplicateIdempotencyKey)
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
     }
 
@@ -4940,7 +4991,7 @@ mod tests {
                 .count(),
             1
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
     }
 
@@ -4992,7 +5043,7 @@ mod tests {
             result.ack.as_ref().map(|ack| ack.revision.as_str()),
             Some("3")
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
     }
 
@@ -5110,7 +5161,7 @@ mod tests {
             Some("2")
         );
 
-        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["nodes"]
@@ -5185,7 +5236,7 @@ mod tests {
             .expect("disconnect result should validate");
         assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["edges"]
@@ -5273,7 +5324,7 @@ mod tests {
             Some("3")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert_eq!(
             snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["revision"],
@@ -5338,7 +5389,7 @@ mod tests {
             Some("4")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         let nodes = snapshot["snapshot"]["project"]["graph"]["nodes"]
             .as_array()
             .unwrap();

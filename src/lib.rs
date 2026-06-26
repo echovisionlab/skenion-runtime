@@ -19,6 +19,7 @@ mod preview_manager;
 #[allow(dead_code)]
 mod project;
 mod project_current;
+mod realtime;
 #[allow(dead_code)]
 mod registry;
 mod render;
@@ -151,6 +152,11 @@ pub use project_current::{
     build_execution_plan_run_request_current, expand_project_graph_current,
     project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
     schema_version_diagnostic, validate_project_current, validate_project_request_current,
+};
+pub use realtime::{
+    RUNTIME_REALTIME_REPLAY_LIMIT, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
+    RuntimeRealtimeDiagnostic, RuntimeRealtimeEnvelope, RuntimeRealtimeReplay,
+    RuntimeRealtimeState,
 };
 pub(crate) use registry::NodeRegistry;
 pub use render::{
