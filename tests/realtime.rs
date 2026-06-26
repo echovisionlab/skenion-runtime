@@ -1,6 +1,9 @@
 use std::{net::SocketAddr, time::Duration};
 
-use axum::{body::Body, http::Request};
+use axum::{
+    body::Body,
+    http::{Method, Request, header},
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use skenion_runtime::{RuntimeServerState, runtime_router_with_state};
@@ -25,15 +28,37 @@ impl Drop for TestRuntime {
 }
 
 async fn spawn_runtime() -> TestRuntime {
+    spawn_runtime_with_state(RuntimeServerState::default()).await
+}
+
+async fn spawn_runtime_with_state(state: RuntimeServerState) -> TestRuntime {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("test listener binds");
     let addr = listener.local_addr().expect("test listener has local addr");
-    let app = runtime_router_with_state(RuntimeServerState::default());
+    let app = runtime_router_with_state(state);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("runtime serves");
     });
     TestRuntime { addr, handle }
+}
+
+async fn spawn_loaded_runtime() -> TestRuntime {
+    let state = RuntimeServerState::default();
+    let app = runtime_router_with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v0/sessions/default/load")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(sample_project_document_current().to_string()))
+                .expect("load request builds"),
+        )
+        .await
+        .expect("load request succeeds");
+    assert!(response.status().is_success());
+    spawn_runtime_with_state(state).await
 }
 
 async fn connect_session(runtime: &TestRuntime, session_id: &str) -> TestSocket {
@@ -138,6 +163,53 @@ async fn send_presence(socket: &mut TestSocket, message_id: &str, idempotency_ke
     .await;
 }
 
+async fn send_control_command(
+    socket: &mut TestSocket,
+    message_id: &str,
+    idempotency_key: &str,
+    node_id: &str,
+    port_id: &str,
+    message: Value,
+) {
+    send_json(
+        socket,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "control.command",
+            "messageId": message_id,
+            "sessionId": "default",
+            "commandId": message_id,
+            "correlationId": message_id,
+            "idempotencyKey": idempotency_key,
+            "payload": {
+                "nodeId": node_id,
+                "portId": port_id,
+                "message": message
+            }
+        }),
+    )
+    .await;
+}
+
+fn bang_message() -> Value {
+    json!({ "selector": "bang", "atoms": [] })
+}
+
+fn float_message(value: f64) -> Value {
+    json!({
+        "selector": "float",
+        "atoms": [{ "type": "float", "representation": "f32", "value": value }]
+    })
+}
+
+fn set_float_message(value: f64) -> Value {
+    json!({
+        "selector": "set",
+        "atoms": [{ "type": "float", "representation": "f32", "value": value }]
+    })
+}
+
 #[tokio::test]
 async fn websocket_attach_returns_server_issued_identity_snapshot_and_cursor() {
     let app = runtime_router_with_state(RuntimeServerState::default());
@@ -166,6 +238,230 @@ async fn websocket_attach_returns_server_issued_identity_snapshot_and_cursor() {
     assert!(attached["payload"]["currentRevisions"]["sessionRevision"].is_u64());
     assert!(attached["payload"]["snapshot"].is_object());
     assert!(attached["payload"]["globalCursor"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn realtime_control_bang_broadcasts_control_emitted_to_attached_clients() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_control_command(
+        &mut client_a,
+        "control-bang-1",
+        "control-bang-key",
+        "value_1",
+        "in",
+        bang_message(),
+    )
+    .await;
+    let ack = next_type(&mut client_a, "control.ack").await;
+    let broadcast = next_type(&mut client_b, "control.emitted").await;
+
+    assert_eq!(ack["payload"]["status"], "accepted");
+    assert_eq!(ack["payload"]["accepted"], true);
+    assert_eq!(ack["payload"]["commandId"], "control-bang-1");
+    assert_eq!(ack["payload"]["correlationId"], "control-bang-1");
+    assert_eq!(ack["payload"]["idempotencyKey"], "control-bang-key");
+    assert!(ack["payload"]["controlSequence"].as_u64().is_some());
+    assert!(ack["payload"]["controlRevision"].as_u64().is_some());
+    assert_eq!(broadcast["clientId"], attached_a["clientId"]);
+    assert_eq!(broadcast["windowId"], attached_a["windowId"]);
+    assert_eq!(broadcast["payload"]["emitted"][0]["nodeId"], "value_1");
+    assert_eq!(broadcast["payload"]["emitted"][0]["portId"], "value");
+    assert_eq!(
+        broadcast["payload"]["emitted"][0]["message"],
+        float_message(0.0)
+    );
+}
+
+#[tokio::test]
+async fn realtime_control_float_applies_through_session_and_broadcasts_result() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_control_command(
+        &mut client_a,
+        "control-float-1",
+        "control-float-key",
+        "value_1",
+        "in",
+        float_message(12.0),
+    )
+    .await;
+    let ack = next_type(&mut client_a, "control.ack").await;
+    let broadcast = next_type(&mut client_b, "control.emitted").await;
+
+    assert_eq!(ack["payload"]["status"], "accepted");
+    assert_eq!(ack["payload"]["accepted"], true);
+    assert_eq!(ack["payload"]["changed"], true);
+    assert_eq!(ack["payload"]["controlRevision"], 1);
+    assert_eq!(broadcast["payload"]["controlRevision"], 1);
+    assert_eq!(broadcast["payload"]["emitted"][0]["nodeId"], "value_1");
+    assert_eq!(
+        broadcast["payload"]["emitted"][0]["message"],
+        float_message(12.0)
+    );
+    assert_eq!(
+        broadcast["payload"]["values"]["value_1"],
+        json!({ "type": "float", "representation": "f32", "value": 12.0 })
+    );
+    assert_eq!(
+        broadcast["payload"]["values"]["target_1"],
+        json!({ "type": "float", "representation": "f32", "value": 12.0 })
+    );
+}
+
+#[tokio::test]
+async fn realtime_control_invalid_command_returns_rejected_ack_without_success_broadcast() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_control_command(
+        &mut client_a,
+        "control-invalid-1",
+        "control-invalid-key",
+        "missing",
+        "in",
+        float_message(12.0),
+    )
+    .await;
+    let ack = next_type(&mut client_a, "control.ack").await;
+    let no_success_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+
+    assert_eq!(ack["payload"]["status"], "rejected");
+    assert_eq!(ack["payload"]["accepted"], false);
+    assert_eq!(ack["payload"]["diagnostics"][0]["severity"], "error");
+    assert!(
+        ack["payload"]["diagnostics"][0]["message"]
+            .as_str()
+            .expect("diagnostic message")
+            .contains("does not exist")
+    );
+    assert!(no_success_broadcast.is_err());
+}
+
+#[tokio::test]
+async fn realtime_control_duplicate_idempotency_key_replays_ack_without_second_apply_or_broadcast()
+{
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_control_command(
+        &mut client_a,
+        "control-once",
+        "control-dedupe-key",
+        "value_1",
+        "in",
+        float_message(12.0),
+    )
+    .await;
+    let first_ack = next_type(&mut client_a, "control.ack").await;
+    let client_a_echo = next_type(&mut client_a, "control.emitted").await;
+    let first_broadcast = next_type(&mut client_b, "control.emitted").await;
+
+    send_control_command(
+        &mut client_a,
+        "control-duplicate",
+        "control-dedupe-key",
+        "value_1",
+        "in",
+        float_message(24.0),
+    )
+    .await;
+    let duplicate_ack = next_type(&mut client_a, "control.ack").await;
+    let duplicate_local_result = next_type(&mut client_a, "control.emitted").await;
+    let no_second_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+
+    assert_ne!(duplicate_ack["messageId"], first_ack["messageId"]);
+    assert_eq!(duplicate_ack["payload"]["accepted"], true);
+    assert_eq!(duplicate_ack["payload"]["cached"], true);
+    assert_eq!(
+        duplicate_ack["payload"]["eventCursor"],
+        first_ack["payload"]["eventCursor"]
+    );
+    assert_eq!(duplicate_ack["payload"]["controlRevision"], 1);
+    assert_eq!(duplicate_local_result, client_a_echo);
+    assert_eq!(
+        first_broadcast["payload"]["values"]["value_1"],
+        json!({ "type": "float", "representation": "f32", "value": 12.0 })
+    );
+    assert!(no_second_broadcast.is_err());
+}
+
+#[tokio::test]
+async fn realtime_control_idempotency_key_is_scoped_separately_from_presence() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_presence(&mut client_a, "presence-shared-key", "shared-key").await;
+    let presence_ack = next_type(&mut client_a, "command.ack").await;
+    let _presence_echo = next_type(&mut client_a, "presence.updated").await;
+    let _presence_broadcast = next_type(&mut client_b, "presence.updated").await;
+
+    send_control_command(
+        &mut client_a,
+        "control-shared-key",
+        "shared-key",
+        "value_1",
+        "in",
+        float_message(7.0),
+    )
+    .await;
+    let control_ack = next_type(&mut client_a, "control.ack").await;
+    let control_broadcast = next_type(&mut client_b, "control.emitted").await;
+
+    assert_eq!(presence_ack["payload"]["accepted"], true);
+    assert_eq!(control_ack["payload"]["accepted"], true);
+    assert_eq!(control_ack["payload"]["cached"], false);
+    assert_eq!(control_ack["payload"]["status"], "accepted");
+    assert_eq!(
+        control_broadcast["payload"]["emitted"][0]["message"],
+        float_message(7.0)
+    );
+}
+
+#[tokio::test]
+async fn realtime_control_silent_set_broadcasts_changed_durable_value() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_control_command(
+        &mut client_a,
+        "control-set-1",
+        "control-set-key",
+        "value_1",
+        "in",
+        set_float_message(32.0),
+    )
+    .await;
+    let ack = next_type(&mut client_a, "control.ack").await;
+    let broadcast = next_type(&mut client_b, "control.emitted").await;
+
+    assert_eq!(ack["payload"]["status"], "accepted");
+    assert_eq!(ack["payload"]["changed"], true);
+    assert_eq!(broadcast["payload"]["emitted"], json!([]));
+    assert_eq!(
+        broadcast["payload"]["values"]["value_1"],
+        json!({ "type": "float", "representation": "f32", "value": 32.0 })
+    );
 }
 
 #[tokio::test]
@@ -403,4 +699,113 @@ async fn guessed_adjacent_resume_token_cannot_reuse_identity_or_idempotency_scop
     assert_ne!(guessed_ack["windowId"], first_ack["windowId"]);
     assert_eq!(guessed_ack["payload"]["accepted"], true);
     assert_eq!(guessed_ack["payload"]["cached"], false);
+}
+
+fn sample_project_document_current() -> Value {
+    json!({
+      "schema": "skenion.project",
+      "schemaVersion": "0.1.0",
+      "id": "minimal-value-project",
+      "revision": "1",
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "minimal-value",
+        "revision": "1",
+        "nodes": [
+          {
+            "id": "value_1",
+            "kind": "core.float",
+            "kindVersion": "0.1.0",
+            "params": {},
+            "ports": value_f32_ports_current_json()
+          },
+          {
+            "id": "target_1",
+            "kind": "core.float",
+            "kindVersion": "0.1.0",
+            "params": {},
+            "ports": value_f32_ports_current_json()
+          }
+        ],
+        "edges": [
+          {
+            "id": "edge_value_target",
+            "source": { "nodeId": "value_1", "portId": "value" },
+            "target": { "nodeId": "target_1", "portId": "cold" },
+            "resolvedType": "control.number.float"
+          }
+        ]
+      },
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {
+            "value_1": { "x": 96.0, "y": 96.0 },
+            "target_1": { "x": 260.0, "y": 96.0 }
+          }
+        }
+      },
+      "patchLibrary": [],
+      "nodes": [
+        {
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": "core.float",
+          "version": "0.1.0",
+          "displayName": "Float",
+          "category": "Typed Controls",
+          "ports": value_f32_ports_current_json(),
+          "execution": { "model": "control" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": ["control.number.float.v0.1"]
+        }
+      ]
+    })
+}
+
+fn value_f32_ports_current_json() -> Value {
+    json!([
+      {
+        "id": "in",
+        "direction": "input",
+        "label": "In",
+        "type": "control.message.any",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "trigger",
+        "accepts": [
+          "control.number.float",
+          "control.number.int",
+          "control.number.uint",
+          "control.bool",
+          "event.bang"
+        ],
+        "messageSelectors": {
+          "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+          "silent": ["set"],
+          "trigger": ["bang", "float", "int", "uint", "bool"],
+          "store": ["set", "float", "int", "uint", "bool"],
+          "emit": ["bang", "float", "int", "uint", "bool"]
+        }
+      },
+      {
+        "id": "cold",
+        "direction": "input",
+        "label": "Cold",
+        "type": "control.number.float",
+        "rate": "control",
+        "required": false,
+        "triggerMode": "passive"
+      },
+      {
+        "id": "value",
+        "direction": "output",
+        "label": "Value",
+        "type": "control.number.float",
+        "rate": "control"
+      }
+    ])
 }

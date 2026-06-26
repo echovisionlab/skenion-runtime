@@ -22,7 +22,7 @@ pub struct ControlState {
     pub operator_right: BTreeMap<String, ControlValue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeControlEventRequest {
     pub node_id: String,

@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use crate::{RuntimeSessionRecord, RuntimeSessionSnapshot, runtime_time::created_at_now};
+use crate::{
+    ControlValue, RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
+    RuntimeSessionRecord, RuntimeSessionSnapshot, runtime_time::created_at_now,
+};
 
 pub const RUNTIME_REALTIME_SCHEMA: &str = "skenion.runtime.realtime";
 pub const RUNTIME_REALTIME_SCHEMA_VERSION: &str = "0.1.0";
@@ -24,6 +27,7 @@ const RUNTIME_REALTIME_RESUME_TOKEN_BYTES: usize = 32;
 struct RuntimeRealtimeIdempotencyScope {
     client_id: String,
     window_id: String,
+    message_type: String,
     idempotency_key: String,
 }
 
@@ -31,7 +35,16 @@ struct RuntimeRealtimeIdempotencyScope {
 struct RuntimeRealtimeIdempotencyEntry {
     event_cursor: String,
     event_sequence: u64,
+    ack_payload: Value,
+    emitted_result: Option<RuntimeRealtimeEnvelope>,
     inserted_at: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRealtimeCachedCommandResult {
+    event_cursor: String,
+    ack_payload: Value,
+    emitted_result: Option<RuntimeRealtimeEnvelope>,
 }
 
 #[derive(Debug, Clone)]
@@ -317,11 +330,12 @@ impl RuntimeRealtimeState {
         })
     }
 
-    fn cached_event_cursor(
+    fn cached_command_result(
         &self,
         identity: &RuntimeRealtimeConnectionIdentity,
+        message_type: &str,
         idempotency_key: &str,
-    ) -> Option<String> {
+    ) -> Option<RuntimeRealtimeCachedCommandResult> {
         self.prune_idempotency_results(SystemTime::now());
         self.idempotency_results
             .lock()
@@ -329,17 +343,25 @@ impl RuntimeRealtimeState {
             .get(&RuntimeRealtimeIdempotencyScope {
                 client_id: identity.client_id.clone(),
                 window_id: identity.window_id.clone(),
+                message_type: message_type.to_owned(),
                 idempotency_key: idempotency_key.to_owned(),
             })
-            .map(|entry| entry.event_cursor.clone())
+            .map(|entry| RuntimeRealtimeCachedCommandResult {
+                event_cursor: entry.event_cursor.clone(),
+                ack_payload: entry.ack_payload.clone(),
+                emitted_result: entry.emitted_result.clone(),
+            })
     }
 
     fn remember_ack(
         &self,
         identity: &RuntimeRealtimeConnectionIdentity,
+        message_type: &str,
         idempotency_key: &str,
         event_cursor: &str,
         event_sequence: u64,
+        ack_payload: Value,
+        emitted_result: Option<RuntimeRealtimeEnvelope>,
     ) {
         let mut idempotency_results = self
             .idempotency_results
@@ -349,11 +371,14 @@ impl RuntimeRealtimeState {
             RuntimeRealtimeIdempotencyScope {
                 client_id: identity.client_id.clone(),
                 window_id: identity.window_id.clone(),
+                message_type: message_type.to_owned(),
                 idempotency_key: idempotency_key.to_owned(),
             },
             RuntimeRealtimeIdempotencyEntry {
                 event_cursor: event_cursor.to_owned(),
                 event_sequence,
+                ack_payload,
+                emitted_result,
                 inserted_at: SystemTime::now(),
             },
         );
@@ -636,6 +661,37 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     }
                                 }
                             }
+                            "control.command" => {
+                                let Some(identity) = identity.as_ref() else {
+                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
+                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                };
+                                match handle_control_command(&record, identity, frame) {
+                                    Ok((ack, event, local_event)) => {
+                                        if send_frame(&mut sender, &ack).await.is_err() {
+                                            break;
+                                        }
+                                        if let Some(local_event) = local_event {
+                                            if send_frame(&mut sender, &local_event).await.is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        if let Some(event) = event {
+                                            record.realtime.publish(event);
+                                        }
+                                    }
+                                    Err(diagnostic) => {
+                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
+                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             _ => {
                                 let diagnostic = runtime_error(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
                                 if send_frame(&mut sender, &diagnostic).await.is_err() {
@@ -726,12 +782,13 @@ fn handle_presence_update(
             None,
         )
     })?;
-    if let Some(event_cursor) = record
-        .realtime
-        .cached_event_cursor(identity, &idempotency_key)
+    if let Some(cached) =
+        record
+            .realtime
+            .cached_command_result(identity, &frame.message_type, &idempotency_key)
     {
         return Ok((
-            command_ack(record, identity, &frame, &event_cursor, true),
+            command_ack_from_cached(record, identity, &frame, cached),
             None,
         ));
     }
@@ -795,10 +852,195 @@ fn handle_presence_update(
         payload: presence,
     };
     let ack = command_ack(record, identity, &frame, &cursor, false);
-    record
-        .realtime
-        .remember_ack(identity, &idempotency_key, &cursor, sequence);
+    record.realtime.remember_ack(
+        identity,
+        &frame.message_type,
+        &idempotency_key,
+        &cursor,
+        sequence,
+        ack.payload.clone(),
+        None,
+    );
     Ok((ack, Some(event)))
+}
+
+fn handle_control_command(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: RuntimeRealtimeEnvelope,
+) -> Result<
+    (
+        RuntimeRealtimeEnvelope,
+        Option<RuntimeRealtimeEnvelope>,
+        Option<RuntimeRealtimeEnvelope>,
+    ),
+    RuntimeRealtimeDiagnostic,
+> {
+    let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
+        sync_required_diagnostic(
+            "realtime.command.idempotency-key-required",
+            "control.command requires idempotencyKey",
+            None,
+        )
+    })?;
+    if let Some(cached) =
+        record
+            .realtime
+            .cached_command_result(identity, &frame.message_type, &idempotency_key)
+    {
+        let emitted_result = cached.emitted_result.clone();
+        return Ok((
+            control_ack_from_cached(record, identity, &frame, cached),
+            None,
+            emitted_result,
+        ));
+    }
+
+    let request = serde_json::from_value::<RuntimeControlEventRequest>(frame.payload.clone())
+        .map_err(|error| {
+            sync_required_diagnostic(
+                "realtime.control.invalid-payload",
+                format!("invalid control.command payload: {error}"),
+                None,
+            )
+        })?;
+    let sequence = record.realtime.next_event_sequence();
+    let cursor = record.realtime.cursor_for(sequence);
+    let (mut response, changed_values, request_for_event) =
+        apply_control_command(record, request.clone());
+    let accepted = response.ok;
+    let ack = control_ack(
+        record, identity, &frame, &response, sequence, &cursor, false,
+    );
+    let event = if accepted {
+        control_emitted_event(
+            record,
+            identity,
+            &frame,
+            &request_for_event,
+            &mut response,
+            changed_values,
+            sequence,
+            cursor.clone(),
+        )
+    } else {
+        None
+    };
+    record.realtime.remember_ack(
+        identity,
+        &frame.message_type,
+        &idempotency_key,
+        &cursor,
+        sequence,
+        ack.payload.clone(),
+        event.clone(),
+    );
+
+    Ok((ack, event, None))
+}
+
+fn apply_control_command(
+    record: &RuntimeSessionRecord,
+    request: RuntimeControlEventRequest,
+) -> (
+    RuntimeControlEventResponse,
+    BTreeMap<String, ControlValue>,
+    RuntimeControlEventRequest,
+) {
+    let (mut response, control_snapshot, changed_values) = {
+        let mut session = record
+            .session
+            .write()
+            .expect("runtime session lock should not be poisoned");
+        let before = session.control_state_response().values;
+        let response = session.apply_control_event(request.clone());
+        let after = session.control_state_response().values;
+        let changed_values = changed_control_values(&before, &after);
+        let control_snapshot = if response.ok && response.changed {
+            session.preview_control_state_snapshot()
+        } else {
+            None
+        };
+        (response, control_snapshot, changed_values)
+    };
+
+    if let Some(control_snapshot) = control_snapshot {
+        let mut preview = record
+            .preview
+            .lock()
+            .expect("runtime preview lock should not be poisoned");
+        if let Err(error) = preview.update_control_state(control_snapshot) {
+            response
+                .diagnostics
+                .push(RuntimeDiagnostic::warning(format!(
+                    "failed to update running preview control state: {error}"
+                )));
+        }
+    }
+
+    (response, changed_values, request)
+}
+
+fn changed_control_values(
+    before: &BTreeMap<String, ControlValue>,
+    after: &BTreeMap<String, ControlValue>,
+) -> BTreeMap<String, ControlValue> {
+    after
+        .iter()
+        .filter(|(node_id, value)| before.get(*node_id) != Some(*value))
+        .map(|(node_id, value)| (node_id.clone(), value.clone()))
+        .collect()
+}
+
+fn control_emitted_event(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    request: &RuntimeControlEventRequest,
+    response: &mut RuntimeControlEventResponse,
+    changed_values: BTreeMap<String, ControlValue>,
+    sequence: u64,
+    cursor: String,
+) -> Option<RuntimeRealtimeEnvelope> {
+    if response.emitted.is_empty() && changed_values.is_empty() {
+        return None;
+    }
+
+    Some(RuntimeRealtimeEnvelope {
+        schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
+        schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
+        message_type: "control.emitted".to_owned(),
+        message_id: format!("{}_control_{sequence:06}", record.id),
+        session_id: record.id.clone(),
+        connection_id: Some(identity.connection_id.clone()),
+        client_id: Some(identity.client_id.clone()),
+        window_id: Some(identity.window_id.clone()),
+        command_id: frame
+            .command_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        correlation_id: frame
+            .correlation_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        idempotency_key: frame.idempotency_key.clone(),
+        sequence: Some(sequence),
+        cursor: Some(cursor),
+        created_at: Some(created_at_now()),
+        payload: json!({
+            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "idempotencyKey": frame.idempotency_key,
+            "controlSequence": sequence,
+            "controlRevision": response.control_revision,
+            "changed": response.changed,
+            "request": request,
+            "emitted": response.emitted,
+            "values": changed_values,
+            "diagnostics": response.diagnostics,
+            "replayed": false,
+        }),
+    })
 }
 
 fn command_ack(
@@ -835,6 +1077,119 @@ fn command_ack(
             "eventCursor": event_cursor,
         }),
     }
+}
+
+fn command_ack_from_cached(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    cached: RuntimeRealtimeCachedCommandResult,
+) -> RuntimeRealtimeEnvelope {
+    command_ack_with_payload(
+        record,
+        identity,
+        frame,
+        mark_ack_payload_cached(cached.ack_payload),
+    )
+}
+
+fn control_ack(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    response: &RuntimeControlEventResponse,
+    sequence: u64,
+    event_cursor: &str,
+    cached: bool,
+) -> RuntimeRealtimeEnvelope {
+    control_ack_with_payload(
+        record,
+        identity,
+        frame,
+        json!({
+            "status": if response.ok { "accepted" } else { "rejected" },
+            "accepted": response.ok,
+            "cached": cached,
+            "changed": response.changed,
+            "controlSequence": sequence,
+            "controlRevision": response.control_revision,
+            "commandId": frame.command_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "correlationId": frame.correlation_id.clone().unwrap_or_else(|| frame.message_id.clone()),
+            "idempotencyKey": frame.idempotency_key,
+            "eventCursor": event_cursor,
+            "diagnostics": response.diagnostics,
+        }),
+    )
+}
+
+fn control_ack_from_cached(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    cached: RuntimeRealtimeCachedCommandResult,
+) -> RuntimeRealtimeEnvelope {
+    let mut payload = mark_ack_payload_cached(cached.ack_payload);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("eventCursor".to_owned(), Value::String(cached.event_cursor));
+    }
+    control_ack_with_payload(record, identity, frame, payload)
+}
+
+fn command_ack_with_payload(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    payload: Value,
+) -> RuntimeRealtimeEnvelope {
+    ack_with_payload(record, identity, frame, "command.ack", payload)
+}
+
+fn control_ack_with_payload(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    payload: Value,
+) -> RuntimeRealtimeEnvelope {
+    ack_with_payload(record, identity, frame, "control.ack", payload)
+}
+
+fn ack_with_payload(
+    record: &RuntimeSessionRecord,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    frame: &RuntimeRealtimeEnvelope,
+    message_type: &str,
+    payload: Value,
+) -> RuntimeRealtimeEnvelope {
+    RuntimeRealtimeEnvelope {
+        schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
+        schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
+        message_type: message_type.to_owned(),
+        message_id: format!("{}_ack_{}", record.id, frame.message_id),
+        session_id: record.id.clone(),
+        connection_id: Some(identity.connection_id.clone()),
+        client_id: Some(identity.client_id.clone()),
+        window_id: Some(identity.window_id.clone()),
+        command_id: frame
+            .command_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        correlation_id: frame
+            .correlation_id
+            .clone()
+            .or_else(|| Some(frame.message_id.clone())),
+        idempotency_key: frame.idempotency_key.clone(),
+        sequence: None,
+        cursor: Some(record.realtime.current_cursor()),
+        created_at: Some(created_at_now()),
+        payload,
+    }
+}
+
+fn mark_ack_payload_cached(mut payload: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("cached".to_owned(), Value::Bool(true));
+    }
+    payload
 }
 
 fn session_attached(
@@ -1080,7 +1435,15 @@ mod tests {
 
         for sequence in 1..=3 {
             let cursor = state.cursor_for(sequence);
-            state.remember_ack(&identity, &format!("key-{sequence}"), &cursor, sequence);
+            state.remember_ack(
+                &identity,
+                "presence.update",
+                &format!("key-{sequence}"),
+                &cursor,
+                sequence,
+                json!({ "eventCursor": cursor }),
+                None,
+            );
             state.publish(realtime_event("default", sequence, &cursor));
         }
 
@@ -1093,6 +1456,7 @@ mod tests {
             !idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
                 client_id: identity.client_id.clone(),
                 window_id: identity.window_id.clone(),
+                message_type: "presence.update".to_owned(),
                 idempotency_key: "key-1".to_owned(),
             })
         );
@@ -1100,6 +1464,7 @@ mod tests {
             idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
                 client_id: identity.client_id.clone(),
                 window_id: identity.window_id.clone(),
+                message_type: "presence.update".to_owned(),
                 idempotency_key: "key-2".to_owned(),
             })
         );
@@ -1107,6 +1472,7 @@ mod tests {
             idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
                 client_id: identity.client_id.clone(),
                 window_id: identity.window_id.clone(),
+                message_type: "presence.update".to_owned(),
                 idempotency_key: "key-3".to_owned(),
             })
         );
