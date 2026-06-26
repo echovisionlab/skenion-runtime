@@ -9,6 +9,22 @@ Rust tooling is installed through rustup in this environment. Use
 `~/.cargo/bin/cargo`, `~/.cargo/bin/rustfmt`, and `~/.cargo/bin/rustup` if the
 shell PATH does not include Cargo.
 
+## Local Runtime Development Server
+
+Runtime feature work and Studio/Runtime live validation should run through
+`cargo-watch` instead of manual rebuild/restart loops. If the Runtime is not
+already running for the selected local port, start it from this repo with:
+
+```sh
+~/.cargo/bin/cargo watch -w src -w Cargo.toml -w Cargo.lock -x 'run -- serve --host 127.0.0.1 --port 3761'
+```
+
+If `cargo-watch` is missing, install it with
+`~/.cargo/bin/cargo install cargo-watch --locked`. When the Runtime panics or a
+session/collaboration lock becomes poisoned, restart the watched process before
+continuing validation. Do not treat `/health` alone as sufficient after a panic;
+also verify a session or feature-specific endpoint.
+
 ## Strict v0 Runtime Policy
 
 Skenion v0 does not support legacy, deprecated, or import-only compatibility
