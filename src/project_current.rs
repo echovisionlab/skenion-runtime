@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::object_text::{is_payload_identity_kind, resolve_object_text_v01};
 use crate::{
     CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
     ExecutionGroup, ExecutionModel, ExecutionModelCurrent, FanOutPolicyCurrent,
@@ -676,20 +677,35 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
     ["patchRef", "patchId", "patch", "ref", "name", "id"]
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
-        .or_else(|| {
-            ["objectText", "sourceText", "text"]
-                .into_iter()
-                .find_map(|key| string_param(&node.params, key))
-                .and_then(|text| parse_subpatch_object_text(&text))
-        })
+        .or_else(|| subpatch_object_text(node).and_then(|text| parse_subpatch_object_text(&text)))
 }
 
 fn parse_subpatch_object_text(text: &str) -> Option<String> {
-    let mut parts = text.split_whitespace();
-    match (parts.next(), parts.next()) {
-        (Some("p" | "core.subpatch"), Some(patch_ref)) => Some(patch_ref.to_owned()),
-        _ => None,
+    let resolution = resolve_object_text_v01(text);
+    if resolution.resolved_kind.as_deref() != Some(SUBPATCH_KIND) || !resolution.ok() {
+        return None;
     }
+    resolution
+        .params
+        .get("patchRef")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn subpatch_object_text(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_text.clone().or_else(|| {
+        ["objectText", "sourceText", "text"]
+            .into_iter()
+            .find_map(|key| string_param(&node.params, key))
+    })
+}
+
+fn node_object_text(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_text.clone().or_else(|| {
+        ["objectText", "sourceText"]
+            .into_iter()
+            .find_map(|key| string_param(&node.params, key))
+    })
 }
 
 fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
@@ -855,6 +871,7 @@ pub fn validate_project_current(
     );
 
     for node in &graph.nodes {
+        diagnostics.extend(object_text_diagnostics_current(graph, node));
         if is_payload_identity_node_kind_current(&node.kind) {
             diagnostics.push(payload_identity_node_kind_diagnostic_current(
                 None, graph, node,
@@ -890,25 +907,61 @@ pub fn validate_project_current(
 }
 
 pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
-    matches!(
-        kind,
-        "value"
-            | "data"
-            | "payload"
-            | "bool"
-            | "string"
-            | "core.bool"
-            | "core.string"
-            | "control.message.any"
-            | "event.bang"
-            | "asset.video"
-            | "asset.image"
-            | "asset.audio"
-            | "gpu.texture2d"
-    ) || kind.starts_with("value.")
-        || kind.starts_with("data.")
-        || kind.starts_with("payload.")
-        || kind.starts_with("control.")
+    is_payload_identity_kind(kind)
+}
+
+fn object_text_diagnostics_current(
+    graph: &GraphDocumentCurrent,
+    node: &GraphNodeCurrent,
+) -> Vec<RuntimeDiagnostic> {
+    let Some(object_text) = node_object_text(node) else {
+        return Vec::new();
+    };
+    let resolution = resolve_object_text_v01(&object_text);
+    let mut diagnostics = resolution
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code != "object-text.unresolved")
+        .map(|diagnostic| {
+            RuntimeDiagnostic::structured_error(
+                diagnostic.code.clone(),
+                diagnostic.message.clone(),
+                json!({
+                    "surface": "object-text",
+                    "graphId": graph.id,
+                    "nodeId": node.id,
+                    "kind": node.kind,
+                    "objectText": object_text,
+                    "classSymbol": resolution.class_symbol,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if diagnostics.is_empty()
+        && let Some(resolved_kind) = resolution.resolved_kind.as_deref()
+        && resolved_kind != node.kind
+        && node.kind != "core.unresolved-object"
+    {
+        diagnostics.push(RuntimeDiagnostic::structured_error(
+            "object-text.kind-mismatch",
+            format!(
+                "object text {} resolves to {}, but node {} uses kind {}",
+                object_text, resolved_kind, node.id, node.kind
+            ),
+            json!({
+                "surface": "object-text",
+                "graphId": graph.id,
+                "nodeId": node.id,
+                "objectText": object_text,
+                "classSymbol": resolution.class_symbol,
+                "resolvedKind": resolved_kind,
+                "nodeKind": node.kind,
+            }),
+        ));
+    }
+
+    diagnostics
 }
 
 fn payload_identity_node_kind_diagnostic_current(
@@ -1639,6 +1692,22 @@ mod tests {
             { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn behavior_definition(id: &str) -> NodeDefinitionCurrent {
+        definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": id,
+          "version": "0.1.0",
+          "displayName": id,
+          "category": "Core",
+          "ports": [],
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -2558,6 +2627,71 @@ mod tests {
             validate_project_current(&graph, &definitions).expect("behavior ids should validate");
 
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn validates_runtime_owned_object_text_resolution() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "object-text",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "add",
+              "kind": "core.operator.add",
+              "kindVersion": "0.1.0",
+              "objectText": "+ 2",
+              "params": {},
+              "ports": []
+            }
+          ],
+          "edges": []
+        }));
+
+        validate_project_current(&graph, &[behavior_definition("core.operator.add")])
+            .expect("matching Runtime object text should validate");
+
+        let mut invalid_arg = graph.clone();
+        invalid_arg.nodes[0].object_text = Some("+ true".to_owned());
+        let invalid_arg_result =
+            validate_project_current(&invalid_arg, &[behavior_definition("core.operator.add")])
+                .expect_err("invalid Runtime object-text args should fail");
+        assert!(invalid_arg_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.invalid-arg-type")
+                && diagnostic.details.as_ref().unwrap()["objectText"] == "+ true"
+        }));
+
+        let mut mismatch = graph.clone();
+        mismatch.nodes[0].kind = "core.operator.sub".to_owned();
+        let mismatch_result =
+            validate_project_current(&mismatch, &[behavior_definition("core.operator.sub")])
+                .expect_err("resolved object kind mismatch should fail");
+        assert!(mismatch_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.kind-mismatch")
+                && diagnostic.details.as_ref().unwrap()["resolvedKind"] == "core.operator.add"
+                && diagnostic.details.as_ref().unwrap()["nodeKind"] == "core.operator.sub"
+        }));
+
+        let mut payload = graph.clone();
+        payload.nodes[0].kind = "core.float".to_owned();
+        payload.nodes[0].object_text = Some("control.number.float".to_owned());
+        let payload_result =
+            validate_project_current(&payload, &[behavior_definition("core.float")])
+                .expect_err("payload identity object text should fail");
+        assert!(payload_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.payload-identity")
+                && diagnostic.details.as_ref().unwrap()["objectText"] == "control.number.float"
+        }));
+
+        let mut package_deferred = graph.clone();
+        package_deferred.nodes[0].kind = "user.manipulator".to_owned();
+        package_deferred.nodes[0].object_text = Some("user.manipulator 1".to_owned());
+        validate_project_current(
+            &package_deferred,
+            &[behavior_definition("user.manipulator")],
+        )
+        .expect("package-owned object text remains available to package resolver layers");
     }
 
     #[test]

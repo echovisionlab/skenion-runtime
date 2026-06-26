@@ -11,6 +11,7 @@ mod io_device_manager;
 mod log_store;
 #[cfg(not(test))]
 mod midi_input;
+mod object_text;
 mod package_registry;
 mod planner;
 mod preview_control_state;
