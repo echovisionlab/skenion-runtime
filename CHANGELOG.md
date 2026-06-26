@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.10](https://github.com/skenion/skenion-runtime/compare/v0.47.9...v0.47.10) (2026-06-26)
+
+
+### Bug Fixes
+
+* **runtime:** require local contracts evidence ([0ba685d](https://github.com/skenion/skenion-runtime/commit/0ba685d15eb6ba6f2716044255495e9beef01d43))
+
 ## [0.47.9](https://github.com/skenion/skenion-runtime/compare/v0.47.8...v0.47.9) (2026-06-25)
 
 
