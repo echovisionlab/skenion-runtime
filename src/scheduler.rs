@@ -60,7 +60,7 @@ pub fn run_dummy_execution(plan: &ExecutionPlan, frame_count: usize) -> DummyExe
 fn execution_model_current(model: &ExecutionModel) -> ExecutionModelCurrent {
     match model {
         ExecutionModel::Event => ExecutionModelCurrent::Event,
-        ExecutionModel::Value => ExecutionModelCurrent::Value,
+        ExecutionModel::Control => ExecutionModelCurrent::Control,
         ExecutionModel::Frame => ExecutionModelCurrent::Frame,
         ExecutionModel::AudioBlock => ExecutionModelCurrent::AudioBlock,
         ExecutionModel::VideoFrame => ExecutionModelCurrent::VideoFrame,
@@ -104,16 +104,16 @@ mod tests {
             nodes: vec![
                 PlanNode {
                     node_id: "a".to_owned(),
-                    kind: "core.float".to_owned(),
+                    kind: "object.core.float".to_owned(),
                     kind_version: "0.1.0".to_owned(),
-                    execution_model: ExecutionModel::Value,
+                    execution_model: ExecutionModel::Control,
                     order: 0,
                 },
                 PlanNode {
                     node_id: "b".to_owned(),
-                    kind: "core.float".to_owned(),
+                    kind: "object.core.float".to_owned(),
                     kind_version: "0.1.0".to_owned(),
-                    execution_model: ExecutionModel::Value,
+                    execution_model: ExecutionModel::Control,
                     order: 1,
                 },
             ],
@@ -125,7 +125,7 @@ mod tests {
                 metadata: None,
             }],
             groups: vec![ExecutionGroup {
-                execution_model: ExecutionModel::Value,
+                execution_model: ExecutionModel::Control,
                 node_ids: vec!["a".to_owned(), "b".to_owned()],
             }],
         }
@@ -148,6 +148,6 @@ mod tests {
         assert_eq!(report.frames.len(), 1);
         assert!(text.contains("dummy execution: graph revision 1 frames=1"));
         assert!(text.contains("frame 0:"));
-        assert!(text.contains("a core.float@0.1.0 order=0 status=simulated"));
+        assert!(text.contains("a object.core.float@0.1.0 order=0 status=simulated"));
     }
 }

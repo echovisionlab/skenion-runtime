@@ -7,20 +7,19 @@ use std::{
 use axum::{http::HeaderMap, response::sse::Event};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use skenion_contracts::{
-    RuntimeConnectionProfile, RuntimeConnectionProfileMode, RuntimeEventReplayGap,
-    RuntimeEventReplayGapReason, RuntimeEventReplayMetadata, RuntimeEventReplayWindow,
-    RuntimeHistory as ContractRuntimeHistory, RuntimeHistoryEntry as ContractRuntimeHistoryEntry,
-    RuntimeSessionCapabilitySet, RuntimeSessionInfoResponse, RuntimeSessionLifecycleState,
-    validate_runtime_session_event,
-};
-pub use skenion_contracts::{RuntimeSessionEvent, RuntimeSessionEventKind};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::{
-    COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RuntimeCollaborationLog, RuntimeDiagnostic,
-    RuntimeSession, RuntimeSessionSnapshot, runtime_time::created_at_now,
+    COLLABORATION_EVENT_REPLAY_LIMIT, PreviewManager, RUNTIME_REALTIME_REPLAY_LIMIT,
+    RuntimeCollaborationLog, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
+    RuntimeDiagnostic, RuntimeEventReplayGap, RuntimeEventReplayGapReason,
+    RuntimeEventReplayMetadata, RuntimeEventReplayWindow, RuntimeRealtimeState, RuntimeSession,
+    RuntimeSessionCapabilitySet, RuntimeSessionEvent, RuntimeSessionEventKind,
+    RuntimeSessionInfoResponse, RuntimeSessionLifecycleState, RuntimeSessionSnapshot,
+    RuntimeTransportHistory as ContractRuntimeHistory,
+    RuntimeTransportHistoryEntry as ContractRuntimeHistoryEntry, RuntimeTransportSessionSnapshot,
+    runtime_time::created_at_now, validate_runtime_session_event,
 };
 
 pub const DEFAULT_SESSION_ID: &str = "default";
@@ -104,6 +103,7 @@ pub struct RuntimeSessionRecord {
     pub session: Arc<RwLock<RuntimeSession>>,
     pub events: broadcast::Sender<RuntimeSessionEvent>,
     pub collaboration: Arc<RuntimeCollaborationLog>,
+    pub realtime: Arc<RuntimeRealtimeState>,
     pub event_store: Arc<Mutex<VecDeque<RuntimeSessionEvent>>>,
     pub event_sequence: Arc<Mutex<u64>>,
     pub preview: Arc<Mutex<PreviewManager>>,
@@ -124,6 +124,7 @@ impl RuntimeSessionRecord {
             session: Arc::new(RwLock::new(RuntimeSession::default())),
             events,
             collaboration: RuntimeCollaborationLog::new(COLLABORATION_EVENT_REPLAY_LIMIT),
+            realtime: RuntimeRealtimeState::new(session_id, RUNTIME_REALTIME_REPLAY_LIMIT),
             event_store: Arc::new(Mutex::new(VecDeque::new())),
             event_sequence: Arc::new(Mutex::new(1)),
             preview: Arc::new(Mutex::new(if dry_preview {
@@ -475,9 +476,7 @@ fn latest_stored_session_event_sequence(record: &RuntimeSessionRecord) -> Option
         .map(|event| event.sequence)
 }
 
-fn contract_session_snapshot(
-    snapshot: &RuntimeSessionSnapshot,
-) -> skenion_contracts::RuntimeSessionSnapshot {
+fn contract_session_snapshot(snapshot: &RuntimeSessionSnapshot) -> RuntimeTransportSessionSnapshot {
     serde_json::from_value(
         serde_json::to_value(snapshot).expect("runtime session snapshot should serialize"),
     )
@@ -523,7 +522,6 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
-    use skenion_contracts::RuntimeEventReplayGapReason;
     use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     use super::*;
@@ -810,7 +808,7 @@ mod tests {
         let response = record.info_response(profile);
 
         assert_eq!(response.session_id, DEFAULT_SESSION_ID);
-        skenion_contracts::validate_runtime_session_info_response(&response)
+        crate::validate_runtime_session_info_response(&response)
             .expect("session info should validate");
     }
 

@@ -8,9 +8,9 @@ use crate::{
     telemetry::{ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource},
 };
 
-pub const RENDER_CLEAR_COLOR_KIND: &str = "render.clear-color";
-pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
-pub const RENDER_OUTPUT_KIND: &str = "render.output";
+pub const RENDER_CLEAR_COLOR_KIND: &str = "object.core.render.clear-color";
+pub const RENDER_FULLSCREEN_SHADER_KIND: &str = "object.core.render.fullscreen-shader";
+pub const RENDER_OUTPUT_KIND: &str = "object.core.render.output";
 pub const DEFAULT_CLEAR_COLOR: [f64; 4] = [0.02, 0.02, 0.025, 1.0];
 pub const DEFAULT_SHADER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
@@ -447,35 +447,35 @@ fn shader_uniform_value(
             )
         });
     match uniform.data_type.data_kind.as_str() {
-        "number.float" => connected
+        "value.core.float32" => connected
             .as_ref()
             .and_then(ControlValue::as_f32)
             .map_or_else(
                 || ShaderUniformValue::F32(default_f32(&uniform.default)),
                 ShaderUniformValue::F32,
             ),
-        "number.int" => connected
+        "value.core.int32" => connected
             .as_ref()
             .and_then(ControlValue::as_i32)
             .map_or_else(
                 || ShaderUniformValue::I32(default_i32(&uniform.default)),
                 ShaderUniformValue::I32,
             ),
-        "number.uint" => connected
+        "value.core.uint32" => connected
             .as_ref()
             .and_then(ControlValue::as_u32)
             .map_or_else(
                 || ShaderUniformValue::U32(default_u32(&uniform.default)),
                 ShaderUniformValue::U32,
             ),
-        "boolean" => connected
+        "value.core.bool" => connected
             .as_ref()
             .and_then(ControlValue::as_bool)
             .map_or_else(
                 || ShaderUniformValue::Bool(default_bool(&uniform.default)),
                 ShaderUniformValue::Bool,
             ),
-        "color" => connected
+        "value.core.color" => connected
             .as_ref()
             .and_then(ControlValue::as_rgba_f32)
             .map_or_else(
@@ -882,10 +882,10 @@ mod tests {
 
     #[test]
     fn fullscreen_shader_reads_connected_i32_and_bool_uniforms() {
-        let document = document_with_edges(
+        let mut document = document_with_edges(
             vec![
                 i32_node_with_value("iterations_1", 12),
-                bool_node_with_value("enabled_1", false),
+                bool_payload_source_node("enabled_1"),
                 shader_node(json!("wgsl"), json!(typed_shader_source())),
             ],
             vec![
@@ -893,6 +893,10 @@ mod tests {
                 edge("enabled_1", "value", "shader_1", "enabled"),
             ],
         );
+        document
+            .control_state
+            .values
+            .insert("enabled_1".to_owned(), ControlValue::bool(false));
 
         let scene = render_scene_from_preview_document(&document).expect("scene should build");
 
@@ -1017,7 +1021,7 @@ mod tests {
         let uniform: crate::ShaderUniform = serde_json::from_value(json!({
             "id": "unknown",
             "label": "Unknown",
-            "type": { "flow": "value", "dataKind": "unknown.kind" },
+            "type": { "flow": "control", "dataKind": "unknown.kind" },
             "required": false
         }))
         .expect("uniform should parse");
@@ -1349,7 +1353,7 @@ mod tests {
             RenderSceneBuildError::UnsupportedRenderOutputSource {
                 output_node_id: "output_1".to_owned(),
                 source_node_id: "value_1".to_owned(),
-                source_kind: "core.float".to_owned()
+                source_kind: "object.core.float".to_owned()
             }
         );
     }
@@ -1439,7 +1443,7 @@ mod tests {
                 RenderSceneBuildError::UnsupportedRenderOutputSource {
                     output_node_id: "output_1".to_owned(),
                     source_node_id: "value_1".to_owned(),
-                    source_kind: "core.float".to_owned(),
+                    source_kind: "object.core.float".to_owned(),
                 },
                 "unsupported-render-output-source",
                 ShaderDiagnosticPhase::RenderPipeline,
@@ -1595,7 +1599,7 @@ mod tests {
     ) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.float".to_owned(),
+            kind: "object.core.float".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1604,8 +1608,7 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "event",
-                        "dataKind": "message.any"
+                        "flow": "control", "dataKind": "value.core.message"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1616,8 +1619,8 @@ mod tests {
                     "direction": "input",
                     "label": "Cold",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "number.float"
+                        "flow": "control",
+                        "dataKind": "value.core.float32"
                     },
                     "required": false,
                     "activation": "latched"
@@ -1628,8 +1631,8 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "number.float"
+                        "flow": "control",
+                        "dataKind": "value.core.float32"
                     }
                 }))
                 .expect("valid value port"),
@@ -1642,7 +1645,7 @@ mod tests {
         params.insert("value".to_owned(), json!(value));
         GraphNode {
             id: id.to_owned(),
-            kind: "core.int".to_owned(),
+            kind: "object.core.int".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1651,8 +1654,8 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "number.int"
+                        "flow": "control",
+                        "dataKind": "value.core.int32"
                     }
                 }))
                 .expect("valid i32 value port"),
@@ -1660,22 +1663,20 @@ mod tests {
         }
     }
 
-    fn bool_node_with_value(id: &str, value: bool) -> GraphNode {
-        let mut params = serde_json::Map::new();
-        params.insert("value".to_owned(), json!(value));
+    fn bool_payload_source_node(id: &str) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.bool".to_owned(),
+            kind: "object.core.message".to_owned(),
             kind_version: "0.1.0".to_owned(),
-            params,
+            params: serde_json::Map::new(),
             ports: vec![
                 serde_json::from_value(json!({
                     "id": "value",
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "boolean"
+                        "flow": "control",
+                        "dataKind": "value.core.bool"
                     }
                 }))
                 .expect("valid bool value port"),
@@ -1688,7 +1689,7 @@ mod tests {
         params.insert("value".to_owned(), json!(value));
         GraphNode {
             id: id.to_owned(),
-            kind: "core.uint".to_owned(),
+            kind: "object.core.uint".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1697,8 +1698,8 @@ mod tests {
                     "direction": "output",
                     "label": "Value",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "number.uint"
+                        "flow": "control",
+                        "dataKind": "value.core.uint32"
                     }
                 }))
                 .expect("valid u32 value port"),
@@ -1711,7 +1712,7 @@ mod tests {
         params.insert("value".to_owned(), value);
         GraphNode {
             id: "color_1".to_owned(),
-            kind: "core.color".to_owned(),
+            kind: "object.core.color".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params,
             ports: vec![
@@ -1720,8 +1721,7 @@ mod tests {
                     "direction": "input",
                     "label": "In",
                     "type": {
-                        "flow": "event",
-                        "dataKind": "message.any"
+                        "flow": "control", "dataKind": "value.core.message"
                     },
                     "required": false,
                     "activation": "trigger"
@@ -1732,8 +1732,8 @@ mod tests {
                     "direction": "input",
                     "label": "Cold",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "color"
+                        "flow": "control",
+                        "dataKind": "value.core.color"
                     },
                     "required": false,
                     "activation": "latched"
@@ -1744,8 +1744,8 @@ mod tests {
                     "direction": "output",
                     "label": "Color",
                     "type": {
-                        "flow": "value",
-                        "dataKind": "color"
+                        "flow": "control",
+                        "dataKind": "value.core.color"
                     }
                 }))
                 .expect("valid color port"),
@@ -1838,16 +1838,16 @@ mod tests {
     fn gpu_texture_type() -> Value {
         json!({
             "flow": "resource",
-            "dataKind": "gpu.texture2d",
+            "dataKind": "value.core.tensor",
             "format": "rgba8unorm",
             "colorSpace": "srgb"
         })
     }
 
     fn shader_source() -> &'static str {
-        r#"// @skenion.uniform speed number.float default=0 min=0 max=1 step=0.01
-// @skenion.uniform phase number.float default=0 min=0 max=1 step=0.01
-// @skenion.uniform tint color default=[1,1,1,1]
+        r#"// @skenion.uniform speed value.core.float32 default=0 min=0 max=1 step=0.01
+// @skenion.uniform phase value.core.float32 default=0 min=0 max=1 step=0.01
+// @skenion.uniform tint value.core.color default=[1,1,1,1]
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   let mix_value = clamp(skenion.speed, 0.0, 1.0);
@@ -1858,8 +1858,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
 
     fn typed_shader_source() -> &'static str {
-        r#"// @skenion.uniform iterations number.int default=8
-// @skenion.uniform enabled boolean default=true
+        r#"// @skenion.uniform iterations value.core.int32 default=8
+// @skenion.uniform enabled value.core.bool default=true
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   let enabled_value = select(0.0, 1.0, skenion.enabled);
@@ -1868,7 +1868,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
 
     fn uint_shader_source() -> &'static str {
-        r#"// @skenion.uniform count number.uint default=4
+        r#"// @skenion.uniform count value.core.uint32 default=4
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
   return vec4<f32>(f32(skenion.count) / 255.0, 0.0, 0.0, 1.0);

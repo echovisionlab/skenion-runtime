@@ -11,8 +11,14 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    extract::{
+        DefaultBodyLimit, Multipart, Path, Query, State,
+        ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
+    },
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{CONTENT_TYPE, UPGRADE},
+    },
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -22,21 +28,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use skenion_contracts::{
     CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-    PackageRegistryListResponseV01, RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata,
-    RuntimeCollaborationChange, RuntimeCollaborationConflict, RuntimeCollaborationNack,
-    RuntimeCollaborationNackReason, RuntimeCollaborationOperationBatch,
-    RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationDiagnostic,
-    RuntimeCollaborationOperationEnvelope, RuntimeCollaborationOperationPayload,
-    RuntimeCollaborationOperationResult, RuntimeCollaborationOperationStatus,
-    RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationRebase,
-    RuntimeCollaborationRebaseStrategy, RuntimeCollaborationSelectionEnvelope,
-    RuntimeCollaborationServerClock, RuntimeCollaborationUndoRedoAction,
-    RuntimeSessionInfoResponse, validate_runtime_collaboration_operation_batch,
-    validate_runtime_collaboration_operation_batch_result,
-    validate_runtime_collaboration_operation_envelope,
-    validate_runtime_collaboration_operation_result,
-    validate_runtime_collaboration_presence_envelope,
-    validate_runtime_collaboration_selection_envelope,
 };
 use tokio_stream::{
     Stream, StreamExt,
@@ -46,32 +37,48 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     CURRENT_SCHEMA_VERSION, DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse,
-    NodeDefinition, NodeDefinitionCurrent, NodeRegistry, PreviewDocument, ProjectDocumentCurrent,
-    ProjectRequestCurrent, RunProjectRequestCurrent, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeExtensionManager,
-    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
-    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope,
-    RuntimePackageManager, RuntimePackageRegistrySnapshot, RuntimePatchResponse,
-    RuntimePreviewStartRequest, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
-    ShaderDiagnosticPhase, ShaderDiagnosticSource, build_execution_plan_request_current,
-    build_execution_plan_run_request_current, collaboration_broadcast_event_after_high_water,
-    collaboration_event, generated_shader_response_from_preview_document,
-    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
+    NodeDefinition, NodeDefinitionCurrent, NodeRegistry, PackageRegistryListResponseV01,
+    PreviewDocument, ProjectDocumentCurrent, ProjectRequestCurrent, RunProjectRequestCurrent,
+    RuntimeCollaborationAck, RuntimeCollaborationCausalMetadata, RuntimeCollaborationChange,
+    RuntimeCollaborationConflict, RuntimeCollaborationNack, RuntimeCollaborationNackReason,
+    RuntimeCollaborationOperationBatch, RuntimeCollaborationOperationBatchResult,
+    RuntimeCollaborationOperationDiagnostic, RuntimeCollaborationOperationEnvelope,
+    RuntimeCollaborationOperationPayload, RuntimeCollaborationOperationResult,
+    RuntimeCollaborationOperationStatus, RuntimeCollaborationPresenceEnvelope,
+    RuntimeCollaborationRebase, RuntimeCollaborationRebaseStrategy,
+    RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationServerClock,
+    RuntimeCollaborationUndoRedoAction, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimeExtensionListResponse, RuntimeExtensionManager, RuntimeExtensionRegistrySnapshot,
+    RuntimeIoDeviceListResponse, RuntimeIoDeviceManager, RuntimeLogSnapshotResponse,
+    RuntimeLogStore, RuntimeMutationRequest, RuntimeOperationEnvelope, RuntimePackageManager,
+    RuntimePackageRegistrySnapshot, RuntimePatchResponse, RuntimePreviewStartRequest,
+    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot,
+    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    build_execution_plan_request_current, build_execution_plan_run_request_current,
+    collaboration_broadcast_event_after_high_water, collaboration_event,
+    generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
+    project_document_validation_diagnostics_current,
+    realtime::handle_runtime_realtime_socket,
     run_dummy_execution,
     runtime_time::created_at_now,
     schema_version_diagnostic,
     session_registry::{
-        RuntimeSessionEventKind, RuntimeSessionRecord, RuntimeSessionRegistry, SessionEventsQuery,
-        capture_session_replay, event_cursor_from_headers, publish_session_event,
-        session_broadcast_event_after_high_water, session_event, session_snapshot_event,
+        RuntimeSessionRecord, RuntimeSessionRegistry, SessionEventsQuery, capture_session_replay,
+        event_cursor_from_headers, publish_session_event, session_broadcast_event_after_high_water,
+        session_event, session_snapshot_event,
     },
     sidecar::{
         RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
         RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
         sidecar_shutdown_response, sidecar_startup_response,
     },
-    validate_project_request_current,
+    validate_project_request_current, validate_runtime_collaboration_operation_batch,
+    validate_runtime_collaboration_operation_batch_result,
+    validate_runtime_collaboration_operation_envelope,
+    validate_runtime_collaboration_operation_result,
+    validate_runtime_collaboration_presence_envelope,
+    validate_runtime_collaboration_selection_envelope,
 };
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
@@ -262,9 +269,13 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/run", post(run_project_endpoint))
         .route(
             "/v0/sessions/{session_id}",
-            get(session_snapshot_by_id).delete(clear_session_by_id),
+            get(realtime_session_by_id).delete(clear_session_by_id),
         )
         .route("/v0/sessions/{session_id}/info", get(session_info_by_id))
+        .route(
+            "/v0/sessions/{session_id}/snapshot",
+            get(session_snapshot_by_id),
+        )
         .route(
             "/v0/sessions/{session_id}/events/stream",
             get(session_events_stream_by_id),
@@ -384,6 +395,8 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "dummy.run",
             "session.load",
             "session.load.v0.1",
+            "session.realtime.websocket",
+            "session.realtime.v0",
             "session.project",
             "session.project.v0.1",
             "session.events.stream",
@@ -732,19 +745,36 @@ async fn run_project_endpoint(
     }
 }
 
-async fn session_snapshot_by_id(
+async fn realtime_session_by_id(
     State(state): State<RuntimeServerState>,
     Path(session_id): Path<String>,
-) -> Json<crate::RuntimeSessionResponse> {
-    session_snapshot_for(state.sessions.get_or_create(&session_id))
-}
-
-fn session_snapshot_for(record: RuntimeSessionRecord) -> Json<crate::RuntimeSessionResponse> {
-    let session = record
-        .session
-        .read()
-        .expect("runtime session lock should not be poisoned");
-    Json(session.response(true, session.snapshot().diagnostics, None))
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    let record = state.sessions.get_or_create(&session_id);
+    match ws {
+        Ok(ws) => ws
+            .on_upgrade(move |socket| handle_runtime_realtime_socket(record, socket))
+            .into_response(),
+        Err(_) => (
+            StatusCode::UPGRADE_REQUIRED,
+            [(UPGRADE, HeaderValue::from_static("websocket"))],
+            Json(serde_json::json!({
+                "schema": "skenion.runtime.realtime.upgradeRequired",
+                "schemaVersion": "0.1.0",
+                "ok": false,
+                "sessionId": session_id,
+                "diagnostic": {
+                    "code": "realtime.websocket-upgrade-required",
+                    "message": "GET /v0/sessions/{sessionId} is the Runtime realtime WebSocket endpoint; send a WebSocket Upgrade request.",
+                    "details": {
+                        "endpoint": "/v0/sessions/{sessionId}",
+                        "upgrade": "websocket"
+                    }
+                }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn session_info_by_id(
@@ -763,6 +793,24 @@ fn session_info_for(
 ) -> RuntimeSessionInfoResponse {
     let profile = runtime_connection_profile(&state.endpoint, &state.started_at_wall_clock);
     record.info_response(profile)
+}
+
+async fn session_snapshot_by_id(
+    State(state): State<RuntimeServerState>,
+    Path(session_id): Path<String>,
+) -> Json<crate::RuntimeSessionResponse> {
+    session_snapshot_for(&state, state.sessions.get_or_create(&session_id))
+}
+
+fn session_snapshot_for(
+    state: &RuntimeServerState,
+    record: RuntimeSessionRecord,
+) -> Json<crate::RuntimeSessionResponse> {
+    let session = record
+        .session
+        .read()
+        .expect("runtime session lock should not be poisoned");
+    session_json(state, session.response(true, Vec::new(), None))
 }
 
 async fn load_session_by_id(
@@ -2754,6 +2802,13 @@ mod tests {
         sync::Arc,
     };
 
+    use crate::{
+        RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
+        RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationResult,
+        validate_runtime_collaboration_event_envelope,
+        validate_runtime_collaboration_operation_batch_result,
+        validate_runtime_collaboration_operation_result, validate_runtime_session_event,
+    };
     use axum::{
         body::{Body, to_bytes},
         http::{
@@ -2764,13 +2819,6 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
-    use skenion_contracts::{
-        RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
-        RuntimeCollaborationOperationBatchResult, RuntimeCollaborationOperationResult,
-        validate_runtime_collaboration_event_envelope,
-        validate_runtime_collaboration_operation_batch_result,
-        validate_runtime_collaboration_operation_result, validate_runtime_session_event,
-    };
     use tower::ServiceExt;
 
     use crate::{
@@ -3966,7 +4014,7 @@ mod tests {
         assert_eq!(plan["plan"]["graphRevision"], "1");
         assert_eq!(
             plan["plan"]["edges"][0]["metadata"]["resolvedType"],
-            "render.frame"
+            "value.core.tensor"
         );
         assert_eq!(
             plan["plan"]["edges"][0]["metadata"]["mergePolicy"],
@@ -4075,28 +4123,27 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|diagnostic| diagnostic["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("ambiguous-algebraic-loop"))
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
 
         let plan = post_json("/v0/plan", sample_ambiguous_loop_project_current()).await;
         assert_eq!(plan["ok"], false);
         assert!(
-            plan["diagnostics"][0]["message"]
-                .as_str()
+            plan["diagnostics"]
+                .as_array()
                 .unwrap()
-                .contains("ambiguous-algebraic-loop")
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
 
         let run = post_json("/v0/run", sample_ambiguous_loop_project_current()).await;
         assert_eq!(run["ok"], false);
         assert!(
-            run["diagnostics"][0]["message"]
-                .as_str()
+            run["diagnostics"]
+                .as_array()
                 .unwrap()
-                .contains("ambiguous-algebraic-loop")
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "graph.ambiguous-algebraic-loop")
         );
     }
 
@@ -4230,7 +4277,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_endpoint_returns_empty_state() {
-        let response = get_json("/v0/sessions/default").await;
+        let response = get_json("/v0/sessions/default/snapshot").await;
 
         assert_eq!(response["ok"], true);
         assert_eq!(response["snapshot"]["project"], Value::Null);
@@ -4246,7 +4293,7 @@ mod tests {
     async fn session_snapshot_returns_loaded_project() {
         let app = runtime_router();
 
-        let empty = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let empty = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         assert_eq!(empty["ok"], true);
         assert_eq!(empty["snapshot"]["project"], Value::Null);
 
@@ -4256,7 +4303,7 @@ mod tests {
             sample_project_document_current(),
         )
         .await;
-        let project = get_json_with(app, "/v0/sessions/default").await;
+        let project = get_json_with(app, "/v0/sessions/default/snapshot").await;
 
         assert_eq!(project["ok"], true);
         assert_eq!(
@@ -4282,7 +4329,7 @@ mod tests {
             "steps": [{ "id": "intro", "title": "Intro" }]
         });
         project["help"] = json!({
-            "topics": ["core.subpatch"]
+            "topics": ["object.core.subpatch"]
         });
         let response = post_json_with(app.clone(), "/v0/sessions/default/load", project).await;
 
@@ -4302,7 +4349,7 @@ mod tests {
         );
         assert_eq!(
             response["snapshot"]["project"]["help"]["topics"][0],
-            "core.subpatch"
+            "object.core.subpatch"
         );
         assert_eq!(
             response["snapshot"]["project"]["patchLibrary"][0]["id"],
@@ -4319,7 +4366,7 @@ mod tests {
             "subpatch-project-root"
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(
             snapshot["snapshot"]["project"]["graph"]["id"],
             "subpatch-project-root"
@@ -4370,7 +4417,10 @@ mod tests {
         assert_eq!(default_status, StatusCode::NOT_FOUND);
         assert_eq!(named_status, StatusCode::NOT_FOUND);
 
-        for path in ["/v0/sessions/default", "/v0/sessions/alpha"] {
+        for path in [
+            "/v0/sessions/default/snapshot",
+            "/v0/sessions/alpha/snapshot",
+        ] {
             let snapshot = get_json_with(app.clone(), path).await;
             assert_eq!(snapshot["snapshot"]["project"], Value::Null);
             assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
@@ -4396,7 +4446,7 @@ mod tests {
             sample_project_document_current(),
         )
         .await;
-        let explicit = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let explicit = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         let info = get_json_with(app, "/v0/sessions/default/info").await;
 
         assert_eq!(loaded["ok"], true);
@@ -4409,8 +4459,8 @@ mod tests {
         );
         let info = serde_json::from_value::<RuntimeSessionInfoResponse>(info)
             .expect("session info should match contract shape");
-        skenion_contracts::validate_runtime_session_info_response(&info)
-            .expect("session info should validate against contracts");
+        crate::validate_runtime_session_info_response(&info)
+            .expect("session info should validate against runtime transport");
     }
 
     #[tokio::test]
@@ -4446,8 +4496,8 @@ mod tests {
         )
         .await;
 
-        let alpha = get_json_with(app.clone(), "/v0/sessions/alpha").await;
-        let beta = get_json_with(app.clone(), "/v0/sessions/beta").await;
+        let alpha = get_json_with(app.clone(), "/v0/sessions/alpha/snapshot").await;
+        let beta = get_json_with(app.clone(), "/v0/sessions/beta/snapshot").await;
         let alpha_history = get_json_with(app.clone(), "/v0/sessions/alpha/history").await;
         let beta_history = get_json_with(app.clone(), "/v0/sessions/beta/history").await;
         let beta_control = get_json_with(app, "/v0/sessions/beta/control/state").await;
@@ -4493,7 +4543,7 @@ mod tests {
                 .contains("missing node definition")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["ok"], true);
         assert_eq!(
             snapshot["snapshot"]["project"]["graph"]["id"],
@@ -4506,6 +4556,46 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_session_load_returns_diagnostics_and_keeps_runtime_healthy() {
+        let app = runtime_router();
+        let mut invalid = sample_project_document_current();
+        invalid["graph"]["nodes"][1]["ports"][1]["type"] = json!("value.core.bool");
+
+        let response = post_json_with(app.clone(), "/v0/sessions/default/load", invalid).await;
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["snapshot"]["project"], Value::Null);
+        assert_eq!(response["snapshot"]["plan"], Value::Null);
+        assert!(
+            response["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(
+                        "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
+                    ))
+        );
+
+        let health = get_json_with(app.clone(), "/health").await;
+        assert_eq!(health["ok"], true);
+
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["snapshot"]["project"], Value::Null);
+        assert_eq!(snapshot["snapshot"]["sessionRevision"], 0);
+
+        let logs = get_json_with(app, "/v0/runtime/logs").await;
+        assert!(logs["events"].as_array().unwrap().iter().any(|event| {
+            event["message"].as_str().unwrap().contains(
+                "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
+            )
+        }));
     }
 
     #[tokio::test]
@@ -4569,7 +4659,7 @@ mod tests {
         assert_eq!(patched["revisionBefore"], "1");
         assert_eq!(patched["revisionAfter"], "2");
 
-        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         let history = get_json_with(app.clone(), "/v0/sessions/default/history").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert_eq!(history["entries"][0]["kind"], "apply");
@@ -4662,7 +4752,7 @@ mod tests {
             json!("edge_value_to_pasted")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["edges"]
@@ -4704,7 +4794,7 @@ mod tests {
             "project-patch-definition"
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "1");
         assert_eq!(
             snapshot["snapshot"]["project"]["patchLibrary"][0]["revision"],
@@ -4800,7 +4890,7 @@ mod tests {
         );
         assert_eq!(result.operation_id, "op-collab-paste");
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
 
         let replay = state
@@ -4851,7 +4941,7 @@ mod tests {
             result.nack.as_ref().map(|nack| nack.reason.clone()),
             Some(RuntimeCollaborationNackReason::DuplicateIdempotencyKey)
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
     }
 
@@ -4901,7 +4991,7 @@ mod tests {
                 .count(),
             1
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
     }
 
@@ -4953,7 +5043,7 @@ mod tests {
             result.ack.as_ref().map(|ack| ack.revision.as_str()),
             Some("3")
         );
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
     }
 
@@ -5029,7 +5119,7 @@ mod tests {
                           "changeId": "change-add-gain",
                           "node": {
                             "id": "gain",
-                            "kind": "core.float",
+                            "kind": "object.core.float",
                             "kindVersion": "0.1.0",
                             "params": {},
                             "ports": value_f32_ports_current_json()
@@ -5071,7 +5161,7 @@ mod tests {
             Some("2")
         );
 
-        let snapshot = get_json_with(app.clone(), "/v0/sessions/default").await;
+        let snapshot = get_json_with(app.clone(), "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["nodes"]
@@ -5146,7 +5236,7 @@ mod tests {
             .expect("disconnect result should validate");
         assert_eq!(result.status, RuntimeCollaborationOperationStatus::Accepted);
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "3");
         assert!(
             snapshot["snapshot"]["project"]["graph"]["edges"]
@@ -5234,7 +5324,7 @@ mod tests {
             Some("3")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         assert_eq!(snapshot["snapshot"]["project"]["graph"]["revision"], "2");
         assert_eq!(
             snapshot["snapshot"]["project"]["patchLibrary"][0]["graph"]["revision"],
@@ -5299,7 +5389,7 @@ mod tests {
             Some("4")
         );
 
-        let snapshot = get_json_with(app, "/v0/sessions/default").await;
+        let snapshot = get_json_with(app, "/v0/sessions/default/snapshot").await;
         let nodes = snapshot["snapshot"]["project"]["graph"]["nodes"]
             .as_array()
             .unwrap();
@@ -5647,7 +5737,7 @@ mod tests {
                   "changeId": "change-add-without-project",
                   "node": {
                     "id": "gain",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": value_f32_ports_current_json()
@@ -6162,8 +6252,8 @@ mod tests {
         assert_eq!(port_read["ok"], true);
         assert_eq!(port_read["value"]["value"]["id"], json!("value"));
 
-        let wrong_type = post_json_with(
-            app,
+        let bool_value = post_json_with(
+            app.clone(),
             "/v0/sessions/default/control/event",
             json!({
                 "nodeId": "value_1",
@@ -6172,13 +6262,18 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(wrong_type["ok"], false);
-        assert_eq!(wrong_type["emitted"], json!([]));
-        assert!(
-            wrong_type["diagnostics"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("expects number.float")
+        assert_eq!(bool_value["ok"], true);
+        assert_eq!(
+            bool_value["emitted"][0]["message"],
+            json!({
+                "selector": "float",
+                "atoms": [{ "type": "float", "representation": "f32", "value": 1.0 }]
+            })
+        );
+        let state = get_json_with(app, "/v0/sessions/default/control/state").await;
+        assert_eq!(
+            state["values"]["value_1"],
+            json!({ "type": "float", "representation": "f32", "value": 1.0 })
         );
     }
 
@@ -6953,14 +7048,14 @@ mod tests {
                 "nodes": [
                   {
                     "id": "value_1",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": value_f32_ports_json()
                   },
                   {
                     "id": "target_1",
-                    "kind": "core.float",
+                    "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_json()
@@ -6974,15 +7069,15 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7002,14 +7097,14 @@ mod tests {
             "nodes": [
               {
                 "id": "value_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
               },
               {
                 "id": "target_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
@@ -7020,7 +7115,7 @@ mod tests {
                 "id": "edge_value_target",
                 "source": { "nodeId": "value_1", "portId": "value" },
                 "target": { "nodeId": "target_1", "portId": "cold" },
-                "resolvedType": "number.float"
+                "resolvedType": "value.core.float32"
               }
             ]
           },
@@ -7039,15 +7134,15 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_current_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7072,7 +7167,7 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": { "flow": "event", "dataKind": "message.any" },
+            "type": { "flow": "control", "dataKind": "value.core.message" },
             "required": false,
             "activation": "trigger"
           },
@@ -7080,7 +7175,7 @@ mod tests {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": { "flow": "value", "dataKind": "number.float" },
+            "type": { "flow": "control", "dataKind": "value.core.float32" },
             "required": false,
             "activation": "latched"
           },
@@ -7088,7 +7183,7 @@ mod tests {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": { "flow": "value", "dataKind": "number.float" }
+            "type": { "flow": "control", "dataKind": "value.core.float32" }
           }
         ])
     }
@@ -7103,18 +7198,18 @@ mod tests {
             "nodes": [
               {
                 "id": "shader_1",
-                "kind": "render.fullscreen-shader",
+                "kind": "object.core.render.fullscreen-shader",
                 "kindVersion": "0.1.0",
                 "params": {
                   "language": "wgsl",
-                  "source": "// @skenion.uniform speed number.float default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
+                  "source": "// @skenion.uniform speed value.core.float32 default=0.5\n@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(skenion.speed, 0.0, 1.0, 1.0); }"
                 },
                 "ports": [
                   {
                     "id": "speed",
                     "direction": "input",
                     "label": "Speed",
-                    "type": "number.float",
+                    "type": "value.core.float32",
                     "rate": "control",
                     "required": false,
                     "defaultValue": 0.5,
@@ -7124,7 +7219,7 @@ mod tests {
                     "id": "out",
                     "direction": "output",
                     "label": "Out",
-                    "type": "gpu.texture2d",
+                    "type": "value.core.tensor",
                     "rate": "resource"
                   }
                 ]
@@ -7136,7 +7231,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.fullscreen-shader",
+              "id": "object.core.render.fullscreen-shader",
               "version": "0.1.0",
               "displayName": "Fullscreen Shader",
               "category": "Render",
@@ -7145,7 +7240,7 @@ mod tests {
                   "id": "speed",
                   "direction": "input",
                   "label": "Speed",
-                  "type": "number.float",
+                  "type": "value.core.float32",
                   "rate": "control",
                   "required": false,
                   "defaultValue": 0.5,
@@ -7155,7 +7250,7 @@ mod tests {
                   "id": "out",
                   "direction": "output",
                   "label": "Out",
-                  "type": "gpu.texture2d",
+                  "type": "value.core.tensor",
                   "rate": "resource"
                 }
               ],
@@ -7178,28 +7273,28 @@ mod tests {
             "nodes": [
               {
                 "id": "clear_color",
-                "kind": "render.clear-color",
+                "kind": "object.core.render.clear-color",
                 "kindVersion": "0.1.0",
                 "params": { "color": [0.12, 0.2, 0.34, 1] },
                 "ports": [
                   {
                     "id": "out",
                     "direction": "output",
-                    "type": "render.frame",
+                    "type": "value.core.tensor",
                     "rate": "render"
                   }
                 ]
               },
               {
                 "id": "output",
-                "kind": "render.output",
+                "kind": "object.core.render.output",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
                   {
                     "id": "in",
                     "direction": "input",
-                    "type": "render.frame",
+                    "type": "value.core.tensor",
                     "rate": "render",
                     "required": true
                   }
@@ -7211,7 +7306,7 @@ mod tests {
                 "id": "edge_clear_output",
                 "source": { "nodeId": "clear_color", "portId": "out" },
                 "target": { "nodeId": "output", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           },
@@ -7219,7 +7314,7 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.clear-color",
+              "id": "object.core.render.clear-color",
               "version": "0.1.0",
               "displayName": "Clear Color",
               "category": "Render",
@@ -7227,19 +7322,19 @@ mod tests {
                 {
                   "id": "out",
                   "direction": "output",
-                  "type": "render.frame",
+                  "type": "value.core.tensor",
                   "rate": "render"
                 }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.frame.v0.1"]
+              "capabilities": ["value.core.tensor.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.output",
+              "id": "object.core.render.output",
               "version": "0.1.0",
               "displayName": "Render Output",
               "category": "Render",
@@ -7247,7 +7342,7 @@ mod tests {
                 {
                   "id": "in",
                   "direction": "input",
-                  "type": "render.frame",
+                  "type": "value.core.tensor",
                   "rate": "render",
                   "required": true
                 }
@@ -7255,7 +7350,7 @@ mod tests {
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.output.v0.1"]
+              "capabilities": ["object.core.render.output.v0.1"]
             }
           ]
         })
@@ -7275,30 +7370,30 @@ mod tests {
             "nodes": [
               {
                 "id": "clear_color",
-                "kind": "render.clear-color",
+                "kind": "object.core.render.clear-color",
                 "kindVersion": "0.1.0",
                 "params": { "color": [0.12, 0.2, 0.34, 1] },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "fx",
-                "kind": "core.subpatch",
+                "kind": "object.core.subpatch",
                 "kindVersion": "0.1.0",
                 "params": { "patchRef": "identity" },
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "output",
-                "kind": "render.output",
+                "kind": "object.core.render.output",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
                 ]
               }
             ],
@@ -7307,13 +7402,13 @@ mod tests {
                 "id": "edge_clear_fx",
                 "source": { "nodeId": "clear_color", "portId": "out" },
                 "target": { "nodeId": "fx", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               },
               {
                 "id": "edge_fx_output",
                 "source": { "nodeId": "fx", "portId": "out" },
                 "target": { "nodeId": "output", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           },
@@ -7335,11 +7430,11 @@ mod tests {
                 "nodes": [
                   {
                     "id": "patch_in",
-                    "kind": "core.inlet",
+                    "kind": "object.core.inlet",
                     "kindVersion": "0.1.0",
                     "params": { "portId": "in", "label": "Input" },
                     "ports": [
-                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
+                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
                     ]
                   },
                   {
@@ -7348,17 +7443,17 @@ mod tests {
                     "kindVersion": "0.1.0",
                     "params": {},
                     "ports": [
-                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                      { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                      { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                     ]
                   },
                   {
                     "id": "patch_out",
-                    "kind": "core.outlet",
+                    "kind": "object.core.outlet",
                     "kindVersion": "0.1.0",
                     "params": { "portId": "out", "label": "Output" },
                     "ports": [
-                      { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                      { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
                     ]
                   }
                 ],
@@ -7367,13 +7462,13 @@ mod tests {
                     "id": "edge_in_pass",
                     "source": { "nodeId": "patch_in", "portId": "out" },
                     "target": { "nodeId": "pass", "portId": "in" },
-                    "resolvedType": "render.frame"
+                    "resolvedType": "value.core.tensor"
                   },
                   {
                     "id": "edge_pass_out",
                     "source": { "nodeId": "pass", "portId": "out" },
                     "target": { "nodeId": "patch_out", "portId": "in" },
-                    "resolvedType": "render.frame"
+                    "resolvedType": "value.core.tensor"
                   }
                 ]
               }
@@ -7383,32 +7478,32 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.clear-color",
+              "id": "object.core.render.clear-color",
               "version": "0.1.0",
               "displayName": "Clear Color",
               "category": "Render",
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.frame.v0.1"]
+              "capabilities": ["value.core.tensor.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "render.output",
+              "id": "object.core.render.output",
               "version": "0.1.0",
               "displayName": "Render Output",
               "category": "Render",
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["render.output.v0.1"]
+              "capabilities": ["object.core.render.output.v0.1"]
             },
             {
               "schema": "skenion.node.definition",
@@ -7418,8 +7513,8 @@ mod tests {
               "displayName": "Pass",
               "category": "Test",
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ],
               "execution": { "model": "gpu_pass", "clock": "frame" },
               "state": { "persistent": false },
@@ -7440,22 +7535,22 @@ mod tests {
             "nodes": [
               {
                 "id": "a",
-                "kind": "core.value-transform",
+                "kind": "object.core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
                 ]
               },
               {
                 "id": "b",
-                "kind": "core.value-transform",
+                "kind": "object.core.float-transform",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                  { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                  { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                  { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
                 ]
               }
             ],
@@ -7476,18 +7571,18 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.value-transform",
+              "id": "object.core.float-transform",
               "version": "0.1.0",
               "displayName": "Value Transform",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": "value.number", "rate": "control" },
-                { "id": "out", "direction": "output", "type": "value.number", "rate": "control" }
+                { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
+                { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
               ],
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": ["value.number.v0.1"]
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ]
         })
@@ -7526,14 +7621,14 @@ mod tests {
                   "nodes": [
                     {
                       "id": "value_1",
-                      "kind": "core.float",
+                      "kind": "object.core.float",
                       "kindVersion": "0.1.0",
                       "params": {},
                       "ports": value_f32_ports_current_json()
                     },
                     {
                       "id": "pasted_target",
-                      "kind": "core.float",
+                      "kind": "object.core.float",
                       "kindVersion": "0.1.0",
                       "params": {},
                       "ports": value_f32_ports_current_json()
@@ -7644,14 +7739,14 @@ mod tests {
                     "nodes": [
                       {
                         "id": "value_1",
-                        "kind": "core.float",
+                        "kind": "object.core.float",
                         "kindVersion": "0.1.0",
                         "params": {},
                         "ports": value_f32_ports_current_json()
                       },
                       {
                         "id": "pasted_target",
-                        "kind": "core.float",
+                        "kind": "object.core.float",
                         "kindVersion": "0.1.0",
                         "params": {},
                         "ports": value_f32_ports_current_json()
@@ -7747,11 +7842,11 @@ mod tests {
     fn render_clear_color_node_current_json(node_id: &str) -> Value {
         json!({
           "id": node_id,
-          "kind": "render.clear-color",
+          "kind": "object.core.render.clear-color",
           "kindVersion": "0.1.0",
           "params": { "color": [0.02, 0.04, 0.08, 1.0] },
           "ports": [
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ]
         })
     }
@@ -7835,25 +7930,39 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": "message.any",
-            "rate": "event",
+            "type": "value.core.message",
+            "rate": "control",
             "required": false,
-            "triggerMode": "trigger"
+            "triggerMode": "trigger",
+            "accepts": [
+              "value.core.float32",
+              "value.core.int32",
+              "value.core.uint32",
+              "value.core.bool",
+              "value.core.bang"
+            ],
+            "messageKeys": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
           },
           {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": "number.float",
+            "type": "value.core.float32",
             "rate": "control",
             "required": false,
-            "triggerMode": "latched"
+            "triggerMode": "passive"
           },
           {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": "number.float",
+            "type": "value.core.float32",
             "rate": "control"
           }
         ])

@@ -1,19 +1,21 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::object_text::{is_payload_identity_kind, resolve_object_text_v01};
 use crate::{
-    CycleValidationCurrent, EdgeEndpointCurrent, EdgeSpecCurrent, ExecutionGroup, ExecutionModel,
-    ExecutionModelCurrent, FanOutPolicyCurrent, GraphDocumentCurrent, GraphNodeCurrent,
-    GraphValidationResultCurrent, MergePolicyCurrent, NodeDefinitionCurrent,
-    PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode, ProjectDocumentCurrent,
-    RuntimeDiagnostic, ViewState,
+    CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
+    ExecutionGroup, ExecutionModel, ExecutionModelCurrent, FanOutPolicyCurrent,
+    GraphDocumentCurrent, GraphNodeCurrent, GraphValidationResultCurrent, MergePolicyCurrent,
+    NodeDefinitionCurrent, PatchDefinitionCurrent, PlanEdge, PlanEdgeMetadata, PlanNode,
+    PortDirectionCurrent, PortRateCurrent, PortSpecCurrent, ProjectDocumentCurrent,
+    RuntimeDiagnostic, StringOrStrings, ViewState, compatible_data_types,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-const SUBPATCH_KIND: &str = "core.subpatch";
+const SUBPATCH_KIND: &str = "object.core.subpatch";
 const SUBPATCH_SHORTHAND_KIND: &str = "p";
-const INLET_KIND: &str = "core.inlet";
-const OUTLET_KIND: &str = "core.outlet";
+const INLET_KIND: &str = "object.core.inlet";
+const OUTLET_KIND: &str = "object.core.outlet";
 const MAX_SUBPATCH_DEPTH: usize = 16;
 pub const CURRENT_SCHEMA_VERSION: &str = "0.1.0";
 
@@ -237,6 +239,16 @@ fn validate_patch_library_current(
                     }),
             );
         }
+
+        for node in &patch.graph.nodes {
+            if is_payload_identity_node_kind_current(&node.kind) {
+                diagnostics.push(payload_identity_node_kind_diagnostic_current(
+                    Some(&patch.id),
+                    &patch.graph,
+                    node,
+                ));
+            }
+        }
     }
 
     if diagnostics.is_empty() {
@@ -402,7 +414,7 @@ fn contract_boundary_edges(
     mut edges: Vec<ExpansionEdge>,
     boundary_pins: HashSet<String>,
 ) -> Vec<EdgeSpecCurrent> {
-    let mut counter = 0usize;
+    let mut merged_boundary_edge_index = 0usize;
 
     while let Some(pin) = boundary_pins
         .iter()
@@ -431,12 +443,12 @@ fn contract_boundary_edges(
                 if source_edge.source == target_edge.target {
                     continue;
                 }
-                counter += 1;
+                merged_boundary_edge_index += 1;
                 retained.push(merge_boundary_edges(
                     source_edge,
                     target_edge,
                     &pin,
-                    counter,
+                    merged_boundary_edge_index,
                 ));
             }
         }
@@ -471,14 +483,14 @@ fn merge_boundary_edges(
     source_edge: &ExpansionEdge,
     target_edge: &ExpansionEdge,
     pin: &str,
-    counter: usize,
+    merged_boundary_edge_index: usize,
 ) -> ExpansionEdge {
     let mut edge = target_edge.edge.clone();
     edge.id = format!(
         "{}__{}__{}",
         source_edge.edge.id,
         boundary_id_fragment(pin),
-        counter
+        merged_boundary_edge_index
     );
     if edge.resolved_type.is_none() {
         edge.resolved_type = source_edge.edge.resolved_type.clone();
@@ -665,20 +677,35 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
     ["patchRef", "patchId", "patch", "ref", "name", "id"]
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
-        .or_else(|| {
-            ["objectText", "sourceText", "text"]
-                .into_iter()
-                .find_map(|key| string_param(&node.params, key))
-                .and_then(|text| parse_subpatch_object_text(&text))
-        })
+        .or_else(|| subpatch_object_text(node).and_then(|text| parse_subpatch_object_text(&text)))
 }
 
 fn parse_subpatch_object_text(text: &str) -> Option<String> {
-    let mut parts = text.split_whitespace();
-    match (parts.next(), parts.next()) {
-        (Some("p" | "core.subpatch"), Some(patch_ref)) => Some(patch_ref.to_owned()),
-        _ => None,
+    let resolution = resolve_object_text_v01(text);
+    if resolution.resolved_kind.as_deref() != Some(SUBPATCH_KIND) || !resolution.ok() {
+        return None;
     }
+    resolution
+        .params
+        .get("patchRef")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn subpatch_object_text(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_text.clone().or_else(|| {
+        ["objectText", "sourceText", "text"]
+            .into_iter()
+            .find_map(|key| string_param(&node.params, key))
+    })
+}
+
+fn node_object_text(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_text.clone().or_else(|| {
+        ["objectText", "sourceText"]
+            .into_iter()
+            .find_map(|key| string_param(&node.params, key))
+    })
 }
 
 fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
@@ -790,6 +817,11 @@ pub fn validate_project_current(
     let mut registry: HashMap<(&str, &str), &NodeDefinitionCurrent> = HashMap::new();
 
     for definition in nodes {
+        if is_payload_identity_node_kind_current(&definition.id) {
+            diagnostics.push(payload_identity_node_definition_diagnostic_current(
+                definition,
+            ));
+        }
         if let Err(report) = skenion_contracts::validate_node_definition_v01(definition) {
             diagnostics.extend(report.errors().iter().map(|error| {
                 contract_validation_diagnostic(
@@ -807,42 +839,44 @@ pub fn validate_project_current(
         );
     }
 
-    let graph_analysis = match skenion_contracts::validate_graph_document_v01(graph) {
-        Ok(analysis) => analysis,
-        Err(report) => {
-            diagnostics.extend(report.errors().iter().map(|error| {
-                contract_validation_diagnostic(
-                    "graph",
-                    "graph.invalid-contract",
-                    error.message.clone(),
-                    &graph.schema_version,
-                    json!({ "graphId": graph.id }),
-                )
-            }));
-            skenion_contracts::analyze_graph_document_v01(graph)
-        }
-    };
+    let graph_analysis = skenion_contracts::analyze_graph_document_v01(graph);
+    let graph_analysis_error_messages = graph_analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect::<HashSet<_>>();
+    if let Err(report) = skenion_contracts::validate_graph_document_v01(graph) {
+        diagnostics.extend(
+            report
+                .errors()
+                .iter()
+                .filter(|error| !graph_analysis_error_messages.contains(error.message.as_str()))
+                .map(|error| {
+                    contract_validation_diagnostic(
+                        "graph",
+                        "graph.invalid-contract",
+                        error.message.clone(),
+                        &graph.schema_version,
+                        json!({ "graphId": graph.id }),
+                    )
+                }),
+        );
+    }
     diagnostics.extend(
         graph_analysis
             .diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.severity == "warning")
-            .map(|diagnostic| {
-                let message = format!("{}: {}", diagnostic.code, diagnostic.message);
-                RuntimeDiagnostic::structured_warning(
-                    diagnostic.code.clone(),
-                    message,
-                    json!({
-                        "surface": "graph",
-                        "graphId": graph.id,
-                        "nodes": diagnostic.nodes,
-                        "edges": diagnostic.edges,
-                    }),
-                )
-            }),
+            .map(|diagnostic| graph_analysis_diagnostic_current(graph, diagnostic)),
     );
 
     for node in &graph.nodes {
+        diagnostics.extend(object_text_diagnostics_current(graph, node));
+        if is_payload_identity_node_kind_current(&node.kind) {
+            diagnostics.push(payload_identity_node_kind_diagnostic_current(
+                None, graph, node,
+            ));
+        }
         match registry.get(&(node.kind.as_str(), node.kind_version.as_str())) {
             Some(definition) => validate_node_snapshot_current(node, definition, &mut diagnostics),
             None => diagnostics.push(RuntimeDiagnostic::structured_error(
@@ -860,6 +894,7 @@ pub fn validate_project_current(
             )),
         }
     }
+    validate_edges_current(graph, &mut diagnostics);
 
     if diagnostics
         .iter()
@@ -869,6 +904,143 @@ pub fn validate_project_current(
     } else {
         Ok((diagnostics, graph_analysis))
     }
+}
+
+pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
+    is_payload_identity_kind(kind)
+}
+
+fn object_text_diagnostics_current(
+    graph: &GraphDocumentCurrent,
+    node: &GraphNodeCurrent,
+) -> Vec<RuntimeDiagnostic> {
+    let Some(object_text) = node_object_text(node) else {
+        return Vec::new();
+    };
+    let resolution = resolve_object_text_v01(&object_text);
+    let mut diagnostics = resolution
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code != "object-text.unresolved")
+        .map(|diagnostic| {
+            RuntimeDiagnostic::structured_error(
+                diagnostic.code.clone(),
+                diagnostic.message.clone(),
+                json!({
+                    "surface": "object-text",
+                    "graphId": graph.id,
+                    "nodeId": node.id,
+                    "kind": node.kind,
+                    "objectText": object_text,
+                    "classSymbol": resolution.class_symbol,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if diagnostics.is_empty()
+        && let Some(resolved_kind) = resolution.resolved_kind.as_deref()
+        && resolved_kind != node.kind
+        && node.kind != "object.core.unresolved"
+    {
+        diagnostics.push(RuntimeDiagnostic::structured_error(
+            "object-text.kind-mismatch",
+            format!(
+                "object text {} resolves to {}, but node {} uses kind {}",
+                object_text, resolved_kind, node.id, node.kind
+            ),
+            json!({
+                "surface": "object-text",
+                "graphId": graph.id,
+                "nodeId": node.id,
+                "objectText": object_text,
+                "classSymbol": resolution.class_symbol,
+                "resolvedKind": resolved_kind,
+                "nodeKind": node.kind,
+            }),
+        ));
+    }
+
+    diagnostics
+}
+
+fn payload_identity_node_kind_diagnostic_current(
+    patch_id: Option<&str>,
+    graph: &GraphDocumentCurrent,
+    node: &GraphNodeCurrent,
+) -> RuntimeDiagnostic {
+    let mut details = json!({
+        "surface": "graph-node",
+        "graphId": graph.id,
+        "nodeId": node.id,
+        "kind": node.kind,
+        "kindVersion": node.kind_version,
+    });
+    if let Some(patch_id) = patch_id {
+        details["patchId"] = json!(patch_id);
+    }
+
+    RuntimeDiagnostic::structured_error(
+        "graph.payload-node-kind",
+        format!(
+            "node {} uses payload identity {} as an executable kind",
+            node.id, node.kind
+        ),
+        details,
+    )
+}
+
+fn payload_identity_node_definition_diagnostic_current(
+    definition: &NodeDefinitionCurrent,
+) -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        "node-definition.payload-identity-id",
+        format!("payload identity node definition id: {}", definition.id),
+        json!({
+            "surface": "node-definition",
+            "nodeDefinitionId": definition.id,
+            "version": definition.version,
+        }),
+    )
+}
+
+fn graph_analysis_diagnostic_current(
+    graph: &GraphDocumentCurrent,
+    diagnostic: &skenion_contracts::GraphValidationDiagnosticV01,
+) -> RuntimeDiagnostic {
+    let code = graph_analysis_runtime_code_current(&diagnostic.code);
+    let details = json!({
+        "surface": "graph",
+        "graphId": graph.id,
+        "nodes": diagnostic.nodes,
+        "edges": diagnostic.edges,
+    });
+
+    match diagnostic.severity.as_str() {
+        "warning" => {
+            RuntimeDiagnostic::structured_warning(code, diagnostic.message.clone(), details)
+        }
+        "info" => RuntimeDiagnostic {
+            severity: crate::DiagnosticSeverity::Info,
+            message: diagnostic.message.clone(),
+            code: Some(code),
+            details: Some(details),
+        },
+        _ => RuntimeDiagnostic::structured_error(code, diagnostic.message.clone(), details),
+    }
+}
+
+fn graph_analysis_runtime_code_current(code: &str) -> String {
+    match code {
+        "missing-source-port" => "graph.edge-missing-source-port",
+        "missing-target-port" => "graph.edge-missing-target-port",
+        "invalid-source-direction" => "graph.edge-source-direction",
+        "invalid-target-direction" => "graph.edge-target-direction",
+        "incompatible-type" => "graph.edge-incompatible-type",
+        "payload-node-kind" => "graph.payload-node-kind",
+        other => return format!("graph.{other}"),
+    }
+    .to_owned()
 }
 
 fn contract_validation_diagnostic(
@@ -1208,6 +1380,122 @@ fn validate_node_snapshot_current(
     }
 }
 
+fn validate_edges_current(graph: &GraphDocumentCurrent, diagnostics: &mut Vec<RuntimeDiagnostic>) {
+    for edge in &graph.edges {
+        let Some(source) = find_port(graph, &edge.source.node_id, &edge.source.port_id) else {
+            continue;
+        };
+        let Some(target) = find_port(graph, &edge.target.node_id, &edge.target.port_id) else {
+            continue;
+        };
+
+        if source.direction != PortDirectionCurrent::Output {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-source-direction",
+                format!(
+                    "edge source {}:{} is not an output port",
+                    edge.source.node_id, edge.source.port_id
+                ),
+                edge,
+            ));
+        }
+        if target.direction != PortDirectionCurrent::Input {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-target-direction",
+                format!(
+                    "edge target {}:{} is not an input port",
+                    edge.target.node_id, edge.target.port_id
+                ),
+                edge,
+            ));
+        }
+
+        let source_type = data_type_from_port_spec_current(source);
+        let target_type = data_type_from_port_spec_current(target);
+        if !compatible_data_types(&source_type, &target_type) {
+            diagnostics.push(edge_diagnostic(
+                "graph.edge-incompatible-type",
+                format!(
+                    "incompatible edge {}:{} {} -> {}:{} {}",
+                    edge.source.node_id,
+                    edge.source.port_id,
+                    source.port_type,
+                    edge.target.node_id,
+                    edge.target.port_id,
+                    target.port_type
+                ),
+                edge,
+            ));
+        }
+    }
+}
+
+fn edge_diagnostic(
+    code: &'static str,
+    message: String,
+    edge: &EdgeSpecCurrent,
+) -> RuntimeDiagnostic {
+    RuntimeDiagnostic::structured_error(
+        code,
+        message,
+        json!({
+            "surface": "graph-edge",
+            "edgeId": edge.id,
+            "source": {
+                "nodeId": edge.source.node_id,
+                "portId": edge.source.port_id,
+            },
+            "target": {
+                "nodeId": edge.target.node_id,
+                "portId": edge.target.port_id,
+            },
+        }),
+    )
+}
+
+fn data_type_from_port_spec_current(port: &PortSpecCurrent) -> DataType {
+    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
+    let format = match data_kind.as_str() {
+        "value.core.float32" => Some(StringOrStrings::One("f32".to_owned())),
+        "value.core.tensor" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
+        _ => None,
+    };
+    let color_space = (data_kind == "value.core.tensor").then(|| "srgb".to_owned());
+    DataType {
+        flow: canonical_flow.unwrap_or_else(|| match port.rate {
+            Some(PortRateCurrent::Event) => DataFlow::Event,
+            Some(PortRateCurrent::Audio) => DataFlow::Signal,
+            Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
+            Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
+            | None => {
+                if data_kind == "value.core.tensor" {
+                    DataFlow::Resource
+                } else {
+                    DataFlow::Control
+                }
+            }
+        }),
+        data_kind,
+        unit: None,
+        range: None,
+        shape: None,
+        channels: None,
+        sample_rate: None,
+        format,
+        color_space,
+        frame_rate: None,
+        alpha_policy: None,
+        values: None,
+    }
+}
+
+fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
+    match port_type {
+        value_type if value_type.starts_with("value.") => (None, value_type.to_owned()),
+        other => (None, other.to_owned()),
+    }
+}
+
 fn node_snapshot_diagnostic(
     code: &'static str,
     message: String,
@@ -1261,7 +1549,7 @@ fn find_port<'a>(
     graph: &'a GraphDocumentCurrent,
     node_id: &str,
     port_id: &str,
-) -> Option<&'a crate::PortSpecCurrent> {
+) -> Option<&'a PortSpecCurrent> {
     graph
         .nodes
         .iter()
@@ -1318,7 +1606,7 @@ fn fan_out_policy_label(policy: Option<&FanOutPolicyCurrent>) -> String {
 fn map_execution_model_current(model: &ExecutionModelCurrent) -> ExecutionModel {
     match model {
         ExecutionModelCurrent::Event => ExecutionModel::Event,
-        ExecutionModelCurrent::Value => ExecutionModel::Value,
+        ExecutionModelCurrent::Control => ExecutionModel::Control,
         ExecutionModelCurrent::Frame => ExecutionModel::Frame,
         ExecutionModelCurrent::AudioBlock => ExecutionModel::AudioBlock,
         ExecutionModelCurrent::VideoFrame => ExecutionModel::VideoFrame,
@@ -1335,7 +1623,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DiagnosticSeverity, FeedbackBoundaryCurrent, PortDirectionCurrent, PortSpecCurrent,
+        DiagnosticSeverity, FanOutPolicyCurrent, FeedbackBoundaryCurrent, PortDirectionCurrent,
+        PortRateCurrent, PortSpecCurrent,
     };
 
     fn graph(value: Value) -> GraphDocumentCurrent {
@@ -1350,12 +1639,12 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.clear-color",
+          "id": "object.core.render.clear-color",
           "version": "0.1.0",
           "displayName": "Clear Color",
           "category": "Render",
           "ports": [
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1368,12 +1657,12 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.output",
+          "id": "object.core.render.output",
           "version": "0.1.0",
           "displayName": "Render Output",
           "category": "Render",
           "ports": [
-            { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+            { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1391,10 +1680,26 @@ mod tests {
           "displayName": "Pass",
           "category": "Test",
           "ports": [
-            { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+            { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
+          "state": { "persistent": false },
+          "permissions": [],
+          "capabilities": []
+        }))
+    }
+
+    fn behavior_definition(id: &str) -> NodeDefinitionCurrent {
+        definition(json!({
+          "schema": "skenion.node.definition",
+          "schemaVersion": "0.1.0",
+          "id": id,
+          "version": "0.1.0",
+          "displayName": id,
+          "category": "Core",
+          "ports": [],
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -1410,20 +1715,20 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ]
             }
           ],
@@ -1432,7 +1737,7 @@ mod tests {
               "id": "edge_clear_output",
               "source": { "nodeId": "clear", "portId": "out" },
               "target": { "nodeId": "output", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             }
           ]
         }))
@@ -1450,11 +1755,11 @@ mod tests {
             "nodes": [
               {
                 "id": "patch_in",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in", "label": "Input" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "description": "Frame entering the patch" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "description": "Frame entering the patch" }
                 ]
               },
               {
@@ -1463,17 +1768,17 @@ mod tests {
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "patch_out",
-                "kind": "core.outlet",
+                "kind": "object.core.outlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "out", "label": "Output" },
                 "ports": [
-                  { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true, "description": "Frame leaving the patch" }
+                  { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true, "description": "Frame leaving the patch" }
                 ]
               }
             ],
@@ -1482,13 +1787,13 @@ mod tests {
                 "id": "edge_in_pass",
                 "source": { "nodeId": "patch_in", "portId": "out" },
                 "target": { "nodeId": "pass", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               },
               {
                 "id": "edge_pass_out",
                 "source": { "nodeId": "pass", "portId": "out" },
                 "target": { "nodeId": "patch_out", "portId": "in" },
-                "resolvedType": "render.frame"
+                "resolvedType": "value.core.tensor"
               }
             ]
           }
@@ -1505,30 +1810,30 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "fx",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": { "patchRef": "identity" },
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render", "required": true }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render", "required": true }
               ]
             }
           ],
@@ -1537,13 +1842,13 @@ mod tests {
               "id": "edge_clear_fx",
               "source": { "nodeId": "clear", "portId": "out" },
               "target": { "nodeId": "fx", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             },
             {
               "id": "edge_fx_output",
               "source": { "nodeId": "fx", "portId": "out" },
               "target": { "nodeId": "output", "portId": "in" },
-              "resolvedType": "render.frame"
+              "resolvedType": "value.core.tensor"
             }
           ]
         }))
@@ -1585,7 +1890,7 @@ mod tests {
             .metadata
             .as_ref()
             .expect("metadata should exist");
-        assert_eq!(metadata.resolved_type.as_deref(), Some("render.frame"));
+        assert_eq!(metadata.resolved_type.as_deref(), Some("value.core.tensor"));
         assert_eq!(metadata.merge_policy.as_deref(), Some("forbid"));
         assert_eq!(metadata.fan_out_policy.as_deref(), Some("allow"));
         assert_eq!(metadata.cycle_classification, None);
@@ -1601,12 +1906,12 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "render.feedback-composite",
+              "kind": "object.core.render.feedback-composite",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "previous", "direction": "input", "type": "render.frame", "rate": "render" },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "fanOutPolicy": "copy" }
+                { "id": "previous", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "fanOutPolicy": "copy" }
               ]
             }
           ],
@@ -1623,13 +1928,13 @@ mod tests {
         let definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.feedback-composite",
+          "id": "object.core.render.feedback-composite",
           "version": "0.1.0",
           "displayName": "Feedback",
           "category": "Render",
           "ports": [
-            { "id": "previous", "direction": "input", "type": "render.frame", "rate": "render" },
-            { "id": "out", "direction": "output", "type": "render.frame", "rate": "render", "fanOutPolicy": "copy" }
+            { "id": "previous", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+            { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render", "fanOutPolicy": "copy" }
           ],
           "execution": { "model": "gpu_pass", "clock": "frame" },
           "state": { "persistent": false },
@@ -1656,8 +1961,10 @@ mod tests {
         graph.edges[0].feedback.as_mut().unwrap().boundary = FeedbackBoundaryCurrent::SameTurn;
         let (_plan, diagnostics) = build_execution_plan_current(&graph, &[definition])
             .expect("risky feedback should plan");
-        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
-        assert!(diagnostics[0].message.contains("risky-feedback"));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.code.as_deref() == Some("graph.risky-feedback")
+        }));
     }
 
     #[test]
@@ -1790,7 +2097,7 @@ mod tests {
 
         let mut source_edge = base_edge.clone();
         source_edge.id = "source_edge".to_owned();
-        source_edge.resolved_type = Some("render.frame".to_owned());
+        source_edge.resolved_type = Some("value.core.tensor".to_owned());
         let mut target_edge = base_edge.clone();
         target_edge.id = "target_edge".to_owned();
         target_edge.resolved_type = None;
@@ -1816,7 +2123,10 @@ mod tests {
             std::collections::HashSet::from(["fx::@inlet::in".to_owned()]),
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].resolved_type.as_deref(), Some("render.frame"));
+        assert_eq!(
+            merged[0].resolved_type.as_deref(),
+            Some("value.core.tensor")
+        );
         assert!(merged[0].id.contains("fx___inlet__in"));
 
         assert!(
@@ -1861,7 +2171,7 @@ mod tests {
           "nodes": [
             {
               "id": "fx",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": []
@@ -1894,7 +2204,7 @@ mod tests {
                     "nodes": [
                       {
                         "id": "next",
-                        "kind": "core.subpatch",
+                        "kind": "object.core.subpatch",
                         "kindVersion": "0.1.0",
                         "params": { "patchRef": format!("p{}", index + 1) },
                         "ports": []
@@ -1914,7 +2224,7 @@ mod tests {
           "nodes": [
             {
               "id": "root",
-              "kind": "core.subpatch",
+              "kind": "object.core.subpatch",
               "kindVersion": "0.1.0",
               "params": { "patchRef": "p0" },
               "ports": []
@@ -1938,7 +2248,7 @@ mod tests {
             Some("identity")
         );
         assert_eq!(
-            parse_subpatch_object_text("core.subpatch identity").as_deref(),
+            parse_subpatch_object_text("object.core.subpatch identity").as_deref(),
             Some("identity")
         );
         assert_eq!(parse_subpatch_object_text("object identity"), None);
@@ -1961,7 +2271,7 @@ mod tests {
           "nodes": [
             {
               "id": "plain_inlet",
-              "kind": "core.inlet",
+              "kind": "object.core.inlet",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": []
@@ -1982,20 +2292,20 @@ mod tests {
             "nodes": [
               {
                 "id": "in_a",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in_a", "label": "shared" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               },
               {
                 "id": "in_b",
-                "kind": "core.inlet",
+                "kind": "object.core.inlet",
                 "kindVersion": "0.1.0",
                 "params": { "portId": "in_b", "label": "shared" },
                 "ports": [
-                  { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                  { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
                 ]
               }
             ],
@@ -2029,11 +2339,11 @@ mod tests {
           "nodes": [
             {
               "id": "clear",
-              "kind": "render.clear-color",
+              "kind": "object.core.render.clear-color",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
@@ -2042,17 +2352,17 @@ mod tests {
               "kindVersion": "0.1.0",
               "params": { "objectText": "p alias-patch" },
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" },
-                { "id": "out", "direction": "output", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render" },
+                { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
               ]
             },
             {
               "id": "output",
-              "kind": "render.output",
+              "kind": "object.core.render.output",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": "render.frame", "rate": "render" }
+                { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render" }
               ]
             }
           ],
@@ -2106,7 +2416,7 @@ mod tests {
             "nodes": [
               {
                 "id": "self",
-                "kind": "core.subpatch",
+                "kind": "object.core.subpatch",
                 "kindVersion": "0.1.0",
                 "params": { "patchRef": "recursive" },
                 "ports": []
@@ -2126,7 +2436,7 @@ mod tests {
               "nodes": [
                 {
                   "id": "root",
-                  "kind": "core.subpatch",
+                  "kind": "object.core.subpatch",
                   "kindVersion": "0.1.0",
                   "params": { "patchRef": "recursive" },
                   "ports": []
@@ -2220,6 +2530,266 @@ mod tests {
     }
 
     #[test]
+    fn rejects_payload_identity_node_kinds_and_definition_ids() {
+        for payload_identity in [
+            "object.core.bool",
+            "object.core.string",
+            "bool",
+            "string",
+            "value.number",
+            "value.core.message",
+            "value.core.bang",
+            "value.core.string",
+            "value.core.tensor",
+        ] {
+            let mut graph = render_graph();
+            graph.nodes[0].kind = payload_identity.to_owned();
+            graph.nodes[0].ports.clear();
+            let graph_result =
+                validate_project_current(&graph, &[clear_definition(), output_definition()])
+                    .expect_err("payload identity graph node kind should fail");
+            assert!(
+                graph_result.iter().any(|diagnostic| {
+                    diagnostic.code.as_deref() == Some("graph.payload-node-kind")
+                        && diagnostic.details.as_ref().unwrap()["kind"] == payload_identity
+                }),
+                "{payload_identity}: {graph_result:#?}"
+            );
+
+            let mut definition = clear_definition();
+            definition.id = payload_identity.to_owned();
+            let definition_result =
+                validate_project_current(&render_graph(), &[definition, output_definition()])
+                    .expect_err("payload identity definition id should fail");
+            assert!(
+                definition_result.iter().any(|diagnostic| {
+                    diagnostic.code.as_deref() == Some("node-definition.payload-identity-id")
+                        && diagnostic.details.as_ref().unwrap()["nodeDefinitionId"]
+                            == payload_identity
+                }),
+                "{payload_identity}: {definition_result:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_behavior_object_identities_that_still_exist() {
+        let behavior_ids = [
+            "object.core.float",
+            "object.core.int",
+            "object.core.uint",
+            "object.core.bang",
+            "object.core.message",
+        ];
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "behavior-identities",
+          "revision": "1",
+          "nodes": behavior_ids
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| json!({
+              "id": format!("node_{index}"),
+              "kind": kind,
+              "kindVersion": "0.1.0",
+              "params": {},
+              "ports": []
+            }))
+            .collect::<Vec<_>>(),
+          "edges": []
+        }));
+        let definitions = behavior_ids
+            .iter()
+            .map(|id| {
+                definition(json!({
+                  "schema": "skenion.node.definition",
+                  "schemaVersion": "0.1.0",
+                  "id": id,
+                  "version": "0.1.0",
+                  "displayName": id,
+                  "category": "Core",
+                  "ports": [],
+                  "execution": { "model": "control" },
+                  "state": { "persistent": false },
+                  "permissions": [],
+                  "capabilities": []
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let (diagnostics, _) =
+            validate_project_current(&graph, &definitions).expect("behavior ids should validate");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn validates_runtime_owned_object_text_resolution() {
+        let graph = graph(json!({
+          "schema": "skenion.graph",
+          "schemaVersion": "0.1.0",
+          "id": "object-text",
+          "revision": "1",
+          "nodes": [
+            {
+              "id": "add",
+              "kind": "object.core.operator.add",
+              "kindVersion": "0.1.0",
+              "objectText": "+ 2",
+              "params": {},
+              "ports": []
+            }
+          ],
+          "edges": []
+        }));
+
+        validate_project_current(&graph, &[behavior_definition("object.core.operator.add")])
+            .expect("matching Runtime object text should validate");
+
+        let mut invalid_arg = graph.clone();
+        invalid_arg.nodes[0].object_text = Some("+ true".to_owned());
+        let invalid_arg_result = validate_project_current(
+            &invalid_arg,
+            &[behavior_definition("object.core.operator.add")],
+        )
+        .expect_err("invalid Runtime object-text args should fail");
+        assert!(invalid_arg_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.invalid-arg-type")
+                && diagnostic.details.as_ref().unwrap()["objectText"] == "+ true"
+        }));
+
+        let mut mismatch = graph.clone();
+        mismatch.nodes[0].kind = "object.core.operator.sub".to_owned();
+        let mismatch_result = validate_project_current(
+            &mismatch,
+            &[behavior_definition("object.core.operator.sub")],
+        )
+        .expect_err("resolved object kind mismatch should fail");
+        assert!(mismatch_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.kind-mismatch")
+                && diagnostic.details.as_ref().unwrap()["resolvedKind"]
+                    == "object.core.operator.add"
+                && diagnostic.details.as_ref().unwrap()["nodeKind"] == "object.core.operator.sub"
+        }));
+
+        let mut payload = graph.clone();
+        payload.nodes[0].kind = "object.core.float".to_owned();
+        payload.nodes[0].object_text = Some("value.core.float32".to_owned());
+        let payload_result =
+            validate_project_current(&payload, &[behavior_definition("object.core.float")])
+                .expect_err("payload identity object text should fail");
+        assert!(payload_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("object-text.payload-identity")
+                && diagnostic.details.as_ref().unwrap()["objectText"] == "value.core.float32"
+        }));
+
+        let mut package_deferred = graph.clone();
+        package_deferred.nodes[0].kind = "user.manipulator".to_owned();
+        package_deferred.nodes[0].object_text = Some("user.manipulator 1".to_owned());
+        validate_project_current(
+            &package_deferred,
+            &[behavior_definition("user.manipulator")],
+        )
+        .expect("package-owned object text remains available to package resolver layers");
+    }
+
+    #[test]
+    fn surfaces_selector_and_connection_policy_diagnostics_with_specific_codes() {
+        let mut selector_graph = render_graph();
+        selector_graph.nodes[1].ports[0].port_type = "value.core.message".to_owned();
+        selector_graph.nodes[1].ports[0].rate = Some(PortRateCurrent::Control);
+        selector_graph.nodes[1].ports[0].message_keys = None;
+        let mut selector_output_definition = output_definition();
+        selector_output_definition.ports[0] = selector_graph.nodes[1].ports[0].clone();
+        let selector_result = validate_project_current(
+            &selector_graph,
+            &[clear_definition(), selector_output_definition],
+        )
+        .expect_err("selector-aware input port should fail without selector policy");
+        assert!(
+            selector_result.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some("graph.message-key-policy")
+                    && diagnostic
+                        .message
+                        .contains("message-key-aware input port requires messageKeys")
+            }),
+            "{selector_result:#?}"
+        );
+
+        let mut fan_in_graph = render_graph();
+        let mut clear_two = fan_in_graph.nodes[0].clone();
+        clear_two.id = "clear_two".to_owned();
+        fan_in_graph.nodes.push(clear_two);
+        fan_in_graph.edges.push(EdgeSpecCurrent {
+            id: "edge_clear_two_output".to_owned(),
+            source: EdgeEndpointCurrent {
+                node_id: "clear_two".to_owned(),
+                port_id: "out".to_owned(),
+            },
+            target: EdgeEndpointCurrent {
+                node_id: "output".to_owned(),
+                port_id: "in".to_owned(),
+            },
+            resolved_type: Some("value.core.tensor".to_owned()),
+            order: None,
+            enabled: None,
+            adapter: None,
+            feedback: None,
+            style_override: None,
+            label: None,
+            description: None,
+        });
+        let fan_in_result =
+            validate_project_current(&fan_in_graph, &[clear_definition(), output_definition()])
+                .expect_err("default input fan-in should fail");
+        assert!(
+            fan_in_result
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-in-cardinality")),
+            "{fan_in_result:#?}"
+        );
+
+        let mut fan_out_graph = render_graph();
+        fan_out_graph.nodes[0].ports[0].fan_out_policy = Some(FanOutPolicyCurrent::Forbid);
+        let mut output_two = fan_out_graph.nodes[1].clone();
+        output_two.id = "output_two".to_owned();
+        fan_out_graph.nodes.push(output_two);
+        fan_out_graph.edges.push(EdgeSpecCurrent {
+            id: "edge_clear_output_two".to_owned(),
+            source: EdgeEndpointCurrent {
+                node_id: "clear".to_owned(),
+                port_id: "out".to_owned(),
+            },
+            target: EdgeEndpointCurrent {
+                node_id: "output_two".to_owned(),
+                port_id: "in".to_owned(),
+            },
+            resolved_type: Some("value.core.tensor".to_owned()),
+            order: None,
+            enabled: None,
+            adapter: None,
+            feedback: None,
+            style_override: None,
+            label: None,
+            description: None,
+        });
+        let mut fan_out_clear_definition = clear_definition();
+        fan_out_clear_definition.ports[0].fan_out_policy = Some(FanOutPolicyCurrent::Forbid);
+        let fan_out_result = validate_project_current(
+            &fan_out_graph,
+            &[fan_out_clear_definition, output_definition()],
+        )
+        .expect_err("forbidden output fan-out should fail");
+        assert!(
+            fan_out_result
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.fan-out-forbidden")),
+            "{fan_out_result:#?}"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_graph_definitions_and_snapshots() {
         let graph = render_graph();
         let missing = validate_project_current(&graph, &[]).expect_err("missing definitions fail");
@@ -2286,11 +2856,11 @@ mod tests {
         let mut mismatch = render_graph();
         mismatch.nodes[0].ports.clear();
         mismatch.nodes[1].ports[0].direction = PortDirectionCurrent::Output;
-        mismatch.nodes[1].ports[0].port_type = "value.number".to_owned();
+        mismatch.nodes[1].ports[0].port_type = "value.core.float32".to_owned();
         mismatch.nodes[1].ports.push(PortSpecCurrent {
             id: "extra".to_owned(),
             direction: PortDirectionCurrent::Input,
-            port_type: "render.frame".to_owned(),
+            port_type: "value.core.tensor".to_owned(),
             label: None,
             rate: None,
             accepts: None,
@@ -2299,6 +2869,7 @@ mod tests {
             merge_policy: None,
             fan_out_policy: None,
             trigger_mode: None,
+            message_keys: None,
             default_value: None,
             latch: None,
             required: None,
@@ -2322,9 +2893,22 @@ mod tests {
         );
         assert!(messages.contains("missing manifest port"));
         assert!(messages.contains("direction differs from definition"));
-        assert!(messages.contains("type value.number"));
+        assert!(messages.contains("type value.core.float32"));
         assert!(messages.contains("missing source port"));
         assert!(messages.contains("missing manifest port: output.extra"));
+
+        let mut incompatible = render_graph();
+        incompatible.nodes[1].ports[0].port_type = "value.core.message".to_owned();
+        incompatible.nodes[1].ports[0].rate = Some(PortRateCurrent::Event);
+        let incompatible_result =
+            validate_project_current(&incompatible, &[clear_definition(), output_definition()])
+                .expect_err("incompatible edge type should fail");
+        assert!(incompatible_result.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("graph.edge-incompatible-type")
+                && diagnostic.message.contains(
+                    "incompatible edge clear:out value.core.tensor -> output:in value.core.message",
+                )
+        }));
     }
 
     #[test]
@@ -2367,7 +2951,7 @@ mod tests {
 
         for (model, expected) in [
             (ExecutionModelCurrent::Event, ExecutionModel::Event),
-            (ExecutionModelCurrent::Value, ExecutionModel::Value),
+            (ExecutionModelCurrent::Control, ExecutionModel::Control),
             (ExecutionModelCurrent::Frame, ExecutionModel::Frame),
             (
                 ExecutionModelCurrent::AudioBlock,

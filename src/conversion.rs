@@ -23,14 +23,14 @@ pub fn convert_control_value_to_data_kind(
     representation: Option<&str>,
 ) -> Option<ControlValue> {
     match data_kind {
-        "number.float" => numeric_to_float(value, representation.unwrap_or("f32")),
-        "number.int" => numeric_to_int(value, representation.unwrap_or("i32")),
-        "number.uint" => numeric_to_uint(value, representation.unwrap_or("u32")),
-        "boolean" => match value {
+        "value.core.float32" => numeric_to_float(value, representation.unwrap_or("f32")),
+        "value.core.int32" => numeric_to_int(value, representation.unwrap_or("i32")),
+        "value.core.uint32" => numeric_to_uint(value, representation.unwrap_or("u32")),
+        "value.core.bool" => match value {
             ControlValue::Bool { value } => Some(ControlValue::bool(*value)),
             _ => None,
         },
-        "color" => color_to_color(value, representation.unwrap_or("rgba32f"), "linear"),
+        "value.core.color" => color_to_color(value, representation.unwrap_or("rgba32f"), "linear"),
         _ => None,
     }
 }
@@ -81,6 +81,7 @@ fn numeric_as_f64(value: &ControlValue) -> Option<f64> {
         ControlValue::Float { value, .. } => Some(*value),
         ControlValue::Int { value, .. } => Some(*value as f64),
         ControlValue::Uint { value, .. } => Some(*value as f64),
+        ControlValue::Bool { value } => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
@@ -181,6 +182,24 @@ mod tests {
                 value: 12,
             })
         );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(true), &ControlValue::float(0.0)),
+            Some(ControlValue::float(1.0))
+        );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(false), &i8_target),
+            Some(ControlValue::Int {
+                representation: "i8".to_owned(),
+                value: 0,
+            })
+        );
+        assert_eq!(
+            convert_control_value_to_stored(&ControlValue::bool(true), &u8_target),
+            Some(ControlValue::Uint {
+                representation: "u8".to_owned(),
+                value: 1,
+            })
+        );
     }
 
     #[test]
@@ -218,7 +237,11 @@ mod tests {
     #[test]
     fn converts_to_requested_data_kind_and_representations() {
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::uint(7), "number.float", Some("f64")),
+            convert_control_value_to_data_kind(
+                &ControlValue::uint(7),
+                "value.core.float32",
+                Some("f64")
+            ),
             Some(ControlValue::Float {
                 representation: "f64".to_owned(),
                 value: 7.0,
@@ -226,8 +249,16 @@ mod tests {
         );
         assert_eq!(
             convert_control_value_to_data_kind(
+                &ControlValue::bool(true),
+                "value.core.float32",
+                None
+            ),
+            Some(ControlValue::float(1.0))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
                 &ControlValue::float(1.28),
-                "number.float",
+                "value.core.float32",
                 Some("f8.e4m3")
             ),
             Some(ControlValue::Float {
@@ -238,7 +269,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(-1.0),
-                "number.float",
+                "value.core.float32",
                 Some("ufloat16")
             ),
             Some(ControlValue::Float {
@@ -249,7 +280,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(1.28),
-                "number.float",
+                "value.core.float32",
                 Some("ufloat8")
             ),
             Some(ControlValue::Float {
@@ -260,7 +291,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(f64::INFINITY),
-                "number.float",
+                "value.core.float32",
                 Some("f16")
             ),
             Some(ControlValue::Float {
@@ -271,7 +302,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(1.5),
-                "number.float",
+                "value.core.float32",
                 Some("vendor.float")
             ),
             Some(ControlValue::Float {
@@ -280,27 +311,51 @@ mod tests {
             })
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::uint(300), "number.int", Some("i16")),
+            convert_control_value_to_data_kind(
+                &ControlValue::uint(300),
+                "value.core.int32",
+                Some("i16")
+            ),
             Some(ControlValue::Int {
                 representation: "i16".to_owned(),
                 value: 300,
             })
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::int(-1), "number.uint", Some("u16")),
+            convert_control_value_to_data_kind(
+                &ControlValue::int(-1),
+                "value.core.uint32",
+                Some("u16")
+            ),
             Some(ControlValue::Uint {
                 representation: "u16".to_owned(),
                 value: 0,
             })
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::bool(true), "boolean", None),
+            convert_control_value_to_data_kind(
+                &ControlValue::bool(false),
+                "value.core.int32",
+                None
+            ),
+            Some(ControlValue::int(0))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(
+                &ControlValue::bool(true),
+                "value.core.uint32",
+                None
+            ),
+            Some(ControlValue::uint(1))
+        );
+        assert_eq!(
+            convert_control_value_to_data_kind(&ControlValue::bool(true), "value.core.bool", None),
             Some(ControlValue::bool(true))
         );
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::color([0.25, 0.5, 0.75, 0.0]),
-                "color",
+                "value.core.color",
                 Some("rgb8unorm")
             ),
             Some(ControlValue::Color {
@@ -332,17 +387,17 @@ mod tests {
             None
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::float(1.0), "boolean", None),
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "value.core.bool", None),
             None
         );
         assert_eq!(
-            convert_control_value_to_data_kind(&ControlValue::float(1.0), "color", None),
+            convert_control_value_to_data_kind(&ControlValue::float(1.0), "value.core.color", None),
             None
         );
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(1.0),
-                "number.int",
+                "value.core.int32",
                 Some("bad.int")
             ),
             None
@@ -350,7 +405,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(1.0),
-                "number.uint",
+                "value.core.uint32",
                 Some("bad.uint")
             ),
             None
@@ -362,7 +417,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(i64::MAX as f64),
-                "number.int",
+                "value.core.int32",
                 Some("i64")
             ),
             Some(ControlValue::Int {
@@ -373,7 +428,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::float(u64::MAX as f64),
-                "number.uint",
+                "value.core.uint32",
                 Some("u64")
             ),
             Some(ControlValue::Uint {
@@ -384,7 +439,7 @@ mod tests {
         assert_eq!(
             convert_control_value_to_data_kind(
                 &ControlValue::color([-0.5, 0.25, 2.0, f64::NAN]),
-                "color",
+                "value.core.color",
                 Some("rgba16f")
             ),
             Some(ControlValue::Color {

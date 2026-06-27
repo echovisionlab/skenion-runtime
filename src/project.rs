@@ -5,7 +5,7 @@ use crate::{
     compatible_data_types, type_label, validate_graph_document,
 };
 
-const RENDER_FULLSCREEN_SHADER_KIND: &str = "render.fullscreen-shader";
+const RENDER_FULLSCREEN_SHADER_KIND: &str = "object.core.render.fullscreen-shader";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectValidationError {
@@ -163,8 +163,8 @@ fn validate_node_snapshot(
                 "port snapshot mismatch: {}.{} type {} is not compatible with definition type {}",
                 node.id,
                 snapshot_port.id,
-                type_label(&snapshot_port.data_type),
-                type_label(&definition_port.data_type)
+                diagnostic_type_label(&snapshot_port.data_type),
+                diagnostic_type_label(&definition_port.data_type)
             )));
         }
     }
@@ -225,12 +225,32 @@ fn validate_edges(
                 "incompatible edge {}:{} {} -> {}:{} {}",
                 edge.from.node,
                 edge.from.port,
-                type_label(&from.data_type),
+                diagnostic_type_label(&from.data_type),
                 edge.to.node,
                 edge.to.port,
-                type_label(&to.data_type)
+                diagnostic_type_label(&to.data_type)
             )));
         }
+    }
+}
+
+fn diagnostic_type_label(data_type: &crate::DataType) -> String {
+    match data_type.flow {
+        DataFlow::Control => match data_type.data_kind.as_str() {
+            "value.core.float32" => "value.core.float32".to_owned(),
+            "value.core.int32" => "value.core.int32".to_owned(),
+            "value.core.uint32" => "value.core.uint32".to_owned(),
+            "value.core.message" => "value.core.message".to_owned(),
+            "value.core.bool" => "value.core.bool".to_owned(),
+            "value.core.string" => "value.core.string".to_owned(),
+            "value.core.color" => "value.core.color".to_owned(),
+            _ => type_label(data_type),
+        },
+        DataFlow::Event if data_type.data_kind == "value.core.bang" => "value.core.bang".to_owned(),
+        DataFlow::Resource if data_type.data_kind == "value.core.tensor" => {
+            "value.core.tensor".to_owned()
+        }
+        _ => type_label(data_type),
     }
 }
 
@@ -238,10 +258,10 @@ fn allows_dynamic_shader_input(node: &GraphNode, definition: &NodeDefinition, po
     node.kind == RENDER_FULLSCREEN_SHADER_KIND
         && definition.id == RENDER_FULLSCREEN_SHADER_KIND
         && port.direction == PortDirection::Input
-        && port.data_type.flow == DataFlow::Value
+        && port.data_type.flow == DataFlow::Control
         && matches!(
             port.data_type.data_kind.as_str(),
-            "number.float" | "number.int" | "boolean" | "color"
+            "value.core.float32" | "value.core.int32" | "value.core.bool" | "value.core.color"
         )
 }
 
@@ -331,14 +351,14 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.source",
+          "id": "object.core.source",
           "version": "0.1.0",
           "displayName": "Source",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -349,14 +369,14 @@ mod tests {
         definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.float",
+          "id": "object.core.float",
           "version": "0.1.0",
           "displayName": "Target",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" }
+            { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -372,20 +392,20 @@ mod tests {
           "nodes": [
             {
               "id": "source",
-              "kind": "core.source",
+              "kind": "object.core.source",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "target",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" }
               ]
             }
           ],
@@ -413,20 +433,20 @@ mod tests {
           "nodes": [
             {
               "id": "dup",
-              "kind": "core.source",
+              "kind": "object.core.source",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "dup",
-              "kind": "core.missing",
+              "kind": "object.core.missing",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -438,8 +458,8 @@ mod tests {
 
         assert!(report.errors().len() >= 3);
         assert!(display.contains("duplicate node id: dup"));
-        assert!(display.contains("missing node definition: core.source@0.1.0"));
-        assert!(display.contains("missing node definition: core.missing@0.1.0"));
+        assert!(display.contains("missing node definition: object.core.source@0.1.0"));
+        assert!(display.contains("missing node definition: object.core.missing@0.1.0"));
     }
 
     #[test]
@@ -447,15 +467,15 @@ mod tests {
         let definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.snapshot",
+          "id": "object.core.snapshot",
           "version": "0.1.0",
           "displayName": "Snapshot",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float", "range": { "min": 0, "max": 1 } } },
-            { "id": "unused", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32", "range": { "min": 0, "max": 1 } } },
+            { "id": "unused", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -468,12 +488,12 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.snapshot",
+              "kind": "object.core.snapshot",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "input", "type": { "flow": "event", "dataKind": "event.bang" }, "activation": "trigger" },
-                { "id": "ghost", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "input", "type": { "flow": "event", "dataKind": "value.core.bang" }, "activation": "trigger" },
+                { "id": "ghost", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -485,11 +505,15 @@ mod tests {
         assert!(display.contains("port snapshot missing manifest port: node.unused"));
         assert!(display.contains("port snapshot references missing manifest port: node.ghost"));
         assert!(display.contains("direction Input != definition direction Output"));
-        assert!(display.contains("flow Event != definition flow Value"));
-        assert!(display.contains("dataKind event.bang != definition dataKind number.float"));
-        assert!(display.contains(
-            "event<event.bang> is not compatible with definition type value<number.float>"
-        ));
+        assert!(display.contains("flow Event != definition flow Control"));
+        assert!(
+            display.contains("dataKind value.core.bang != definition dataKind value.core.float32")
+        );
+        assert!(
+            display.contains(
+                "value.core.bang is not compatible with definition type value.core.float32"
+            )
+        );
     }
 
     #[test]
@@ -497,12 +521,12 @@ mod tests {
         let definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "render.fullscreen-shader",
+          "id": "object.core.render.fullscreen-shader",
           "version": "0.1.0",
           "displayName": "Fullscreen Shader",
           "category": "Render",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "gpu.texture2d", "format": "rgba8unorm", "colorSpace": "srgb" } }
+            { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "value.core.tensor", "format": "rgba8unorm", "colorSpace": "srgb" } }
           ],
           "execution": { "model": "gpu_pass" },
           "state": { "persistent": false },
@@ -517,13 +541,13 @@ mod tests {
           "nodes": [
             {
               "id": "shader",
-              "kind": "render.fullscreen-shader",
+              "kind": "object.core.render.fullscreen-shader",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "speed", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "enabled", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "gpu.texture2d", "format": "rgba8unorm", "colorSpace": "srgb" } }
+                { "id": "speed", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "enabled", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.bool" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "resource", "dataKind": "value.core.tensor", "format": "rgba8unorm", "colorSpace": "srgb" } }
               ]
             }
           ],
@@ -539,15 +563,15 @@ mod tests {
         let source_definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.edge-source",
+          "id": "object.core.edge-source",
           "version": "0.1.0",
           "displayName": "Edge Source",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -555,15 +579,15 @@ mod tests {
         let target_definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.edge-target",
+          "id": "object.core.edge-target",
           "version": "0.1.0",
           "displayName": "Edge Target",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.bool" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -576,22 +600,22 @@ mod tests {
           "nodes": [
             {
               "id": "source",
-              "kind": "core.edge-source",
+              "kind": "object.core.edge-source",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "target",
-              "kind": "core.edge-target",
+              "kind": "object.core.edge-target",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "boolean" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.bool" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -614,7 +638,7 @@ mod tests {
         assert!(display.contains("edge source source:in is not an output port"));
         assert!(display.contains("edge target target:out is not an input port"));
         assert!(display.contains(
-            "incompatible edge source:out value<number.float> -> target:in value<boolean>"
+            "incompatible edge source:out value.core.float32 -> target:in value.core.bool"
         ));
     }
 
@@ -628,22 +652,22 @@ mod tests {
           "nodes": [
             {
               "id": "a",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "b",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -655,15 +679,15 @@ mod tests {
         let pass_definition = definition(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.float",
+          "id": "object.core.float",
           "version": "0.1.0",
           "displayName": "Target",
           "category": "Core",
           "ports": [
-            { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []

@@ -6,31 +6,61 @@
     "revision": "1",
     "nodes": [
       {
-        "id": "value",
-        "kind": "core.value",
+        "id": "float_1",
+        "kind": "object.core.float",
         "kindVersion": "0.1.0",
         "params": {
           "value": 0.5
         },
         "ports": [
           {
-            "id": "out",
+            "id": "in",
+            "direction": "input",
+            "type": "value.core.message",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "trigger",
+            "accepts": [
+              "value.core.float32",
+              "value.core.int32",
+              "value.core.uint32",
+              "value.core.bool",
+              "value.core.bang"
+            ],
+            "messageKeys": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
+          },
+          {
+            "id": "cold",
+            "direction": "input",
+            "type": "value.core.float32",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "passive"
+          },
+          {
+            "id": "value",
             "direction": "output",
-            "type": "value.number",
+            "type": "value.core.float32",
             "rate": "control"
           }
         ]
       },
       {
         "id": "output",
-        "kind": "render.output",
+        "kind": "object.core.render.output",
         "kindVersion": "0.1.0",
         "params": {},
         "ports": [
           {
             "id": "in",
             "direction": "input",
-            "type": "render.frame",
+            "type": "value.core.tensor",
             "rate": "render",
             "required": true
           }
@@ -41,8 +71,8 @@
       {
         "id": "edge_value_output",
         "source": {
-          "nodeId": "value",
-          "portId": "out"
+          "nodeId": "float_1",
+          "portId": "value"
         },
         "target": {
           "nodeId": "output",
@@ -55,31 +85,61 @@
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "core.value",
+      "id": "object.core.float",
       "version": "0.1.0",
-      "displayName": "Value",
-      "category": "Core",
+      "displayName": "Float",
+      "category": "Typed Controls",
       "ports": [
         {
-          "id": "out",
+          "id": "in",
+          "direction": "input",
+          "type": "value.core.message",
+          "rate": "control",
+          "required": false,
+          "triggerMode": "trigger",
+          "accepts": [
+            "value.core.float32",
+            "value.core.int32",
+            "value.core.uint32",
+            "value.core.bool",
+            "value.core.bang"
+          ],
+          "messageKeys": {
+            "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+            "silent": ["set"],
+            "trigger": ["bang", "float", "int", "uint", "bool"],
+            "store": ["set", "float", "int", "uint", "bool"],
+            "emit": ["bang", "float", "int", "uint", "bool"]
+          }
+        },
+        {
+          "id": "cold",
+          "direction": "input",
+          "type": "value.core.float32",
+          "rate": "control",
+          "required": false,
+          "triggerMode": "passive"
+        },
+        {
+          "id": "value",
           "direction": "output",
-          "type": "value.number",
+          "type": "value.core.float32",
           "rate": "control"
         }
       ],
       "execution": {
-        "model": "value"
+        "model": "control"
       },
       "state": {
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["value.number.v0.1"]
+      "capabilities": ["value.core.float32.v0.1"]
     },
     {
       "schema": "skenion.node.definition",
       "schemaVersion": "0.1.0",
-      "id": "render.output",
+      "id": "object.core.render.output",
       "version": "0.1.0",
       "displayName": "Render Output",
       "category": "Render",
@@ -87,7 +147,7 @@
         {
           "id": "in",
           "direction": "input",
-          "type": "render.frame",
+          "type": "value.core.tensor",
           "rate": "render",
           "required": true
         }
@@ -100,7 +160,7 @@
         "persistent": false
       },
       "permissions": [],
-      "capabilities": ["render.output.v0.1"]
+      "capabilities": ["object.core.render.output.v0.1"]
     }
   ]
 }

@@ -6,10 +6,9 @@ use serde_json::{Value, json};
 use crate::{
     ControlMessage, ControlValue, GraphDocument, GraphNode, PortDirection, RuntimeDiagnostic,
     control_value::{
-        BANG_KIND, BOOL_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND,
-        OPERATOR_ADD_KIND, OPERATOR_DIV_KIND, OPERATOR_MAX_KIND, OPERATOR_MIN_KIND,
-        OPERATOR_MUL_KIND, OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND,
-        STRING_KIND, UINT_KIND,
+        BANG_KIND, COLOR_KIND, COMMENT_KIND, FLOAT_KIND, INT_KIND, MESSAGE_KIND, OPERATOR_ADD_KIND,
+        OPERATOR_DIV_KIND, OPERATOR_MAX_KIND, OPERATOR_MIN_KIND, OPERATOR_MUL_KIND,
+        OPERATOR_POW_KIND, OPERATOR_SQRT_KIND, OPERATOR_SUB_KIND, PANEL_KIND, UINT_KIND,
     },
     convert_control_value_to_stored,
 };
@@ -23,7 +22,7 @@ pub struct ControlState {
     pub operator_right: BTreeMap<String, ControlValue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeControlEventRequest {
     pub node_id: String,
@@ -223,9 +222,6 @@ impl ControlState {
                         .insert(node.id.clone(), ControlValue::string(next));
                     return RuntimeControlEventResponse::ok(Vec::new());
                 }
-                if is_toggle_widget(node) {
-                    return self.apply_toggle_event(node, false, message, stored);
-                }
                 if is_bang_message(&message) {
                     return RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
                         node_id: node.id.clone(),
@@ -260,8 +256,11 @@ impl ControlState {
                         node.id
                     ));
                 }
-                if is_toggle_widget(node) {
-                    return self.apply_toggle_event(node, true, message, stored);
+                if message.selector == "set" {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control input {}.cold expects a typed control payload",
+                        node.id
+                    ));
                 }
                 let Some(next) = value_from_message(&message, &stored) else {
                     return RuntimeControlEventResponse::error(type_error_from_message(
@@ -400,39 +399,6 @@ impl ControlState {
         RuntimeControlEventResponse::ok_with_diagnostics(emitted, diagnostics)
     }
 
-    fn apply_toggle_event(
-        &mut self,
-        node: &GraphNode,
-        silent: bool,
-        message: ControlMessage,
-        stored: ControlValue,
-    ) -> RuntimeControlEventResponse {
-        let ControlValue::Bool { value: current } = stored else {
-            return RuntimeControlEventResponse::error(format!(
-                "node {} has non-boolean toggle state",
-                node.id
-            ));
-        };
-        let silent = silent || message.selector == "set";
-        let Some(next_bool) = coerce_toggle_input(&message, current) else {
-            return RuntimeControlEventResponse::error(format!(
-                "control input {} expects bang, bool, 0/1, or on/off",
-                node.id
-            ));
-        };
-        let next = ControlValue::bool(next_bool);
-        self.values.insert(node.id.clone(), next.clone());
-        if silent {
-            RuntimeControlEventResponse::ok(Vec::new())
-        } else {
-            RuntimeControlEventResponse::ok(vec![RuntimeControlEmission {
-                node_id: node.id.clone(),
-                port_id: "value".to_owned(),
-                message: ControlMessage::from_value(next),
-            }])
-        }
-    }
-
     fn apply_operator_event(
         &mut self,
         node: &GraphNode,
@@ -486,6 +452,12 @@ impl ControlState {
                 if is_bang_message(&message) {
                     return RuntimeControlEventResponse::error(format!(
                         "control operator {}.right does not accept bang",
+                        node.id
+                    ));
+                }
+                if message.selector == "set" {
+                    return RuntimeControlEventResponse::error(format!(
+                        "control operator {}.right expects a typed numeric payload",
                         node.id
                     ));
                 }
@@ -551,15 +523,7 @@ impl RuntimeControlEventResponse {
 pub fn is_control_value_kind(kind: &str) -> bool {
     matches!(
         kind,
-        FLOAT_KIND
-            | INT_KIND
-            | UINT_KIND
-            | BOOL_KIND
-            | COLOR_KIND
-            | STRING_KIND
-            | MESSAGE_KIND
-            | COMMENT_KIND
-            | PANEL_KIND
+        FLOAT_KIND | INT_KIND | UINT_KIND | COLOR_KIND | MESSAGE_KIND | COMMENT_KIND | PANEL_KIND
     )
 }
 
@@ -636,22 +600,22 @@ fn read_named_param(node: &GraphNode, key: &str) -> Option<String> {
 
 fn data_kind_for_control_message(message: &ControlMessage) -> &'static str {
     if is_bang_message(message) {
-        return "event.bang";
+        return "value.core.bang";
     }
     match message.first_atom() {
-        Some(value) => data_kind_for_control_value(value),
-        None => "message.any",
+        Some(value) => port_type_for_control_value(value),
+        None => "value.core.message",
     }
 }
 
-fn data_kind_for_control_value(value: &ControlValue) -> &'static str {
+fn port_type_for_control_value(value: &ControlValue) -> &'static str {
     match value {
-        ControlValue::Float { .. } => "number.float",
-        ControlValue::Int { .. } => "number.int",
-        ControlValue::Uint { .. } => "number.uint",
-        ControlValue::Bool { .. } => "boolean",
-        ControlValue::String { .. } => "string",
-        ControlValue::Color { .. } => "color",
+        ControlValue::Float { .. } => "value.core.float32",
+        ControlValue::Int { .. } => "value.core.int32",
+        ControlValue::Uint { .. } => "value.core.uint32",
+        ControlValue::Bool { .. } => "value.core.bool",
+        ControlValue::String { .. } => "value.core.string",
+        ControlValue::Color { .. } => "value.core.color",
     }
 }
 
@@ -659,10 +623,10 @@ fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
     match node.kind.as_str() {
         FLOAT_KIND | INT_KIND | UINT_KIND => is_numeric_data_kind(data_kind),
         kind if is_control_operator_kind(kind) => is_numeric_data_kind(data_kind),
-        BOOL_KIND => data_kind == "boolean",
-        COLOR_KIND => data_kind == "color",
-        STRING_KIND => data_kind == "string",
-        COMMENT_KIND | PANEL_KIND => data_kind == "string" || data_kind == "message.any",
+        COLOR_KIND => data_kind == "value.core.color",
+        COMMENT_KIND | PANEL_KIND => {
+            data_kind == "value.core.string" || data_kind == "value.core.message"
+        }
         MESSAGE_KIND | BANG_KIND => is_control_message_data_kind(data_kind),
         _ => false,
     }
@@ -671,27 +635,22 @@ fn object_accepts_data_kind(node: &GraphNode, data_kind: &'static str) -> bool {
 fn is_control_message_data_kind(data_kind: &'static str) -> bool {
     matches!(
         data_kind,
-        "number.float"
-            | "number.int"
-            | "number.uint"
-            | "boolean"
-            | "color"
-            | "string"
-            | "event.bang"
-            | "message.any"
+        "value.core.float32"
+            | "value.core.int32"
+            | "value.core.uint32"
+            | "value.core.bool"
+            | "value.core.color"
+            | "value.core.string"
+            | "value.core.bang"
+            | "value.core.message"
     )
 }
 
 fn is_numeric_data_kind(data_kind: &'static str) -> bool {
-    matches!(data_kind, "number.float" | "number.int" | "number.uint")
-}
-
-fn is_toggle_widget(node: &GraphNode) -> bool {
-    node.kind == BOOL_KIND
-        && matches!(
-            node.params.get("widget").and_then(Value::as_str),
-            Some("toggle" | "checkbox")
-        )
+    matches!(
+        data_kind,
+        "value.core.float32" | "value.core.int32" | "value.core.uint32" | "value.core.bool"
+    )
 }
 
 fn is_bang_message(message: &ControlMessage) -> bool {
@@ -835,6 +794,7 @@ fn control_value_as_f64(value: &ControlValue) -> Option<f64> {
         ControlValue::Float { value, .. } => Some(sanitize_operator_number(*value)),
         ControlValue::Int { value, .. } => Some(*value as f64),
         ControlValue::Uint { value, .. } => Some(*value as f64),
+        ControlValue::Bool { value } => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
@@ -925,17 +885,13 @@ mod tests {
         let state = ControlState::from_graph(&graph(vec![
             value_node("f32", FLOAT_KIND, json!(1.25)),
             value_node("i32", INT_KIND, json!(7)),
-            value_node("bool", BOOL_KIND, json!(true)),
             value_node("rgba", COLOR_KIND, json!([0.1, 0.2, 0.3, 1.0])),
-            value_node("string", STRING_KIND, json!("ready")),
-            value_node("toggle", BOOL_KIND, json!(false)),
             value_node("message", MESSAGE_KIND, json!("perform")),
             value_node("slider", FLOAT_KIND, json!(0.75)),
-            value_node("ui_toggle", BOOL_KIND, json!(true)),
             value_node("other", "debug.sink", json!(10)),
         ]));
 
-        assert_eq!(state.values.len(), 9);
+        assert_eq!(state.values.len(), 5);
         assert!(state.channels.is_empty());
         assert_eq!(
             state.value_for_node("f32"),
@@ -947,24 +903,12 @@ mod tests {
             Some(&ControlValue::color([0.1, 0.2, 0.3, 1.0]))
         );
         assert_eq!(
-            state.value_for_node("string"),
-            Some(&ControlValue::string("ready".to_owned()))
-        );
-        assert_eq!(
-            state.value_for_node("toggle"),
-            Some(&ControlValue::bool(false))
-        );
-        assert_eq!(
             state.value_for_node("message"),
             Some(&ControlValue::string("perform".to_owned()))
         );
         assert_eq!(
             state.value_for_node("slider"),
             Some(&ControlValue::float(0.75))
-        );
-        assert_eq!(
-            state.value_for_node("ui_toggle"),
-            Some(&ControlValue::bool(true))
         );
         assert_eq!(state.value_for_node("other"), None);
     }
@@ -1006,6 +950,37 @@ mod tests {
     }
 
     #[test]
+    fn cold_typed_ports_reject_set_selector_messages() {
+        let graph = graph(vec![
+            value_node("value_1", FLOAT_KIND, json!(1.0)),
+            operator_node("add_1", OPERATOR_ADD_KIND, Some(1.0)),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let cold = state.apply_event(
+            set_value_request("value_1", "cold", ControlValue::float(32.0)),
+            &graph,
+        );
+        let right = state.apply_event(
+            set_value_request("add_1", "right", ControlValue::float(2.0)),
+            &graph,
+        );
+
+        assert!(!cold.ok);
+        assert!(cold.diagnostics[0].message.contains("value_1.cold"));
+        assert!(!right.ok);
+        assert!(right.diagnostics[0].message.contains("add_1.right"));
+        assert_eq!(
+            state.value_for_node("value_1"),
+            Some(&ControlValue::float(1.0))
+        );
+        assert_eq!(
+            state.operator_right.get("add_1"),
+            Some(&ControlValue::float(1.0))
+        );
+    }
+
+    #[test]
     fn in_updates_and_emits() {
         let graph = graph(vec![value_node("value_1", INT_KIND, json!(1))]);
         let mut state = ControlState::from_graph(&graph);
@@ -1031,8 +1006,46 @@ mod tests {
     }
 
     #[test]
+    fn numeric_controls_accept_bool_payloads_as_zero_or_one() {
+        let graph = graph(vec![
+            value_node("float_1", FLOAT_KIND, json!(0.5)),
+            value_node("int_1", INT_KIND, json!(3)),
+            value_node("uint_1", UINT_KIND, json!(4)),
+        ]);
+        let mut state = ControlState::from_graph(&graph);
+
+        let float_response = state.apply_event(
+            value_request("float_1", "in", ControlValue::bool(true)),
+            &graph,
+        );
+        let int_response = state.apply_event(
+            value_request("int_1", "cold", ControlValue::bool(false)),
+            &graph,
+        );
+        let uint_response = state.apply_event(
+            value_request("uint_1", "in", ControlValue::bool(true)),
+            &graph,
+        );
+
+        assert!(float_response.ok);
+        assert_eq!(
+            emitted_value(&float_response.emitted[0]),
+            Some(ControlValue::float(1.0))
+        );
+        assert_eq!(
+            state.value_for_node("float_1"),
+            Some(&ControlValue::float(1.0))
+        );
+        assert!(int_response.ok);
+        assert!(int_response.emitted.is_empty());
+        assert_eq!(state.value_for_node("int_1"), Some(&ControlValue::int(0)));
+        assert!(uint_response.ok);
+        assert_eq!(state.value_for_node("uint_1"), Some(&ControlValue::uint(1)));
+    }
+
+    #[test]
     fn bang_emits_stored_value_without_update() {
-        let graph = graph(vec![value_node("value_1", BOOL_KIND, json!(true))]);
+        let graph = graph(vec![value_node("value_1", FLOAT_KIND, json!(1.25))]);
         let mut state = ControlState::from_graph(&graph);
 
         let response = state.apply_event(bang_request("value_1", "in"), &graph);
@@ -1043,12 +1056,12 @@ mod tests {
             vec![RuntimeControlEmission {
                 node_id: "value_1".to_owned(),
                 port_id: "value".to_owned(),
-                message: ControlMessage::from_value(ControlValue::bool(true))
+                message: ControlMessage::from_value(ControlValue::float(1.25))
             }]
         );
         assert_eq!(
             state.value_for_node("value_1"),
-            Some(&ControlValue::bool(true))
+            Some(&ControlValue::float(1.25))
         );
     }
 
@@ -1159,11 +1172,20 @@ mod tests {
             operator_node("div_1", OPERATOR_DIV_KIND, Some(2.0)),
             operator_node("sqrt_1", OPERATOR_SQRT_KIND, None),
             operator_node("add_1", OPERATOR_ADD_KIND, Some(1.0)),
+            operator_node("bool_add", OPERATOR_ADD_KIND, Some(4.0)),
         ]);
         let mut state = ControlState::from_graph(&graph);
 
         let div = state.apply_event(value_request("div_1", "in", ControlValue::int(9)), &graph);
         let sqrt = state.apply_event(value_request("sqrt_1", "in", ControlValue::uint(9)), &graph);
+        let bool_hot = state.apply_event(
+            value_request("bool_add", "in", ControlValue::bool(true)),
+            &graph,
+        );
+        let bool_right = state.apply_event(
+            value_request("bool_add", "right", ControlValue::bool(false)),
+            &graph,
+        );
         let bad_hot = state.apply_event(
             RuntimeControlEventRequest {
                 node_id: "add_1".to_owned(),
@@ -1206,6 +1228,16 @@ mod tests {
             emitted_value(&sqrt.emitted[0]),
             Some(ControlValue::float(3.0))
         );
+        assert!(bool_hot.ok);
+        assert_eq!(
+            emitted_value(&bool_hot.emitted[0]),
+            Some(ControlValue::float(5.0))
+        );
+        assert!(bool_right.ok);
+        assert_eq!(
+            state.operator_right.get("bool_add"),
+            Some(&ControlValue::float(0.0))
+        );
         assert!(!bad_hot.ok);
         assert!(!bad_right_bang.ok);
         assert!(!bad_right_value.ok);
@@ -1219,7 +1251,10 @@ mod tests {
             state.operator_right.get("add_1"),
             Some(&ControlValue::float(1.0))
         );
-        assert_eq!(evaluate_operator("core.operator.unknown", 2.0, 3.0), 0.0);
+        assert_eq!(
+            evaluate_operator("object.core.operator.unknown", 2.0, 3.0),
+            0.0
+        );
     }
 
     #[test]
@@ -1289,138 +1324,36 @@ mod tests {
     }
 
     #[test]
-    fn toggle_bang_flips_and_emits() {
-        let graph = graph(vec![value_node("toggle_1", BOOL_KIND, json!(false))]);
+    fn control_edges_convert_bool_payloads_for_numeric_targets() {
+        let mut graph = graph(vec![
+            value_node("message_1", MESSAGE_KIND, json!("bool true")),
+            value_node("float_1", FLOAT_KIND, json!(0.0)),
+            value_node("int_1", INT_KIND, json!(0)),
+        ]);
+        graph.edges = vec![
+            edge("message_1", "out", "float_1", "in"),
+            edge("float_1", "value", "int_1", "in"),
+        ];
         let mut state = ControlState::from_graph(&graph);
 
-        let response = state.apply_event(bang_request("toggle_1", "in"), &graph);
+        let response = state.apply_event(bang_request("message_1", "in"), &graph);
 
-        assert!(response.ok);
+        assert!(response.ok, "{:?}", response.diagnostics);
         assert_eq!(
-            response.emitted,
-            vec![RuntimeControlEmission {
-                node_id: "toggle_1".to_owned(),
-                port_id: "value".to_owned(),
-                message: ControlMessage::from_value(ControlValue::bool(true))
-            }]
+            state.value_for_node("float_1"),
+            Some(&ControlValue::float(1.0))
         );
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(true))
-        );
+        assert_eq!(state.value_for_node("int_1"), Some(&ControlValue::int(1)));
     }
 
     #[test]
-    fn toggle_accepts_on_off_and_set_messages() {
-        let graph = graph(vec![
-            value_node("toggle_1", BOOL_KIND, json!(false)),
-            value_node("core_toggle_1", BOOL_KIND, json!(false)),
-        ]);
+    fn message_controls_emit_strings() {
+        let graph = graph(vec![value_node(
+            "message_1",
+            MESSAGE_KIND,
+            json!("perform"),
+        )]);
         let mut state = ControlState::from_graph(&graph);
-
-        let on = state.apply_event(
-            request("toggle_1", "in", ControlMessage::parse_text("on")),
-            &graph,
-        );
-        assert!(on.ok);
-        assert_eq!(
-            emitted_value(&on.emitted[0]),
-            Some(ControlValue::bool(true))
-        );
-
-        let set_off = state.apply_event(
-            request("toggle_1", "in", ControlMessage::parse_text("set off")),
-            &graph,
-        );
-        assert!(set_off.ok);
-        assert!(set_off.emitted.is_empty());
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(false))
-        );
-
-        let core_toggle = state.apply_event(
-            request("core_toggle_1", "in", ControlMessage::parse_text("set on")),
-            &graph,
-        );
-        assert!(core_toggle.ok);
-        assert!(core_toggle.emitted.is_empty());
-        assert_eq!(
-            state.value_for_node("core_toggle_1"),
-            Some(&ControlValue::bool(true))
-        );
-
-        let cold_toggle = state.apply_event(
-            request("core_toggle_1", "cold", ControlMessage::parse_text("off")),
-            &graph,
-        );
-        assert!(cold_toggle.ok);
-        assert!(cold_toggle.emitted.is_empty());
-        assert_eq!(
-            state.value_for_node("core_toggle_1"),
-            Some(&ControlValue::bool(false))
-        );
-
-        let float_zero = state.apply_event(
-            value_request("toggle_1", "in", ControlValue::float(0.0)),
-            &graph,
-        );
-        assert!(float_zero.ok);
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(false))
-        );
-
-        let float_one = state.apply_event(
-            value_request("toggle_1", "in", ControlValue::float(1.0)),
-            &graph,
-        );
-        assert!(float_one.ok);
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(true))
-        );
-
-        let float_mid_rejected = state.apply_event(
-            value_request("toggle_1", "in", ControlValue::float(0.5)),
-            &graph,
-        );
-        assert!(!float_mid_rejected.ok);
-        assert!(
-            float_mid_rejected.diagnostics[0]
-                .message
-                .contains("expects bang, bool, 0/1, or on/off")
-        );
-
-        let color_rejected = state.apply_event(
-            value_request("toggle_1", "in", ControlValue::color([0.0, 0.0, 0.0, 1.0])),
-            &graph,
-        );
-        assert!(!color_rejected.ok);
-        assert!(
-            color_rejected.diagnostics[0]
-                .message
-                .contains("expects bang, bool, 0/1, or on/off")
-        );
-    }
-
-    #[test]
-    fn string_and_message_controls_emit_strings() {
-        let graph = graph(vec![
-            value_node("string_1", STRING_KIND, json!("ready")),
-            value_node("message_1", MESSAGE_KIND, json!("perform")),
-        ]);
-        let mut state = ControlState::from_graph(&graph);
-
-        let string_response = state.apply_event(
-            value_request("string_1", "in", ControlValue::string("running".to_owned())),
-            &graph,
-        );
-        assert!(string_response.ok);
-        assert_eq!(
-            emitted_value(&string_response.emitted[0]),
-            Some(ControlValue::string("running".to_owned()))
-        );
 
         let message_response = state.apply_event(bang_request("message_1", "in"), &graph);
         assert!(message_response.ok);
@@ -1490,17 +1423,6 @@ mod tests {
                 .contains("does not support runtime control input port cold")
         );
 
-        let string_set = state.apply_event(
-            request("string_1", "in", ControlMessage::parse_text("set armed")),
-            &graph,
-        );
-        assert!(string_set.ok);
-        assert!(string_set.emitted.is_empty());
-        assert_eq!(
-            state.value_for_node("string_1"),
-            Some(&ControlValue::string("armed".to_owned()))
-        );
-
         let emit_in = state.apply_event(bang_request("message_1", "in"), &graph);
         assert!(emit_in.ok);
         assert_eq!(
@@ -1531,7 +1453,7 @@ mod tests {
 
         assert!(response.ok);
         assert_eq!(
-            state.channels.get("number.float:speed"),
+            state.channels.get("value.core.float32:speed"),
             Some(&ControlMessage::from_value(ControlValue::float(1.25)))
         );
         assert_eq!(
@@ -1563,7 +1485,7 @@ mod tests {
         let bang = state.apply_event(bang_request("button_1", "in"), &graph);
         assert!(bang.ok);
         assert_eq!(
-            state.channels.get("event.bang:go"),
+            state.channels.get("value.core.bang:go"),
             Some(&ControlMessage::bang())
         );
     }
@@ -1666,6 +1588,26 @@ mod tests {
         assert_eq!(
             state.value_for_node("uint_receiver"),
             Some(&ControlValue::uint(12))
+        );
+
+        let mut bool_sender = value_node("bool_sender", MESSAGE_KIND, json!("bool true"));
+        bool_sender
+            .params
+            .insert("sendName".to_owned(), json!("gate"));
+        let mut float_receiver = value_node("float_receiver", FLOAT_KIND, json!(0.0));
+        float_receiver
+            .params
+            .insert("receiveName".to_owned(), json!("gate"));
+        let bool_routing_graph = graph(vec![bool_sender, float_receiver]);
+        let mut bool_state = ControlState::from_graph(&bool_routing_graph);
+
+        let bool_response =
+            bool_state.apply_event(bang_request("bool_sender", "in"), &bool_routing_graph);
+
+        assert!(bool_response.ok, "{:?}", bool_response.diagnostics);
+        assert_eq!(
+            bool_state.value_for_node("float_receiver"),
+            Some(&ControlValue::float(1.0))
         );
     }
 
@@ -1809,7 +1751,7 @@ mod tests {
     fn object_channel_helpers_skip_missing_sources_empty_names_and_mismatched_receivers() {
         let mut sender = value_node("slider_1", FLOAT_KIND, json!(0.25));
         sender.params.insert("sendName".to_owned(), json!("   "));
-        let mut wrong_receiver = value_node("bool_1", BOOL_KIND, json!(false));
+        let mut wrong_receiver = value_node("color_1", COLOR_KIND, json!([0.0, 0.0, 0.0, 1.0]));
         wrong_receiver
             .params
             .insert("receiveName".to_owned(), json!("speed"));
@@ -1836,13 +1778,13 @@ mod tests {
         assert!(empty_name.ok);
         assert!(state.channels.is_empty());
         assert_eq!(
-            state.value_for_node("bool_1"),
-            Some(&ControlValue::bool(false))
+            state.value_for_node("color_1"),
+            Some(&ControlValue::color([0.0, 0.0, 0.0, 1.0]))
         );
 
         let mut sender = value_node("slider_2", FLOAT_KIND, json!(0.25));
         sender.params.insert("sendName".to_owned(), json!("speed"));
-        let mut wrong_receiver = value_node("bool_2", BOOL_KIND, json!(false));
+        let mut wrong_receiver = value_node("color_2", COLOR_KIND, json!([0.0, 0.0, 0.0, 1.0]));
         wrong_receiver
             .params
             .insert("receiveName".to_owned(), json!("speed"));
@@ -1861,28 +1803,25 @@ mod tests {
         assert!(
             mismatched.diagnostics[0]
                 .message
-                .contains("ignored incompatible routed number.float")
+                .contains("ignored incompatible routed value.core.float32")
         );
         assert_eq!(
-            mismatched_state.value_for_node("bool_2"),
-            Some(&ControlValue::bool(false))
+            mismatched_state.value_for_node("color_2"),
+            Some(&ControlValue::color([0.0, 0.0, 0.0, 1.0]))
         );
 
-        let mut sender = value_node("string_sender", STRING_KIND, json!("ready"));
+        let mut sender = value_node("string_sender", MESSAGE_KIND, json!("symbol new"));
         sender.params.insert("sendName".to_owned(), json!("label"));
-        let mut broken_receiver = value_node("string_receiver", STRING_KIND, json!("old"));
+        let mut broken_receiver = comment_node("comment_receiver", "old");
         broken_receiver
             .params
             .insert("receiveName".to_owned(), json!("label"));
         let rejected_receiver_graph = graph(vec![sender, broken_receiver]);
         let mut rejected_state = ControlState::from_graph(&rejected_receiver_graph);
-        rejected_state
-            .values
-            .insert("string_receiver".to_owned(), ControlValue::float(0.0));
         let rejected = rejected_state.publish_object_channel(
             &RuntimeControlEmission {
                 node_id: "string_sender".to_owned(),
-                port_id: "value".to_owned(),
+                port_id: "out".to_owned(),
                 message: ControlMessage::from_value(ControlValue::string("new".to_owned())),
             },
             &rejected_receiver_graph,
@@ -1892,11 +1831,11 @@ mod tests {
         assert!(
             rejected.diagnostics[0]
                 .message
-                .contains("rejected routed string")
+                .contains("rejected routed value.core.string")
         );
         assert_eq!(
-            rejected_state.value_for_node("string_receiver"),
-            Some(&ControlValue::float(0.0))
+            rejected_state.value_for_node("comment_receiver"),
+            Some(&ControlValue::string("old".to_owned()))
         );
 
         let mut sender = value_node("slider_3", FLOAT_KIND, json!(0.25));
@@ -1921,55 +1860,70 @@ mod tests {
         );
 
         assert_eq!(
-            data_kind_for_control_value(&ControlValue::int(1)),
-            "number.int"
+            port_type_for_control_value(&ControlValue::int(1)),
+            "value.core.int32"
         );
         assert_eq!(
-            data_kind_for_control_value(&ControlValue::uint(1)),
-            "number.uint"
+            port_type_for_control_value(&ControlValue::uint(1)),
+            "value.core.uint32"
         );
         assert_eq!(
-            data_kind_for_control_value(&ControlValue::color([1.0, 0.0, 0.0, 1.0])),
-            "color"
+            port_type_for_control_value(&ControlValue::color([1.0, 0.0, 0.0, 1.0])),
+            "value.core.color"
         );
         assert!(object_accepts_data_kind(
             &value_node("i32_1", INT_KIND, json!(0)),
-            "number.int"
+            "value.core.int32"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("f32_1", FLOAT_KIND, json!(0.0)),
+            "value.core.bool"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("i32_1", INT_KIND, json!(0)),
+            "value.core.bool"
         ));
         assert!(object_accepts_data_kind(
             &value_node("u32_1", UINT_KIND, json!(0)),
-            "number.uint"
+            "value.core.bool"
+        ));
+        assert!(object_accepts_data_kind(
+            &value_node("u32_1", UINT_KIND, json!(0)),
+            "value.core.uint32"
         ));
         assert!(object_accepts_data_kind(
             &value_node("rgba_1", COLOR_KIND, json!([1.0, 0.0, 0.0, 1.0])),
-            "color"
+            "value.core.color"
         ));
         assert!(object_accepts_data_kind(
             &value_node("message_1", MESSAGE_KIND, json!("go")),
-            "string"
+            "value.core.string"
         ));
         assert!(object_accepts_data_kind(
             &value_node("message_1", MESSAGE_KIND, json!("go")),
-            "number.float"
+            "value.core.float32"
         ));
         assert!(object_accepts_data_kind(
             &bang_node("button_1"),
-            "event.bang"
+            "value.core.bang"
         ));
         assert!(object_accepts_data_kind(
             &bang_node("button_1"),
-            "number.float"
+            "value.core.float32"
         ));
-        assert!(object_accepts_data_kind(&bang_node("button_1"), "string"));
+        assert!(object_accepts_data_kind(
+            &bang_node("button_1"),
+            "value.core.string"
+        ));
         for data_kind in [
-            "number.float",
-            "number.int",
-            "number.uint",
-            "boolean",
-            "color",
-            "string",
-            "event.bang",
-            "message.any",
+            "value.core.float32",
+            "value.core.int32",
+            "value.core.uint32",
+            "value.core.bool",
+            "value.core.color",
+            "value.core.string",
+            "value.core.bang",
+            "value.core.message",
         ] {
             assert!(
                 object_accepts_data_kind(&bang_node("button_1"), data_kind),
@@ -2220,7 +2174,6 @@ mod tests {
     fn ui_panel_controls_emit_runtime_values() {
         let graph = graph(vec![
             value_node("slider_1", FLOAT_KIND, json!(0.5)),
-            value_node("toggle_1", BOOL_KIND, json!(false)),
             bang_node("button_1"),
         ]);
         let mut state = ControlState::from_graph(&graph);
@@ -2239,17 +2192,6 @@ mod tests {
             Some(&ControlValue::float(1.25))
         );
 
-        let toggle = state.apply_event(bang_request("toggle_1", "in"), &graph);
-        assert!(toggle.ok);
-        assert_eq!(
-            emitted_value(&toggle.emitted[0]),
-            Some(ControlValue::bool(true))
-        );
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(true))
-        );
-
         let button = state.apply_event(bang_request("button_1", "in"), &graph);
         assert!(button.ok);
         assert_eq!(button.emitted[0].message, ControlMessage::bang());
@@ -2259,21 +2201,13 @@ mod tests {
     fn ui_panel_controls_reject_wrong_ports_and_types() {
         let graph = graph(vec![
             value_node("slider_1", FLOAT_KIND, json!(0.5)),
-            value_node("toggle_1", BOOL_KIND, json!(false)),
             bang_node("button_1"),
         ]);
         let mut state = ControlState::from_graph(&graph);
 
-        for request in [
-            bang_request("button_1", "value"),
-            value_request("slider_1", "cold", ControlValue::bool(true)),
-            value_request("slider_1", "in", ControlValue::bool(true)),
-            value_request("toggle_1", "value", ControlValue::float(2.0)),
-        ] {
-            let response = state.apply_event(request, &graph);
-            assert!(!response.ok);
-            assert!(response.emitted.is_empty());
-        }
+        let wrong_button_port = state.apply_event(bang_request("button_1", "value"), &graph);
+        assert!(!wrong_button_port.ok);
+        assert!(wrong_button_port.emitted.is_empty());
 
         let any_button = state.apply_event(
             value_request("button_1", "in", ControlValue::bool(true)),
@@ -2293,6 +2227,27 @@ mod tests {
             Some(&ControlValue::float(1.0))
         );
 
+        let slider_bool_cold = state.apply_event(
+            value_request("slider_1", "cold", ControlValue::bool(false)),
+            &graph,
+        );
+        assert!(slider_bool_cold.ok);
+        assert!(slider_bool_cold.emitted.is_empty());
+        assert_eq!(
+            state.value_for_node("slider_1"),
+            Some(&ControlValue::float(0.0))
+        );
+
+        let slider_bool_hot = state.apply_event(
+            value_request("slider_1", "in", ControlValue::bool(true)),
+            &graph,
+        );
+        assert!(slider_bool_hot.ok);
+        assert_eq!(
+            emitted_value(&slider_bool_hot.emitted[0]),
+            Some(ControlValue::float(1.0))
+        );
+
         let slider_bang = state.apply_event(bang_request("slider_1", "in"), &graph);
         assert!(slider_bang.ok);
         assert_eq!(
@@ -2300,11 +2255,15 @@ mod tests {
             Some(ControlValue::float(1.0))
         );
 
-        let slider_bad_bang = state.apply_event(
+        let slider_bool = state.apply_event(
             value_request("slider_1", "in", ControlValue::bool(true)),
             &graph,
         );
-        assert!(!slider_bad_bang.ok);
+        assert!(slider_bool.ok);
+        assert_eq!(
+            state.value_for_node("slider_1"),
+            Some(&ControlValue::float(1.0))
+        );
 
         let slider_other = state.apply_event(
             value_request("slider_1", "other", ControlValue::float(1.0)),
@@ -2320,25 +2279,6 @@ mod tests {
                 .message
                 .contains("has no runtime control state")
         );
-
-        let bool_toggle = state.apply_event(
-            value_request("toggle_1", "in", ControlValue::bool(true)),
-            &graph,
-        );
-        assert!(bool_toggle.ok);
-        assert_eq!(
-            state.value_for_node("toggle_1"),
-            Some(&ControlValue::bool(true))
-        );
-
-        state.values.remove("toggle_1");
-        let missing_state = state.apply_event(bang_request("toggle_1", "in"), &graph);
-        assert!(!missing_state.ok);
-        assert!(
-            missing_state.diagnostics[0]
-                .message
-                .contains("has no runtime control state")
-        );
     }
 
     #[test]
@@ -2347,7 +2287,7 @@ mod tests {
         values.insert("slider_1".to_owned(), ControlValue::float(0.5));
         let mut channels = BTreeMap::new();
         channels.insert(
-            "number.float:speed".to_owned(),
+            "value.core.float32:speed".to_owned(),
             ControlMessage::from_value(ControlValue::float(1.5)),
         );
 
@@ -2368,7 +2308,7 @@ mod tests {
                     "slider_1": { "type": "float", "representation": "f32", "value": 0.5 }
                 },
                 "channels": {
-                    "number.float:speed": {
+                    "value.core.float32:speed": {
                         "selector": "float",
                         "atoms": [{ "type": "float", "representation": "f32", "value": 1.5 }]
                     }
@@ -2424,7 +2364,10 @@ mod tests {
             selector: "clear".to_owned(),
             atoms: Vec::new(),
         };
-        assert_eq!(data_kind_for_control_message(&selector_only), "message.any");
+        assert_eq!(
+            data_kind_for_control_message(&selector_only),
+            "value.core.message"
+        );
         assert_eq!(set_message_text(&selector_only), "clear");
         assert_eq!(
             set_message_text(&ControlMessage::from_value(ControlValue::string(
@@ -2601,7 +2544,7 @@ mod tests {
         for request in [
             value_request("missing", "cold", ControlValue::float(2.0)),
             value_request("value_1", "value", ControlValue::float(2.0)),
-            value_request("value_1", "cold", ControlValue::bool(true)),
+            value_request("value_1", "cold", ControlValue::color([0.0, 0.0, 0.0, 1.0])),
             bang_request("value_1", "cold"),
         ] {
             let response = state.apply_event(request, &graph);
@@ -2616,57 +2559,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_corrupt_toggle_state_and_existing_unsupported_input_port() {
+    fn rejects_existing_unsupported_input_ports() {
         let mut graph = graph(vec![
-            value_node("toggle_1", BOOL_KIND, json!(false)),
             value_node("value_1", FLOAT_KIND, json!(1.0)),
             value_node("message_1", MESSAGE_KIND, json!("go")),
         ]);
         graph.nodes[0].ports.push(port(
-            "other",
+            "set",
             PortDirection::Input,
-            DataFlow::Event,
-            "event.bang",
+            DataFlow::Control,
+            "value.core.message",
             Some(PortActivation::Trigger),
         ));
         graph.nodes[1].ports.push(port(
-            "set",
-            PortDirection::Input,
-            DataFlow::Event,
-            "message.any",
-            Some(PortActivation::Trigger),
-        ));
-        graph.nodes[2].ports.push(port(
             "cold",
             PortDirection::Input,
-            DataFlow::Value,
-            "message.any",
+            DataFlow::Control,
+            "value.core.message",
             Some(PortActivation::Latched),
         ));
         let mut state = ControlState::from_graph(&graph);
-        state.values.insert(
-            "toggle_1".to_owned(),
-            ControlValue::string("not-bool".to_owned()),
-        );
-
-        let corrupt = state.apply_event(bang_request("toggle_1", "in"), &graph);
-        assert!(!corrupt.ok);
-        assert!(
-            corrupt.diagnostics[0]
-                .message
-                .contains("non-boolean toggle state")
-        );
-
-        state
-            .values
-            .insert("toggle_1".to_owned(), ControlValue::bool(false));
-        let unsupported = state.apply_event(bang_request("toggle_1", "other"), &graph);
-        assert!(!unsupported.ok);
-        assert!(
-            unsupported.diagnostics[0]
-                .message
-                .contains("does not support runtime control input port other")
-        );
 
         let unsupported_set = state.apply_event(
             request("value_1", "set", ControlMessage::parse_text("set 2")),
@@ -2755,20 +2667,15 @@ mod tests {
         let mut params = Map::new();
         params.insert("value".to_owned(), value);
         let ports = match kind {
-            FLOAT_KIND => stored_value_ports("number.float"),
-            INT_KIND => stored_value_ports("number.int"),
-            UINT_KIND => stored_value_ports("number.uint"),
-            BOOL_KIND => stored_value_ports("boolean"),
+            FLOAT_KIND => stored_value_ports("value.core.float32"),
+            INT_KIND => stored_value_ports("value.core.int32"),
+            UINT_KIND => stored_value_ports("value.core.uint32"),
             COLOR_KIND => stored_value_ports("color"),
-            STRING_KIND => stored_value_ports("string"),
             MESSAGE_KIND => message_ports(),
             _ => Vec::new(),
         };
         if id.contains("slider") {
             params.insert("widget".to_owned(), json!("slider"));
-        }
-        if id.contains("toggle") {
-            params.insert("widget".to_owned(), json!("toggle"));
         }
         GraphNode {
             id: id.to_owned(),
@@ -2787,24 +2694,24 @@ mod tests {
         let mut ports = vec![port(
             "in",
             PortDirection::Input,
-            DataFlow::Event,
-            "message.any",
+            DataFlow::Control,
+            "value.core.message",
             Some(PortActivation::Trigger),
         )];
         if kind != OPERATOR_SQRT_KIND {
             ports.push(port(
                 "right",
                 PortDirection::Input,
-                DataFlow::Value,
-                "number.float",
+                DataFlow::Control,
+                "value.core.float32",
                 Some(PortActivation::Latched),
             ));
         }
         ports.push(port(
             "out",
             PortDirection::Output,
-            DataFlow::Value,
-            "number.float",
+            DataFlow::Control,
+            "value.core.float32",
             None,
         ));
         GraphNode {
@@ -2827,8 +2734,8 @@ mod tests {
             ports: vec![port(
                 "in",
                 PortDirection::Input,
-                DataFlow::Event,
-                "message.any",
+                DataFlow::Control,
+                "value.core.message",
                 Some(PortActivation::Trigger),
             )],
         }
@@ -2845,8 +2752,8 @@ mod tests {
             ports: vec![port(
                 "in",
                 PortDirection::Input,
-                DataFlow::Event,
-                "message.any",
+                DataFlow::Control,
+                "value.core.message",
                 Some(PortActivation::Trigger),
             )],
         }
@@ -2862,15 +2769,15 @@ mod tests {
                 port(
                     "in",
                     PortDirection::Input,
-                    DataFlow::Event,
-                    "message.any",
+                    DataFlow::Control,
+                    "value.core.message",
                     Some(PortActivation::Trigger),
                 ),
                 port(
                     "out",
                     PortDirection::Output,
                     DataFlow::Event,
-                    "event.bang",
+                    "value.core.bang",
                     None,
                 ),
             ],
@@ -2882,21 +2789,21 @@ mod tests {
             port(
                 "in",
                 PortDirection::Input,
-                DataFlow::Event,
-                "message.any",
+                DataFlow::Control,
+                "value.core.message",
                 Some(PortActivation::Trigger),
             ),
             port(
                 "cold",
                 PortDirection::Input,
-                DataFlow::Value,
+                DataFlow::Control,
                 data_kind,
                 Some(PortActivation::Latched),
             ),
             port(
                 "value",
                 PortDirection::Output,
-                DataFlow::Value,
+                DataFlow::Control,
                 data_kind,
                 None,
             ),
@@ -2908,15 +2815,15 @@ mod tests {
             port(
                 "in",
                 PortDirection::Input,
-                DataFlow::Event,
-                "message.any",
+                DataFlow::Control,
+                "value.core.message",
                 Some(PortActivation::Trigger),
             ),
             port(
                 "out",
                 PortDirection::Output,
-                DataFlow::Event,
-                "message.any",
+                DataFlow::Control,
+                "value.core.message",
                 None,
             ),
         ]

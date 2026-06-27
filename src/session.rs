@@ -5,24 +5,27 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
-    EdgeSpecCurrent, ExecutionPlan, GraphDocument, GraphDocumentCurrent,
-    GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent, GraphPatch,
-    GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition, NodeDefinitionCurrent,
-    NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
-    Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
-    PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot, ProjectDocumentCurrent,
-    ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEventRequest,
-    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
-    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, StringOrStrings, ViewState,
+    EdgeSpecCurrent, EndpointBindingValueFormat, ExecutionPlan, GraphDocument,
+    GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent,
+    GraphPatch, GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition,
+    NodeDefinitionCurrent, NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
+    PastePlacement, PatchPath, PlanError, Port, PortActivation, PortDirection,
+    PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent, PreviewContext,
+    PreviewControlStateSnapshot, ProjectDocumentCurrent, ProjectRequestCurrent,
+    RuntimeCollaborationChange, RuntimeControlEventRequest, RuntimeControlEventResponse,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
+    RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeOperationDiagnostic,
+    RuntimeOperationEnvelope, StringOrStrings, ValueEndpointRef, ValueFormat, ViewState,
     build_execution_plan, build_execution_plan_request_current,
+    project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
-    run_dummy_execution, server::registry_from_nodes,
+    run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
 };
-const UNRESOLVED_OBJECT_NODE_KIND: &str = "core.unresolved-object";
+const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +36,7 @@ pub struct RuntimeSessionSnapshot {
     #[serde(skip)]
     pub package_registry_revision: Option<u64>,
     pub project: Option<ProjectDocumentCurrent>,
+    pub binding_formats: Vec<EndpointBindingValueFormat>,
     pub diagnostics: Vec<RuntimeDiagnostic>,
     pub plan: Option<ExecutionPlan>,
 }
@@ -57,6 +61,154 @@ impl RuntimeSessionSnapshot {
     pub fn view_state(&self) -> Option<&ViewState> {
         self.project.as_ref().map(|project| &project.view_state)
     }
+}
+
+pub(crate) fn derive_runtime_binding_formats(
+    project: Option<&ProjectDocumentCurrent>,
+) -> Vec<EndpointBindingValueFormat> {
+    let Some(project) = project else {
+        return Vec::new();
+    };
+
+    let graph = &project.graph;
+    let format_revision = runtime_binding_format_revision(graph.revision.as_str());
+    let mut binding_formats = Vec::new();
+
+    for edge in &graph.edges {
+        let Some(value_format) = value_format_for_edge(graph, edge) else {
+            continue;
+        };
+        let binding_format = EndpointBindingValueFormat {
+            binding_id: edge.id.clone(),
+            binding_epoch: 1,
+            format_revision,
+            format_digest: Some(sha256_hex_for_json(&value_format)),
+            value_format,
+            source: Some(ValueEndpointRef {
+                node_id: edge.source.node_id.clone(),
+                port_id: edge.source.port_id.clone(),
+            }),
+            target: Some(ValueEndpointRef {
+                node_id: edge.target.node_id.clone(),
+                port_id: edge.target.port_id.clone(),
+            }),
+            delivery: None,
+        };
+        if skenion_contracts::validate_endpoint_binding_value_format_v01(&binding_format).is_ok() {
+            binding_formats.push(binding_format);
+        }
+    }
+
+    binding_formats.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    binding_formats
+}
+
+fn value_format_for_edge(
+    graph: &GraphDocumentCurrent,
+    edge: &EdgeSpecCurrent,
+) -> Option<ValueFormat> {
+    let port_type = edge.resolved_type.as_deref().or_else(|| {
+        find_graph_port(graph, &edge.source.node_id, &edge.source.port_id)
+            .map(|port| port.port_type.as_str())
+    })?;
+    value_format_for_port_type(port_type)
+}
+
+fn find_graph_port<'a>(
+    graph: &'a GraphDocumentCurrent,
+    node_id: &str,
+    port_id: &str,
+) -> Option<&'a PortSpecCurrent> {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)?
+        .ports
+        .iter()
+        .find(|port| port.id == port_id)
+}
+
+fn value_format_for_port_type(port_type: &str) -> Option<ValueFormat> {
+    let value_type_id = runtime_value_type_id_for_port_type(port_type)?;
+    let value_format = ValueFormat {
+        format: runtime_value_format_label(value_type_id.as_str()).map(str::to_owned),
+        value_type_id,
+        shape: None,
+        dynamic_shape: None,
+        layout: None,
+        strides: None,
+        byte_length: None,
+        sample_rate: None,
+        channels: None,
+        channel_layout: None,
+        color_space: None,
+        color_range: None,
+        transfer: None,
+        primaries: None,
+        alpha_policy: None,
+        resource_kind: None,
+    };
+
+    if skenion_contracts::validate_value_format_v01(&value_format).is_ok() {
+        Some(value_format)
+    } else {
+        None
+    }
+}
+
+fn runtime_value_type_id_for_port_type(port_type: &str) -> Option<String> {
+    match port_type {
+        "value.core.message" => Some("value.core.message".to_owned()),
+        "value.core.float32" => Some("value.core.float32".to_owned()),
+        "value.core.int32" => Some("value.core.int32".to_owned()),
+        "value.core.uint32" => Some("value.core.uint32".to_owned()),
+        "value.core.bool" => Some("value.core.bool".to_owned()),
+        "value.core.string" => Some("value.core.string".to_owned()),
+        "value.core.color" => Some("value.core.color".to_owned()),
+        "value.core.bang" => Some("value.core.bang".to_owned()),
+        value_type if value_type.starts_with("value.") => Some(value_type.to_owned()),
+        _ => None,
+    }
+}
+
+fn runtime_value_format_label(value_type_id: &str) -> Option<&'static str> {
+    match value_type_id {
+        "value.core.float16" => Some("f16"),
+        "value.core.float32" => Some("f32"),
+        "value.core.float64" => Some("f64"),
+        "value.core.ufloat8" => Some("ufloat8"),
+        "value.core.ufloat16" => Some("ufloat16"),
+        "value.core.ufloat32" => Some("ufloat32"),
+        "value.core.ufloat64" => Some("ufloat64"),
+        "value.core.int8" => Some("i8"),
+        "value.core.int16" => Some("i16"),
+        "value.core.int32" => Some("i32"),
+        "value.core.int64" => Some("i64"),
+        "value.core.uint8" => Some("u8"),
+        "value.core.uint16" => Some("u16"),
+        "value.core.uint32" => Some("u32"),
+        "value.core.uint64" => Some("u64"),
+        "value.core.color" => Some("rgba32f"),
+        _ => None,
+    }
+}
+
+fn runtime_binding_format_revision(graph_revision: &str) -> u64 {
+    graph_revision
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
+fn sha256_hex_for_json<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("runtime binding value format should serialize");
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,6 +444,7 @@ impl RuntimeSession {
             control_revision: self.control_revision,
             package_registry_revision: self.package_registry_revision,
             project: self.project.clone(),
+            binding_formats: derive_runtime_binding_formats(self.project.as_ref()),
             diagnostics: self.diagnostics.clone(),
             plan: self.plan.clone(),
         }
@@ -334,7 +487,11 @@ impl RuntimeSession {
     ) -> RuntimeSessionResponse {
         let document = project_document_from_request_current(&request);
         if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-            let diagnostics = project_document_validation_diagnostics_current(&document, &report);
+            let mut diagnostics =
+                project_document_validation_diagnostics_current(&document, &report);
+            if let Err(runtime_diagnostics) = validate_project_request_current(&request) {
+                diagnostics.extend(runtime_diagnostics);
+            }
             return self.response(false, diagnostics, None);
         }
 
@@ -466,7 +623,7 @@ impl RuntimeSession {
         envelope: RuntimeOperationEnvelope,
     ) -> PasteGraphFragmentResponse {
         let target = envelope.request.target.clone();
-        if let Err(report) = skenion_contracts::validate_runtime_operation_envelope(&envelope) {
+        if let Err(report) = crate::validate_runtime_operation_envelope(&envelope) {
             return self.reject_paste_response(
                 target,
                 false,
@@ -948,9 +1105,16 @@ impl RuntimeSession {
             return self.patch_response(true, false, false, Vec::new());
         }
 
-        let diagnostics = unresolved_object_diagnostics(&next_graph);
         let plan =
-            build_execution_plan(&next_graph, &registry).expect("validated project should plan");
+            match build_session_execution_plan(&next_graph, &registry, "session-mutation-plan") {
+                Ok(plan) => plan,
+                Err(diagnostics) => {
+                    self.plan = None;
+                    self.diagnostics = diagnostics.clone();
+                    return self.patch_response(false, false, false, diagnostics);
+                }
+            };
+        let diagnostics = unresolved_object_diagnostics(&next_graph);
         let control_state = ControlState::from_graph(&next_graph);
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,
@@ -1798,7 +1962,7 @@ fn lower_execution_model_for_execution(
 ) -> crate::ExecutionModel {
     match model {
         skenion_contracts::ExecutionModelV01::Event => crate::ExecutionModel::Event,
-        skenion_contracts::ExecutionModelV01::Value => crate::ExecutionModel::Value,
+        skenion_contracts::ExecutionModelV01::Control => crate::ExecutionModel::Control,
         skenion_contracts::ExecutionModelV01::Frame => crate::ExecutionModel::Frame,
         skenion_contracts::ExecutionModelV01::AudioBlock => crate::ExecutionModel::AudioBlock,
         skenion_contracts::ExecutionModelV01::VideoFrame => crate::ExecutionModel::VideoFrame,
@@ -2350,6 +2514,12 @@ fn paste_graph_fragment_into_graph_current(
         .and_then(|options| options.id_conflict_policy)
         .unwrap_or(IdConflictPolicy::Remap);
 
+    let payload_identity_diagnostics =
+        payload_identity_fragment_diagnostics_current(request, &graph.revision);
+    if !payload_identity_diagnostics.is_empty() {
+        return Err((payload_identity_diagnostics, empty_id_remap()));
+    }
+
     let fragment_analysis =
         skenion_contracts::analyze_graph_fragment_v01(&request.fragment, outside_policy);
     if !fragment_analysis.ok {
@@ -2480,6 +2650,35 @@ fn paste_graph_fragment_into_graph_current(
     ))
 }
 
+fn payload_identity_fragment_diagnostics_current(
+    request: &PasteGraphFragmentRequest,
+    graph_revision: &str,
+) -> Vec<RuntimeOperationDiagnostic> {
+    request
+        .fragment
+        .nodes
+        .iter()
+        .filter(|node| is_payload_identity_node_kind_current(&node.kind))
+        .map(|node| RuntimeOperationDiagnostic {
+            severity: "error".to_owned(),
+            code: "paste.fragment.payload-node-kind".to_owned(),
+            message: format!(
+                "node {} uses payload identity {} as an executable kind",
+                node.id, node.kind
+            ),
+            path: None,
+            target: Some(request.target.clone()),
+            expected_revision: None,
+            actual_revision: Some(graph_revision.to_owned()),
+            duplicates: None,
+            nodes: Some(vec![node.id.clone()]),
+            edges: None,
+            interface_policy: None,
+            interface_detail: None,
+        })
+        .collect()
+}
+
 fn remap_edge_current(
     edge: &EdgeSpecCurrent,
     node_id_map: &BTreeMap<String, String>,
@@ -2561,29 +2760,27 @@ fn lower_port_for_execution(port: &PortSpecCurrent) -> Port {
 }
 
 fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
-    let data_kind = normalize_port_type(&port.port_type);
+    let (canonical_flow, data_kind) = current_port_type_parts(&port.port_type);
     let format = match data_kind.as_str() {
-        "number.float" => Some(StringOrStrings::One("f32".to_owned())),
-        "gpu.texture2d" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
+        "value.core.float32" => Some(StringOrStrings::One("f32".to_owned())),
+        "value.core.tensor" => Some(StringOrStrings::One("rgba8unorm".to_owned())),
         _ => None,
     };
-    let color_space = (data_kind == "gpu.texture2d").then(|| "srgb".to_owned());
+    let color_space = (data_kind == "value.core.tensor").then(|| "srgb".to_owned());
     DataType {
-        flow: match port.rate {
+        flow: canonical_flow.unwrap_or_else(|| match port.rate {
             Some(PortRateCurrent::Event) => DataFlow::Event,
             Some(PortRateCurrent::Audio) => DataFlow::Signal,
             Some(PortRateCurrent::Resource) | Some(PortRateCurrent::Io) => DataFlow::Resource,
             Some(PortRateCurrent::Control | PortRateCurrent::Render | PortRateCurrent::Gpu)
             | None => {
-                if port.port_type == "message.any" {
-                    DataFlow::Event
-                } else if data_kind == "gpu.texture2d" {
+                if data_kind == "value.core.tensor" {
                     DataFlow::Resource
                 } else {
-                    DataFlow::Value
+                    DataFlow::Control
                 }
             }
-        },
+        }),
         data_kind,
         unit: None,
         range: None,
@@ -2598,13 +2795,10 @@ fn data_type_from_port_spec(port: &PortSpecCurrent) -> DataType {
     }
 }
 
-fn normalize_port_type(port_type: &str) -> String {
+fn current_port_type_parts(port_type: &str) -> (Option<DataFlow>, String) {
     match port_type {
-        "value.number" => "number.float".to_owned(),
-        other => other
-            .strip_prefix("value.")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| other.to_owned()),
+        value_type if value_type.starts_with("value.") => (None, value_type.to_owned()),
+        other => (None, other.to_owned()),
     }
 }
 
@@ -2898,6 +3092,55 @@ fn unresolved_object_diagnostics_current(graph: &GraphDocumentCurrent) -> Vec<Ru
         .collect()
 }
 
+fn build_session_execution_plan(
+    graph: &GraphDocument,
+    registry: &NodeRegistry,
+    surface: &'static str,
+) -> Result<ExecutionPlan, Vec<RuntimeDiagnostic>> {
+    build_execution_plan(graph, registry).map_err(|error| {
+        let mut diagnostics = plan_error_diagnostics(error, surface, graph);
+        diagnostics.extend(unresolved_object_diagnostics(graph));
+        diagnostics
+    })
+}
+
+fn plan_error_diagnostics(
+    error: PlanError,
+    surface: &'static str,
+    graph: &GraphDocument,
+) -> Vec<RuntimeDiagnostic> {
+    let details = || {
+        json!({
+            "surface": surface,
+            "graphId": graph.id,
+            "graphRevision": graph.revision,
+        })
+    };
+    match error {
+        PlanError::InvalidProject(report) => report
+            .errors()
+            .iter()
+            .map(|error| {
+                RuntimeDiagnostic::structured_error(
+                    "session.plan.invalid-project",
+                    error.message.clone(),
+                    details(),
+                )
+            })
+            .collect(),
+        PlanError::Cycle { nodes } => vec![RuntimeDiagnostic::structured_error(
+            "session.plan.cycle",
+            format!("cycle detected: {nodes}"),
+            json!({
+                "surface": surface,
+                "graphId": graph.id,
+                "graphRevision": graph.revision,
+                "nodes": nodes,
+            }),
+        )],
+    }
+}
+
 fn created_at_now() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2956,6 +3199,31 @@ mod tests {
                 .message
                 .contains("no project loaded in runtime session")
         );
+    }
+
+    #[test]
+    fn session_snapshot_derives_endpoint_binding_value_formats() {
+        let mut session = RuntimeSession::default();
+
+        let response = session.load_project_current(binding_project_current());
+
+        assert!(response.ok);
+        assert_eq!(response.snapshot.binding_formats.len(), 1);
+        let binding = &response.snapshot.binding_formats[0];
+        assert_eq!(binding.binding_id, "edge_value_target");
+        assert_eq!(binding.binding_epoch, 1);
+        assert_eq!(binding.format_revision, 1);
+        assert_eq!(binding.format_digest.as_ref().map(String::len), Some(64));
+        assert_eq!(binding.value_format.value_type_id, "value.core.float32");
+        assert_eq!(binding.value_format.format.as_deref(), Some("f32"));
+        assert_eq!(binding.source.as_ref().unwrap().node_id, "value_1");
+        assert_eq!(binding.source.as_ref().unwrap().port_id, "value");
+        assert_eq!(binding.target.as_ref().unwrap().node_id, "target_1");
+        assert_eq!(binding.target.as_ref().unwrap().port_id, "cold");
+
+        let snapshot_json =
+            serde_json::to_value(&response.snapshot).expect("snapshot should serialize");
+        assert!(snapshot_json.get("bindingFormats").is_some());
     }
 
     #[test]
@@ -3158,7 +3426,7 @@ mod tests {
             session
                 .control_state_response()
                 .channels
-                .get("number.float:speed"),
+                .get("value.core.float32:speed"),
             Some(&ControlMessage::from_value(ControlValue::float(1.5)))
         );
     }
@@ -3301,8 +3569,11 @@ mod tests {
         );
         let before = session.snapshot();
 
-        let response =
-            session.apply_control_event(control_request("value_1", "in", ControlValue::bool(true)));
+        let response = session.apply_control_event(control_request(
+            "value_1",
+            "in",
+            ControlValue::color([0.0, 0.0, 0.0, 1.0]),
+        ));
 
         assert!(!response.ok);
         assert!(response.emitted.is_empty());
@@ -3553,6 +3824,44 @@ mod tests {
         assert_graph_patch_rejected(&response);
         assert_eq!(snapshot.graph_revision(), Some("1"));
         assert_eq!(snapshot.session_revision, 1);
+    }
+
+    #[test]
+    fn payload_identity_session_load_preserves_existing_project() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+
+        let mut invalid = sample_project_current();
+        invalid.graph.nodes[0].kind = "object.core.bool".to_owned();
+        let response = session.load_project_current(invalid);
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(response.snapshot.loaded());
+        assert_eq!(response.snapshot.graph_revision(), Some("1"));
+        assert_eq!(
+            response.snapshot.session_revision,
+            loaded.snapshot.session_revision
+        );
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+        );
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert!(
+            snapshot
+                .project
+                .as_ref()
+                .unwrap()
+                .graph
+                .nodes
+                .iter()
+                .all(|node| node.kind != "object.core.bool")
+        );
     }
 
     #[test]
@@ -3850,6 +4159,84 @@ mod tests {
                 .message
                 .contains("does not exist")
         );
+    }
+
+    #[test]
+    fn view_mutation_on_invalid_stored_graph_returns_diagnostics_without_panic() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        assert!(loaded.snapshot.plan.is_some());
+        let start = loaded
+            .snapshot
+            .view_state()
+            .expect("loaded view state")
+            .canvas
+            .nodes["value_1"]
+            .clone();
+        let mut moved = start.clone();
+        moved.x += 24.0;
+
+        let mut invalid_graph = session.graph().expect("loaded graph");
+        let target_node = invalid_graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "target_1")
+            .expect("sample graph should include target node");
+        let cold_port = target_node
+            .ports
+            .iter_mut()
+            .find(|port| port.id == "cold")
+            .expect("sample target should include cold inlet");
+        cold_port.data_type.data_kind = "value.core.bool".to_owned();
+        session.graph = Some(invalid_graph);
+
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.apply_mutation(RuntimeMutationRequest {
+                graph_patch: None,
+                view_patch: Some(RuntimeViewPatch {
+                    base_view_revision: loaded.snapshot.view_revision,
+                    ops: vec![RuntimeViewPatchOperation::MoveNodeView {
+                        node_id: "value_1".to_owned(),
+                        from: Some(start),
+                        to: moved,
+                    }],
+                }),
+                actor_id: None,
+                client_id: Some("studio-a".to_owned()),
+                description: Some("drag invalid stored graph".to_owned()),
+            })
+        }))
+        .expect("invalid stored graph should return diagnostics instead of panicking");
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(!response.conflict);
+        assert_eq!(
+            response.snapshot.session_revision,
+            loaded.snapshot.session_revision
+        );
+        assert_eq!(
+            response.snapshot.view_revision,
+            loaded.snapshot.view_revision
+        );
+        assert!(response.snapshot.plan.is_none());
+        assert!(
+            response.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some("session.plan.invalid-project")
+                    && diagnostic.message.contains(
+                        "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
+                    )
+            })
+        );
+        assert!(
+            response.snapshot.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains(
+                    "incompatible edge value_1:value value.core.float32 -> target_1:cold value.core.bool",
+                )
+            })
+        );
+        assert_eq!(response.history.entries.len(), 0);
     }
 
     #[test]
@@ -4228,6 +4615,31 @@ mod tests {
     }
 
     #[test]
+    fn payload_identity_paste_is_rejected_without_mutating_session() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let mut operation = paste_operation("1");
+        operation.request.fragment.nodes[0].kind = "object.core.string".to_owned();
+
+        let response = session.apply_runtime_operation(operation);
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert_eq!(
+            response.diagnostics[0].code,
+            "paste.fragment.payload-node-kind"
+        );
+        assert_eq!(response.revision_after, None);
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        let graph = session.graph().expect("graph should remain loaded");
+        assert!(!graph.nodes.iter().any(|node| node.id == "pasted_target"));
+    }
+
+    #[test]
     fn paste_graph_fragment_remaps_past_existing_generated_ids() {
         let mut session = RuntimeSession::default();
         load_sample_project(&mut session);
@@ -4540,6 +4952,98 @@ mod tests {
     }
 
     #[test]
+    fn rejected_collaboration_edge_connect_preserves_session_graph() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let target = paste_operation("1").request.target;
+
+        let response = session.apply_collaboration_change_set_current(
+            target,
+            vec![collaboration_change(json!({
+              "op": "edge.connect",
+              "changeId": "connect-output-to-output",
+              "edge": {
+                "id": "edge_invalid_direction",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "value" }
+              }
+            }))],
+            None,
+            None,
+            None,
+        );
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.edge-target-direction"))
+        );
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        let graph = session.graph().expect("graph should remain loaded");
+        assert!(graph.edges.iter().all(|edge| {
+            !(edge.from.node == "value_1"
+                && edge.from.port == "value"
+                && edge.to.node == "target_1"
+                && edge.to.port == "value")
+        }));
+        assert_eq!(graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn rejected_payload_identity_collaboration_node_add_preserves_session_graph() {
+        let mut session = RuntimeSession::default();
+        let loaded = load_sample_project(&mut session);
+        assert!(loaded.ok);
+        let target = paste_operation("1").request.target;
+
+        let response = session.apply_collaboration_change_set_current(
+            target,
+            vec![collaboration_change(json!({
+              "op": "node.add",
+              "changeId": "add-payload-identity",
+              "node": {
+                "id": "payload_identity",
+                "kind": "string",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": []
+              }
+            }))],
+            None,
+            None,
+            None,
+        );
+        let snapshot = session.snapshot();
+
+        assert!(!response.ok);
+        assert!(!response.applied);
+        assert!(
+            response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("graph.payload-node-kind"))
+        );
+        assert_eq!(snapshot.session_revision, loaded.snapshot.session_revision);
+        assert_eq!(snapshot.graph_revision(), Some("1"));
+        assert!(session.history().entries.is_empty());
+        assert!(
+            session
+                .graph()
+                .unwrap()
+                .nodes
+                .iter()
+                .all(|node| node.id != "payload_identity")
+        );
+    }
+
+    #[test]
     fn current_active_cutover_private_helpers_cover_defensive_paths() {
         let root_target = paste_operation("1").request.target;
         let change: RuntimeCollaborationChange = serde_json::from_value(json!({
@@ -4547,7 +5051,7 @@ mod tests {
           "changeId": "change-add-duplicate-value",
           "node": {
             "id": "value_1",
-            "kind": "core.float",
+            "kind": "object.core.float",
             "kindVersion": "0.1.0",
             "params": {},
             "ports": value_f32_ports_current_json()
@@ -4682,7 +5186,7 @@ mod tests {
             nodes: vec![
                 serde_json::from_value(json!({
                   "id": "missing_object",
-                  "kind": "core.unresolved-object",
+                  "kind": "object.core.unresolved",
                   "kindVersion": "0.1.0",
                   "params": {},
                   "ports": []
@@ -5077,7 +5581,7 @@ mod tests {
           "category": "Test",
           "surface": { "palette": "cyan" },
           "ports": [
-            { "id": "signal", "direction": "input", "type": "signal.audio", "rate": "audio" },
+            { "id": "signal", "direction": "input", "type": "value.core.float32", "rate": "audio" },
             { "id": "resource", "direction": "input", "type": "resource.buffer", "rate": "resource" },
             { "id": "stream", "direction": "output", "type": "io.midi", "rate": "io" }
           ],
@@ -5106,8 +5610,8 @@ mod tests {
                 skenion_contracts::ExecutionModelV01::Event,
             ),
             (
-                crate::ExecutionModel::Value,
-                skenion_contracts::ExecutionModelV01::Value,
+                crate::ExecutionModel::Control,
+                skenion_contracts::ExecutionModelV01::Control,
             ),
             (
                 crate::ExecutionModel::Frame,
@@ -5432,7 +5936,7 @@ mod tests {
         unresolved_graph.nodes.push(
             serde_json::from_value(json!({
               "id": "unresolved_current",
-              "kind": "core.unresolved-object",
+              "kind": "object.core.unresolved",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": []
@@ -5674,15 +6178,21 @@ mod tests {
     fn paste_graph_fragment_converts_current_port_rates_for_lowered_execution_nodes() {
         let cases = [
             (
-                json!({ "id": "event", "direction": "input", "type": "message.any", "rate": "event", "triggerMode": "trigger" }),
+                json!({ "id": "event", "direction": "input", "type": "value.core.bang", "rate": "event", "triggerMode": "trigger" }),
                 crate::DataFlow::Event,
-                "message.any",
+                "value.core.bang",
                 Some(crate::PortActivation::Trigger),
             ),
             (
-                json!({ "id": "audio", "direction": "output", "type": "signal.audio", "rate": "audio" }),
+                json!({ "id": "message", "direction": "input", "type": "value.core.message", "rate": "control", "triggerMode": "trigger" }),
+                crate::DataFlow::Control,
+                "value.core.message",
+                Some(crate::PortActivation::Trigger),
+            ),
+            (
+                json!({ "id": "audio", "direction": "output", "type": "value.core.float32", "rate": "audio" }),
                 crate::DataFlow::Signal,
-                "signal.audio",
+                "value.core.float32",
                 None,
             ),
             (
@@ -5698,27 +6208,27 @@ mod tests {
                 None,
             ),
             (
-                json!({ "id": "render", "direction": "input", "type": "value.number", "rate": "render", "triggerMode": "passive" }),
-                crate::DataFlow::Value,
-                "number.float",
+                json!({ "id": "render", "direction": "input", "type": "value.core.float32", "rate": "render", "triggerMode": "passive" }),
+                crate::DataFlow::Control,
+                "value.core.float32",
                 Some(crate::PortActivation::Latched),
             ),
             (
-                json!({ "id": "gpu", "direction": "input", "type": "value.color", "rate": "gpu", "triggerMode": "latched" }),
-                crate::DataFlow::Value,
-                "color",
+                json!({ "id": "gpu", "direction": "input", "type": "value.core.color", "rate": "gpu", "triggerMode": "latched" }),
+                crate::DataFlow::Control,
+                "value.core.color",
                 Some(crate::PortActivation::Latched),
             ),
             (
-                json!({ "id": "texture", "direction": "output", "type": "gpu.texture2d", "rate": "gpu" }),
+                json!({ "id": "texture", "direction": "output", "type": "value.core.tensor", "rate": "gpu" }),
                 crate::DataFlow::Resource,
-                "gpu.texture2d",
+                "value.core.tensor",
                 None,
             ),
             (
-                json!({ "id": "default", "direction": "input", "type": "message.any" }),
-                crate::DataFlow::Event,
-                "message.any",
+                json!({ "id": "default", "direction": "input", "type": "value.core.message" }),
+                crate::DataFlow::Control,
+                "value.core.message",
                 None,
             ),
         ];
@@ -5843,14 +6353,14 @@ mod tests {
           "nodes": [
             {
               "id": "value_1",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": value_f32_ports_current_json()
             },
             {
               "id": "pasted_target",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": value_f32_ports_current_json()
@@ -5880,7 +6390,7 @@ mod tests {
     fn value_node_current_json(id: &str) -> Value {
         json!({
           "id": id,
-          "kind": "core.float",
+          "kind": "object.core.float",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": value_f32_ports_current_json()
@@ -6049,14 +6559,14 @@ mod tests {
             "nodes": [
               {
                 "id": "value_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
               },
               {
                 "id": "target_1",
-                "kind": "core.float",
+                "kind": "object.core.float",
                 "kindVersion": "0.1.0",
                 "params": {},
                 "ports": value_f32_ports_current_json()
@@ -6067,7 +6577,7 @@ mod tests {
                 "id": "edge_value_target",
                 "source": { "nodeId": "value_1", "portId": "value" },
                 "target": { "nodeId": "target_1", "portId": "cold" },
-                "resolvedType": "number.float"
+                "resolvedType": "value.core.float32"
               }
             ]
           },
@@ -6075,15 +6585,15 @@ mod tests {
             {
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
-              "displayName": "Float Value",
-              "category": "Values",
+              "displayName": "Float",
+              "category": "Typed Controls",
               "ports": value_f32_ports_current_json(),
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
-              "capabilities": []
+              "capabilities": ["value.core.float32.v0.1"]
             }
           ],
           "viewState": {
@@ -6098,6 +6608,67 @@ mod tests {
           }
         }))
         .expect("current 0.1 sample project should parse")
+    }
+
+    fn binding_project_current() -> ProjectRequestCurrent {
+        serde_json::from_value(json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "minimal-binding",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "value_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_binding_ports_current_json()
+              },
+              {
+                "id": "target_1",
+                "kind": "object.core.float",
+                "kindVersion": "0.1.0",
+                "params": {},
+                "ports": value_binding_ports_current_json()
+              }
+            ],
+            "edges": [
+              {
+                "id": "edge_value_target",
+                "source": { "nodeId": "value_1", "portId": "value" },
+                "target": { "nodeId": "target_1", "portId": "cold" },
+                "resolvedType": "value.core.float32"
+              }
+            ]
+          },
+          "nodes": [
+            {
+              "schema": "skenion.node.definition",
+              "schemaVersion": "0.1.0",
+              "id": "object.core.float",
+              "version": "0.1.0",
+              "displayName": "Float",
+              "category": "Typed Controls",
+              "ports": value_binding_ports_current_json(),
+              "execution": { "model": "control" },
+              "state": { "persistent": false },
+              "permissions": [],
+              "capabilities": ["value.core.float32.v0.1"]
+            }
+          ],
+          "viewState": {
+            "schema": "skenion.view-state",
+            "schemaVersion": "0.1.0",
+            "canvas": {
+              "nodes": {
+                "value_1": { "x": 96.0, "y": 96.0 },
+                "target_1": { "x": 260.0, "y": 96.0 }
+              }
+            }
+          }
+        }))
+        .expect("binding sample project should parse")
     }
 
     fn sample_project_current_with_unresolved_definition() -> ProjectRequestCurrent {
@@ -6151,7 +6722,7 @@ mod tests {
                 "displayName": "Debug Sink",
                 "category": "Debug",
                 "ports": [],
-                "execution": { "model": "value" },
+                "execution": { "model": "control" },
                 "state": { "persistent": false },
                 "permissions": [],
                 "capabilities": []
@@ -6167,25 +6738,60 @@ mod tests {
             "id": "in",
             "direction": "input",
             "label": "In",
-            "type": "message.any",
-            "rate": "event",
+            "type": "value.core.message",
+            "rate": "control",
             "required": false,
-            "triggerMode": "trigger"
+            "triggerMode": "trigger",
+            "accepts": [
+              "value.core.float32",
+              "value.core.int32",
+              "value.core.uint32",
+              "value.core.bool",
+              "value.core.bang"
+            ],
+            "messageKeys": {
+              "accepted": ["bang", "set", "float", "int", "uint", "bool"],
+              "silent": ["set"],
+              "trigger": ["bang", "float", "int", "uint", "bool"],
+              "store": ["set", "float", "int", "uint", "bool"],
+              "emit": ["bang", "float", "int", "uint", "bool"]
+            }
           },
           {
             "id": "cold",
             "direction": "input",
             "label": "Cold",
-            "type": "number.float",
+            "type": "value.core.float32",
             "rate": "control",
             "required": false,
-            "triggerMode": "latched"
+            "triggerMode": "passive"
           },
           {
             "id": "value",
             "direction": "output",
             "label": "Value",
-            "type": "number.float",
+            "type": "value.core.float32",
+            "rate": "control"
+          }
+        ])
+    }
+
+    fn value_binding_ports_current_json() -> Value {
+        json!([
+          {
+            "id": "cold",
+            "direction": "input",
+            "label": "Cold",
+            "type": "value.core.float32",
+            "rate": "control",
+            "required": false,
+            "triggerMode": "passive"
+          },
+          {
+            "id": "value",
+            "direction": "output",
+            "label": "Value",
+            "type": "value.core.float32",
             "rate": "control"
           }
         ])
@@ -6194,7 +6800,7 @@ mod tests {
     fn unresolved_node_json(id: &str, object_text: &str) -> Value {
         json!({
           "id": id,
-          "kind": "core.unresolved-object",
+          "kind": "object.core.unresolved",
           "kindVersion": "0.1.0",
           "params": {
             "objectText": object_text,
@@ -6209,7 +6815,7 @@ mod tests {
         json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.unresolved-object",
+          "id": "object.core.unresolved",
           "version": "0.1.0",
           "displayName": "Unresolved Object",
           "category": "Diagnostics",

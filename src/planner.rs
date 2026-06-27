@@ -244,7 +244,7 @@ fn plan_edge(edge: &Edge) -> PlanEdge {
 fn execution_model_label(model: &ExecutionModel) -> &'static str {
     match model {
         ExecutionModel::Event => "event",
-        ExecutionModel::Value => "value",
+        ExecutionModel::Control => "control",
         ExecutionModel::Frame => "frame",
         ExecutionModel::AudioBlock => "audio_block",
         ExecutionModel::VideoFrame => "video_frame",
@@ -268,14 +268,14 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.float",
+              "id": "object.core.float",
               "version": "0.1.0",
               "displayName": "Float",
               "category": "Core",
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ],
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
               "capabilities": []
@@ -283,15 +283,15 @@ mod tests {
             json!({
               "schema": "skenion.node.definition",
               "schemaVersion": "0.1.0",
-              "id": "core.pass-float",
+              "id": "object.core.pass-float",
               "version": "0.1.0",
               "displayName": "Pass Float",
               "category": "Core",
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ],
-              "execution": { "model": "value" },
+              "execution": { "model": "control" },
               "state": { "persistent": false },
               "permissions": [],
               "capabilities": []
@@ -311,11 +311,11 @@ mod tests {
     fn graph_node(id: &str) -> serde_json::Value {
         json!({
           "id": id,
-          "kind": "core.float",
+          "kind": "object.core.float",
           "kindVersion": "0.1.0",
           "params": {},
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
           ]
         })
     }
@@ -330,21 +330,21 @@ mod tests {
           "nodes": [
             {
               "id": "value",
-              "kind": "core.float",
+              "kind": "object.core.float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "pass",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(plan.nodes[1].node_id, "pass");
         assert_eq!(plan.groups[0].node_ids, vec!["value", "pass"]);
         assert_eq!(plan.edges[0].from_node, "value");
-        assert!(format_plan_text(&plan).contains("model=value"));
+        assert!(format_plan_text(&plan).contains("model=control"));
     }
 
     #[test]
@@ -387,22 +387,22 @@ mod tests {
           "nodes": [
             {
               "id": "a",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             },
             {
               "id": "b",
-              "kind": "core.pass-float",
+              "kind": "object.core.pass-float",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "in", "direction": "input", "type": { "flow": "value", "dataKind": "number.float" }, "activation": "latched" },
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "number.float" } }
+                { "id": "in", "direction": "input", "type": { "flow": "control", "dataKind": "value.core.float32" }, "activation": "latched" },
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.float32" } }
               ]
             }
           ],
@@ -457,7 +457,7 @@ mod tests {
     fn formats_all_execution_model_labels() {
         let models = [
             ExecutionModel::Event,
-            ExecutionModel::Value,
+            ExecutionModel::Control,
             ExecutionModel::Frame,
             ExecutionModel::AudioBlock,
             ExecutionModel::VideoFrame,
@@ -471,7 +471,7 @@ mod tests {
             .enumerate()
             .map(|(order, execution_model)| PlanNode {
                 node_id: format!("node-{order}"),
-                kind: "core.node".to_owned(),
+                kind: "object.core.node".to_owned(),
                 kind_version: "0.1.0".to_owned(),
                 execution_model: execution_model.clone(),
                 order,
@@ -497,7 +497,7 @@ mod tests {
 
         for label in [
             "event",
-            "value",
+            "control",
             "frame",
             "audio_block",
             "video_frame",

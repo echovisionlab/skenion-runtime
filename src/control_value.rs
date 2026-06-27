@@ -3,24 +3,22 @@ use serde_json::Value;
 
 use crate::GraphNode;
 
-pub const FLOAT_KIND: &str = "core.float";
-pub const INT_KIND: &str = "core.int";
-pub const UINT_KIND: &str = "core.uint";
-pub const BOOL_KIND: &str = "core.bool";
-pub const COLOR_KIND: &str = "core.color";
-pub const STRING_KIND: &str = "core.string";
-pub const BANG_KIND: &str = "core.bang";
-pub const MESSAGE_KIND: &str = "core.message";
-pub const COMMENT_KIND: &str = "core.comment";
-pub const PANEL_KIND: &str = "core.panel";
-pub const OPERATOR_ADD_KIND: &str = "core.operator.add";
-pub const OPERATOR_SUB_KIND: &str = "core.operator.sub";
-pub const OPERATOR_MUL_KIND: &str = "core.operator.mul";
-pub const OPERATOR_DIV_KIND: &str = "core.operator.div";
-pub const OPERATOR_POW_KIND: &str = "core.operator.pow";
-pub const OPERATOR_MIN_KIND: &str = "core.operator.min";
-pub const OPERATOR_MAX_KIND: &str = "core.operator.max";
-pub const OPERATOR_SQRT_KIND: &str = "core.operator.sqrt";
+pub const FLOAT_KIND: &str = "object.core.float";
+pub const INT_KIND: &str = "object.core.int";
+pub const UINT_KIND: &str = "object.core.uint";
+pub const COLOR_KIND: &str = "object.core.color";
+pub const BANG_KIND: &str = "object.core.bang";
+pub const MESSAGE_KIND: &str = "object.core.message";
+pub const COMMENT_KIND: &str = "object.core.comment";
+pub const PANEL_KIND: &str = "object.core.panel";
+pub const OPERATOR_ADD_KIND: &str = "object.core.operator.add";
+pub const OPERATOR_SUB_KIND: &str = "object.core.operator.sub";
+pub const OPERATOR_MUL_KIND: &str = "object.core.operator.mul";
+pub const OPERATOR_DIV_KIND: &str = "object.core.operator.div";
+pub const OPERATOR_POW_KIND: &str = "object.core.operator.pow";
+pub const OPERATOR_MIN_KIND: &str = "object.core.operator.min";
+pub const OPERATOR_MAX_KIND: &str = "object.core.operator.max";
+pub const OPERATOR_SQRT_KIND: &str = "object.core.operator.sqrt";
 
 pub const DEFAULT_FLOAT_REPRESENTATION: &str = "f32";
 pub const DEFAULT_INT_REPRESENTATION: &str = "i32";
@@ -112,15 +110,12 @@ impl ControlValue {
                 representation: read_representation_param(node, DEFAULT_UINT_REPRESENTATION),
                 value: read_u64_param(node).unwrap_or(0),
             }),
-            BOOL_KIND => Some(Self::bool(read_bool_param(node).unwrap_or(false))),
             COLOR_KIND => Some(Self::Color {
                 representation: read_representation_param(node, DEFAULT_COLOR_REPRESENTATION),
                 color_space: read_color_space_param(node),
                 value: read_rgba_param(node).unwrap_or([1.0, 1.0, 1.0, 1.0]),
             }),
-            STRING_KIND | MESSAGE_KIND => {
-                Some(Self::string(read_string_param(node).unwrap_or_default()))
-            }
+            MESSAGE_KIND => Some(Self::string(read_string_param(node).unwrap_or_default())),
             COMMENT_KIND => Some(Self::string(
                 node.params
                     .get("text")
@@ -143,12 +138,14 @@ impl ControlValue {
 
     pub fn kind_label(&self) -> String {
         match self {
-            Self::Float { representation, .. } => format!("number.float/{representation}"),
-            Self::Int { representation, .. } => format!("number.int/{representation}"),
-            Self::Uint { representation, .. } => format!("number.uint/{representation}"),
-            Self::Bool { .. } => "boolean".to_owned(),
-            Self::String { .. } => "string".to_owned(),
-            Self::Color { representation, .. } => format!("color/{representation}"),
+            Self::Float { representation, .. } => {
+                format!("value.core.float32/{representation}")
+            }
+            Self::Int { representation, .. } => format!("value.core.int32/{representation}"),
+            Self::Uint { representation, .. } => format!("value.core.uint32/{representation}"),
+            Self::Bool { .. } => "value.core.bool".to_owned(),
+            Self::String { .. } => "value.core.string".to_owned(),
+            Self::Color { representation, .. } => format!("value.core.color/{representation}"),
         }
     }
 
@@ -444,10 +441,6 @@ fn read_u64_param(node: &GraphNode) -> Option<u64> {
     node.params.get("value").and_then(Value::as_u64)
 }
 
-fn read_bool_param(node: &GraphNode) -> Option<bool> {
-    node.params.get("value").and_then(Value::as_bool)
-}
-
 fn read_string_param(node: &GraphNode) -> Option<&str> {
     node.params.get("value").and_then(Value::as_str)
 }
@@ -719,20 +712,8 @@ mod tests {
             Some(ControlValue::uint(7))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
-            Some(ControlValue::bool(true))
-        );
-        assert_eq!(
             ControlValue::for_node_default(&node(COLOR_KIND, json!([0.1, 0.2, 0.3, 1.0]))),
             Some(ControlValue::color([0.1, 0.2, 0.3, 1.0]))
-        );
-        assert_eq!(
-            ControlValue::for_node_default(&node(STRING_KIND, json!("ready"))),
-            Some(ControlValue::string("ready".to_owned()))
-        );
-        assert_eq!(
-            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
-            Some(ControlValue::bool(true))
         );
         assert_eq!(
             ControlValue::for_node_default(&node(MESSAGE_KIND, json!("perform"))),
@@ -754,10 +735,6 @@ mod tests {
             ControlValue::for_node_default(&node(FLOAT_KIND, json!(0.75))),
             Some(ControlValue::float(0.75))
         );
-        assert_eq!(
-            ControlValue::for_node_default(&node(BOOL_KIND, json!(true))),
-            Some(ControlValue::bool(true))
-        );
     }
 
     #[test]
@@ -775,15 +752,11 @@ mod tests {
             Some(ControlValue::uint(0))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(BOOL_KIND, json!("bad"))),
-            Some(ControlValue::bool(false))
-        );
-        assert_eq!(
             ControlValue::for_node_default(&node(COLOR_KIND, json!([0.1, 0.2]))),
             Some(ControlValue::color([1.0, 1.0, 1.0, 1.0]))
         );
         assert_eq!(
-            ControlValue::for_node_default(&node(STRING_KIND, json!(false))),
+            ControlValue::for_node_default(&node(MESSAGE_KIND, json!(false))),
             Some(ControlValue::string(String::new()))
         );
         assert_eq!(
@@ -814,14 +787,20 @@ mod tests {
 
     #[test]
     fn reports_kind_labels_for_diagnostics() {
-        assert_eq!(ControlValue::float(1.0).kind_label(), "number.float/f32");
-        assert_eq!(ControlValue::int(1).kind_label(), "number.int/i32");
-        assert_eq!(ControlValue::uint(1).kind_label(), "number.uint/u32");
-        assert_eq!(ControlValue::bool(true).kind_label(), "boolean");
-        assert_eq!(ControlValue::string("x".to_owned()).kind_label(), "string");
+        assert_eq!(
+            ControlValue::float(1.0).kind_label(),
+            "value.core.float32/f32"
+        );
+        assert_eq!(ControlValue::int(1).kind_label(), "value.core.int32/i32");
+        assert_eq!(ControlValue::uint(1).kind_label(), "value.core.uint32/u32");
+        assert_eq!(ControlValue::bool(true).kind_label(), "value.core.bool");
+        assert_eq!(
+            ControlValue::string("x".to_owned()).kind_label(),
+            "value.core.string"
+        );
         assert_eq!(
             ControlValue::color([0.0, 0.0, 0.0, 1.0]).kind_label(),
-            "color/rgba32f"
+            "value.core.color/rgba32f"
         );
         assert_eq!(ControlMessage::bang().selector, "bang");
     }

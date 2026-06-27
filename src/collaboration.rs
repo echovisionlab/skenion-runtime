@@ -4,14 +4,14 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use axum::response::sse::Event;
-use skenion_contracts::{
+use crate::{
     RuntimeCollaborationEventEnvelope, RuntimeCollaborationEventKind,
     RuntimeCollaborationEventPayload, RuntimeCollaborationOperationResult,
     RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationSelectionEnvelope,
     RuntimeEventReplayGap, RuntimeEventReplayGapReason, RuntimeEventReplayMetadata,
     validate_runtime_collaboration_event_envelope,
 };
+use axum::response::sse::Event;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -20,6 +20,7 @@ use crate::Edge;
 use crate::runtime_time::created_at_now;
 
 pub const COLLABORATION_EVENT_REPLAY_LIMIT: usize = 256;
+const COLLABORATION_PRESENCE_RETENTION_MULTIPLIER: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeCollaborationReplay {
@@ -83,17 +84,21 @@ impl RuntimeCollaborationLog {
     }
 
     pub fn remember_result(&self, result: RuntimeCollaborationOperationResult) {
-        self.idempotency_results
+        let mut idempotency_results = self
+            .idempotency_results
             .lock()
-            .expect("runtime collaboration idempotency lock should not be poisoned")
-            .insert(result.idempotency_key.clone(), result);
+            .expect("runtime collaboration idempotency lock should not be poisoned");
+        idempotency_results.insert(result.idempotency_key.clone(), result);
+        Self::prune_idempotency_results_locked(&mut idempotency_results, self.replay_limit.max(1));
     }
 
     pub fn has_idempotency_key(&self, idempotency_key: &str) -> bool {
-        self.idempotency_results
+        let mut idempotency_results = self
+            .idempotency_results
             .lock()
-            .expect("runtime collaboration idempotency lock should not be poisoned")
-            .contains_key(idempotency_key)
+            .expect("runtime collaboration idempotency lock should not be poisoned");
+        Self::prune_idempotency_results_locked(&mut idempotency_results, self.replay_limit.max(1));
+        idempotency_results.contains_key(idempotency_key)
     }
 
     #[cfg(test)]
@@ -153,10 +158,14 @@ impl RuntimeCollaborationLog {
         presence: RuntimeCollaborationPresenceEnvelope,
     ) -> RuntimeCollaborationEventEnvelope {
         let session_id = presence.session_id.clone();
-        self.presence
+        let mut presence_entries = self
+            .presence
             .lock()
-            .expect("runtime collaboration presence lock should not be poisoned")
-            .insert(presence.participant_id.clone(), presence.clone());
+            .expect("runtime collaboration presence lock should not be poisoned");
+        Self::prune_presence_locked(&mut presence_entries, self.replay_limit.max(1));
+        presence_entries.insert(presence.participant_id.clone(), presence.clone());
+        Self::prune_presence_locked(&mut presence_entries, self.replay_limit.max(1));
+        drop(presence_entries);
         let event = self.event(
             &session_id,
             sequence,
@@ -192,6 +201,7 @@ impl RuntimeCollaborationLog {
     }
 
     pub fn capture_replay(&self, after: Option<u64>) -> RuntimeCollaborationReplay {
+        self.prune_presence();
         let high_water_sequence = self
             .latest_stored_sequence()
             .unwrap_or_else(|| self.current_sequence());
@@ -317,6 +327,105 @@ impl RuntimeCollaborationLog {
             .back()
             .map(|event| event.sequence)
     }
+
+    fn prune_presence(&self) {
+        let mut presence = self
+            .presence
+            .lock()
+            .expect("runtime collaboration presence lock should not be poisoned");
+        Self::prune_presence_locked(&mut presence, self.replay_limit.max(1));
+    }
+
+    fn prune_presence_locked(
+        presence: &mut BTreeMap<String, RuntimeCollaborationPresenceEnvelope>,
+        replay_limit: usize,
+    ) {
+        let now = created_at_now();
+        presence.retain(|_, presence| collaboration_timestamp_after(&presence.expires_at, &now));
+        if presence.len() <= replay_limit * COLLABORATION_PRESENCE_RETENTION_MULTIPLIER {
+            return;
+        }
+
+        let retention_limit = replay_limit * COLLABORATION_PRESENCE_RETENTION_MULTIPLIER;
+        let mut oldest = presence
+            .iter()
+            .map(|(participant_id, presence)| (presence.updated_at.clone(), participant_id.clone()))
+            .collect::<Vec<_>>();
+        oldest.sort();
+        for (_, participant_id) in oldest
+            .into_iter()
+            .take(presence.len().saturating_sub(retention_limit))
+        {
+            presence.remove(&participant_id);
+        }
+    }
+
+    fn prune_idempotency_results_locked(
+        idempotency_results: &mut BTreeMap<String, RuntimeCollaborationOperationResult>,
+        retention_limit: usize,
+    ) {
+        if idempotency_results.len() <= retention_limit {
+            return;
+        }
+
+        let mut oldest = idempotency_results
+            .iter()
+            .map(|(idempotency_key, result)| (result.created_at.clone(), idempotency_key.clone()))
+            .collect::<Vec<_>>();
+        oldest.sort();
+        for (_, idempotency_key) in oldest
+            .into_iter()
+            .take(idempotency_results.len().saturating_sub(retention_limit))
+        {
+            idempotency_results.remove(&idempotency_key);
+        }
+    }
+}
+
+fn collaboration_timestamp_after(left: &str, right: &str) -> bool {
+    match (
+        collaboration_timestamp_millis(left),
+        collaboration_timestamp_millis(right),
+    ) {
+        (Some(left), Some(right)) => left > right,
+        _ => left > right,
+    }
+}
+
+fn collaboration_timestamp_millis(value: &str) -> Option<u128> {
+    if let Some(millis) = value.strip_prefix("unix-ms:") {
+        return millis.parse().ok();
+    }
+    parse_contract_utc_millis(value)
+}
+
+fn parse_contract_utc_millis(value: &str) -> Option<u128> {
+    let year = value.get(0..4)?.parse::<i64>().ok()?;
+    let month = value.get(5..7)?.parse::<i64>().ok()?;
+    let day = value.get(8..10)?.parse::<i64>().ok()?;
+    let hour = value.get(11..13)?.parse::<i64>().ok()?;
+    let minute = value.get(14..16)?.parse::<i64>().ok()?;
+    let second = value.get(17..19)?.parse::<i64>().ok()?;
+    let millis = value
+        .get(20..23)
+        .and_then(|millis| millis.parse::<i64>().ok())
+        .unwrap_or_default();
+    let days = days_since_unix_epoch(year, month, day)?;
+    let total_millis = (((days * 24 + hour) * 60 + minute) * 60 + second) * 1_000 + millis;
+    (total_millis >= 0).then_some(total_millis as u128)
+}
+
+fn days_since_unix_epoch(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }
 
 pub fn collaboration_event(event: RuntimeCollaborationEventEnvelope) -> Result<Event, Infallible> {
@@ -374,10 +483,8 @@ fn collaboration_gap_event(
     event
 }
 
-fn collaboration_event_causal(
-    sequence: u64,
-) -> skenion_contracts::RuntimeCollaborationCausalMetadata {
-    skenion_contracts::RuntimeCollaborationCausalMetadata {
+fn collaboration_event_causal(sequence: u64) -> crate::RuntimeCollaborationCausalMetadata {
+    crate::RuntimeCollaborationCausalMetadata {
         base_revision: sequence.to_string(),
         base_sequence: sequence,
         vector: BTreeMap::from([("runtime".to_owned(), sequence)]),
@@ -387,12 +494,12 @@ fn collaboration_event_causal(
 
 #[cfg(test)]
 mod tests {
-    use skenion_contracts::{
-        GraphTargetRef, PatchPath, RuntimeCollaborationCursor, RuntimeCollaborationPresence,
-        RuntimeCollaborationPresenceEnvelope, RuntimeCollaborationPresenceState,
-        RuntimeCollaborationSelection, RuntimeCollaborationSelectionEnvelope,
-        RuntimeCollaborationSelectionRange, RuntimeEventReplayGapReason,
-        validate_runtime_collaboration_event_envelope,
+    use crate::{
+        GraphTargetRef, PatchPath, RuntimeCollaborationCursor, RuntimeCollaborationOperationStatus,
+        RuntimeCollaborationPresence, RuntimeCollaborationPresenceEnvelope,
+        RuntimeCollaborationPresenceState, RuntimeCollaborationSelection,
+        RuntimeCollaborationSelectionEnvelope, RuntimeCollaborationSelectionRange,
+        RuntimeEventReplayGapReason, validate_runtime_collaboration_event_envelope,
     };
 
     use super::*;
@@ -459,6 +566,27 @@ mod tests {
         }
     }
 
+    fn operation_result(
+        idempotency_key: &str,
+        created_at: &str,
+    ) -> RuntimeCollaborationOperationResult {
+        RuntimeCollaborationOperationResult {
+            schema: "skenion.runtime.collaboration.operation-result".to_owned(),
+            schema_version: "0.1.0".to_owned(),
+            session_id: "default".to_owned(),
+            operation_id: format!("op-{idempotency_key}"),
+            participant_id: "participant-a".to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            status: RuntimeCollaborationOperationStatus::Accepted,
+            causal: collaboration_event_causal(1),
+            ack: None,
+            nack: None,
+            rebase: None,
+            diagnostics: Vec::new(),
+            created_at: created_at.to_owned(),
+        }
+    }
+
     #[test]
     fn edge_id_map_forgets_direct_and_incident_edges() {
         let log = RuntimeCollaborationLog::new(4);
@@ -472,6 +600,55 @@ mod tests {
 
         log.forget_incident_edge_ids("target");
         assert!(log.edge_by_id("edge-b").is_none());
+    }
+
+    #[test]
+    fn idempotency_results_are_bounded_by_replay_limit() {
+        let log = RuntimeCollaborationLog::new(2);
+
+        log.remember_result(operation_result("idem-a", "2026-06-22T00:00:00.000Z"));
+        log.remember_result(operation_result("idem-b", "2026-06-22T00:00:01.000Z"));
+        log.remember_result(operation_result("idem-c", "2026-06-22T00:00:02.000Z"));
+
+        let idempotency_results = log
+            .idempotency_results
+            .lock()
+            .expect("runtime collaboration idempotency lock should not be poisoned");
+        assert_eq!(idempotency_results.len(), 2);
+        assert!(!idempotency_results.contains_key("idem-a"));
+        assert!(idempotency_results.contains_key("idem-b"));
+        assert!(idempotency_results.contains_key("idem-c"));
+    }
+
+    #[test]
+    fn presence_is_ttl_pruned_and_count_bounded() {
+        let log = RuntimeCollaborationLog::new(1);
+        let mut expired = presence("participant-expired");
+        expired.expires_at = "2020-01-01T00:00:00.000Z".to_owned();
+        let mut active_a = presence("participant-a");
+        active_a.updated_at = "2999-01-01T00:00:00.000Z".to_owned();
+        active_a.expires_at = "2999-01-01T00:05:00.000Z".to_owned();
+        let mut active_b = presence("participant-b");
+        active_b.updated_at = "2999-01-01T00:00:01.000Z".to_owned();
+        active_b.expires_at = "2999-01-01T00:05:01.000Z".to_owned();
+        let mut active_c = presence("participant-c");
+        active_c.updated_at = "2999-01-01T00:00:02.000Z".to_owned();
+        active_c.expires_at = "2999-01-01T00:05:02.000Z".to_owned();
+
+        log.publish_presence(1, expired);
+        log.publish_presence(2, active_a);
+        log.publish_presence(3, active_b);
+        log.publish_presence(4, active_c);
+
+        let presence = log
+            .presence
+            .lock()
+            .expect("runtime collaboration presence lock should not be poisoned");
+        assert_eq!(presence.len(), 2);
+        assert!(!presence.contains_key("participant-expired"));
+        assert!(!presence.contains_key("participant-a"));
+        assert!(presence.contains_key("participant-b"));
+        assert!(presence.contains_key("participant-c"));
     }
 
     #[test]

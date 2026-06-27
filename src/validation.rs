@@ -48,7 +48,21 @@ impl fmt::Display for ValidationReport {
 impl Error for ValidationReport {}
 
 pub fn validate_node_definition(definition: &NodeDefinition) -> Result<(), ValidationReport> {
-    schema_version_check("node definition", &definition.schema_version)
+    let mut errors = Vec::new();
+    if let Err(report) = schema_version_check("node definition", &definition.schema_version) {
+        errors.extend(report.errors);
+    }
+    if is_payload_identity_node_kind(definition.id.as_str()) {
+        errors.push(ValidationError {
+            message: format!("payload identity node definition id: {}", definition.id),
+        });
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationReport::from_errors(errors))
+    }
 }
 
 pub fn validate_graph_document(graph: &GraphDocument) -> Result<(), ValidationReport> {
@@ -62,6 +76,14 @@ pub fn validate_graph_document(graph: &GraphDocument) -> Result<(), ValidationRe
         if !seen.insert(node.id.as_str()) {
             errors.push(ValidationError {
                 message: format!("duplicate node id: {}", node.id),
+            });
+        }
+        if is_payload_identity_node_kind(node.kind.as_str()) {
+            errors.push(ValidationError {
+                message: format!(
+                    "node {} uses payload identity {} as an executable kind",
+                    node.id, node.kind
+                ),
             });
         }
     }
@@ -81,6 +103,26 @@ fn schema_version_check(surface: &str, schema_version: &str) -> Result<(), Valid
             "{surface} schemaVersion must be 0.1.0, received {schema_version}"
         )))
     }
+}
+
+fn is_payload_identity_node_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "value"
+            | "data"
+            | "payload"
+            | "bool"
+            | "string"
+            | "object.core.bool"
+            | "object.core.string"
+            | "value.core.message"
+            | "value.core.bang"
+            | "value.core.string"
+            | "value.core.tensor"
+    ) || kind.starts_with("value.")
+        || kind.starts_with("data.")
+        || kind.starts_with("payload.")
+        || kind.starts_with("control.")
 }
 
 pub fn apply_graph_patch(
@@ -234,14 +276,14 @@ mod tests {
         let definition: NodeDefinition = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "0.1.0",
-          "id": "core.wrapper",
+          "id": "object.core.wrapper",
           "version": "0.1.0",
           "displayName": "Wrapper",
           "category": "Core",
           "ports": [
-            { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+            { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
           ],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -255,11 +297,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": {},
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -267,8 +309,8 @@ mod tests {
         }))
         .unwrap();
         let boolean_value = DataType {
-            flow: crate::DataFlow::Value,
-            data_kind: "boolean".to_owned(),
+            flow: crate::DataFlow::Control,
+            data_kind: "value.core.bool".to_owned(),
             unit: None,
             range: None,
             shape: None,
@@ -284,7 +326,54 @@ mod tests {
         assert!(validate_node_definition(&definition).is_ok());
         assert!(validate_graph_document(&graph).is_ok());
         assert!(compatible_data_types(&boolean_value, &boolean_value));
-        assert_eq!(type_label(&boolean_value), "value<boolean>");
+        assert_eq!(type_label(&boolean_value), "control<value.core.bool>");
+    }
+
+    #[test]
+    fn rejects_payload_identity_node_kinds_and_definition_ids() {
+        for payload_identity in [
+            "object.core.bool",
+            "object.core.string",
+            "bool",
+            "string",
+            "value.number",
+            "value.core.message",
+            "value.core.bang",
+            "value.core.string",
+            "value.core.tensor",
+        ] {
+            let definition: NodeDefinition = serde_json::from_value(json!({
+                "schema": "skenion.node.definition",
+                "schemaVersion": "0.1.0",
+                "id": payload_identity,
+                "version": "0.1.0",
+                "displayName": "Payload Identity",
+                "category": "Core",
+                "ports": [],
+                "execution": { "model": "control" },
+                "state": { "persistent": false },
+                "permissions": [],
+                "capabilities": []
+            }))
+            .unwrap();
+            let definition_report = validate_node_definition(&definition)
+                .expect_err("payload identity definition id should fail");
+            assert!(
+                definition_report
+                    .to_string()
+                    .contains("payload identity node definition id"),
+                "{payload_identity}: {definition_report}"
+            );
+
+            let mut graph = patch_graph();
+            graph.nodes[0].kind = payload_identity.to_owned();
+            let graph_report = validate_graph_document(&graph)
+                .expect_err("payload identity graph node kind should fail");
+            assert!(
+                graph_report.to_string().contains("uses payload identity"),
+                "{payload_identity}: {graph_report}"
+            );
+        }
     }
 
     #[test]
@@ -292,12 +381,12 @@ mod tests {
         let invalid: NodeDefinition = serde_json::from_value(json!({
           "schema": "skenion.node.definition",
           "schemaVersion": "9.9.9",
-          "id": "core.invalid",
+          "id": "object.core.invalid",
           "version": "0.1.0",
           "displayName": "Invalid",
           "category": "Core",
           "ports": [],
-          "execution": { "model": "value" },
+          "execution": { "model": "control" },
           "state": { "persistent": false },
           "permissions": [],
           "capabilities": []
@@ -320,11 +409,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -358,11 +447,11 @@ mod tests {
           "nodes": [
             {
               "id": "node",
-              "kind": "core.wrapper",
+              "kind": "object.core.wrapper",
               "kindVersion": "0.1.0",
               "params": { "value": 0.5 },
               "ports": [
-                { "id": "out", "direction": "output", "type": { "flow": "value", "dataKind": "boolean" } }
+                { "id": "out", "direction": "output", "type": { "flow": "control", "dataKind": "value.core.bool" } }
               ]
             }
           ],
@@ -655,7 +744,7 @@ mod tests {
     fn patch_node(id: &str) -> GraphNode {
         GraphNode {
             id: id.to_owned(),
-            kind: "core.wrapper".to_owned(),
+            kind: "object.core.wrapper".to_owned(),
             kind_version: "0.1.0".to_owned(),
             params: serde_json::Map::new(),
             ports: Vec::new(),
