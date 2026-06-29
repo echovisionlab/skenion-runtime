@@ -1,8 +1,4 @@
-use std::{
-    convert::Infallible,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json, Router,
@@ -21,7 +17,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use serde::Serialize;
 use tokio_stream::{
     Stream, StreamExt,
     wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
@@ -29,18 +24,14 @@ use tokio_stream::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    DummyExecutionReport, ExecutionPlan, GeneratedShaderResponse, NodeDefinition, NodeRegistry,
-    PackageRegistryListResponseV01, PreviewDocument, ProjectRequestCurrent,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
-    RuntimeDiagnostic, RuntimeExtensionListResponse, RuntimeExtensionManager,
-    RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceListResponse, RuntimeIoDeviceManager,
-    RuntimeLogSnapshotResponse, RuntimeLogStore, RuntimePackageManager,
-    RuntimePackageRegistrySnapshot, RuntimePreviewStartRequest, RuntimeSessionEventKind,
-    RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot, SessionRunRequest, ShaderDiagnostic,
-    ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    GeneratedShaderResponse, NodeDefinition, NodeRegistry, PackageRegistryListResponseV01,
+    PreviewDocument, ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeExtensionListResponse,
+    RuntimeIoDeviceListResponse, RuntimeLogSnapshotResponse, RuntimePreviewStartRequest,
+    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot,
+    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
     asset_store::{
-        RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse,
-        RuntimeAssetStore, SharedRuntimeAssetStore, store_asset,
+        RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
     },
     build_execution_plan_request_current, build_execution_plan_run_request_current,
     generated_shader_response_from_preview_document, http_live_disabled,
@@ -52,80 +43,23 @@ use crate::{
     },
     run_dummy_execution,
     runtime_info::{HealthResponse, RuntimeInfoResponse, health_response, runtime_info_response},
-    runtime_time::created_at_now,
-    session_registry::{RuntimeSessionRecord, RuntimeSessionRegistry, publish_session_event},
+    session_registry::{RuntimeSessionRecord, publish_session_event},
     sidecar::{
-        RuntimeEndpointConfig, RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
-        RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_health_response,
-        sidecar_shutdown_response, sidecar_startup_response,
+        RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
+        RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_shutdown_response,
     },
     validate_project_request_current,
 };
 
+mod state;
+mod types;
+
+pub use state::RuntimeServerState;
+pub use types::RuntimeApiResponse;
+
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3761;
 const MAX_ASSET_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeApiResponse {
-    pub ok: bool,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub plan: Option<ExecutionPlan>,
-    pub report: Option<DummyExecutionReport>,
-}
-
-#[derive(Clone)]
-pub struct RuntimeServerState {
-    pub sessions: RuntimeSessionRegistry,
-    pub assets: SharedRuntimeAssetStore,
-    pub io_devices: Arc<RuntimeIoDeviceManager>,
-    pub extensions: Arc<RuntimeExtensionRegistrySnapshot>,
-    pub packages: Arc<RuntimePackageRegistrySnapshot>,
-    pub logs: Arc<RuntimeLogStore>,
-    pub endpoint: RuntimeEndpointConfig,
-    pub started_at_wall_clock: String,
-    pub started_at: Instant,
-}
-
-impl Default for RuntimeServerState {
-    fn default() -> Self {
-        Self::with_endpoint(DEFAULT_HOST.to_owned(), DEFAULT_PORT)
-    }
-}
-
-impl RuntimeServerState {
-    pub fn with_endpoint(host: String, port: u16) -> Self {
-        let logs = Arc::new(RuntimeLogStore::default());
-        let extension_scan = RuntimeExtensionManager::from_env().scan_registry();
-        let package_scan = RuntimePackageManager::from_env().scan_registry();
-        logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
-        logs.record_runtime_diagnostics(package_scan.log_diagnostics());
-        Self {
-            sessions: RuntimeSessionRegistry::default(),
-            assets: RuntimeAssetStore::shared(),
-            io_devices: Arc::new(RuntimeIoDeviceManager::new()),
-            extensions: Arc::new(extension_scan.into_snapshot()),
-            packages: Arc::new(package_scan.into_snapshot()),
-            logs,
-            endpoint: RuntimeEndpointConfig::new(host, port),
-            started_at_wall_clock: created_at_now(),
-            started_at: Instant::now(),
-        }
-    }
-
-    pub fn sidecar_startup_response(&self) -> RuntimeSidecarStartupResponse {
-        sidecar_startup_response(
-            &self.endpoint,
-            self.sessions.default_session_id(),
-            &self.started_at_wall_clock,
-        )
-    }
-
-    pub fn sidecar_health_response(&self) -> RuntimeSidecarHealthResponse {
-        sidecar_health_response(&self.endpoint, &self.started_at_wall_clock)
-    }
-}
 
 pub fn runtime_router() -> Router {
     runtime_router_with_state(RuntimeServerState::default())
@@ -1074,17 +1008,6 @@ fn telemetry_snapshot(
     )
 }
 
-impl RuntimeApiResponse {
-    fn diagnostics(diagnostics: Vec<RuntimeDiagnostic>) -> Self {
-        Self {
-            ok: false,
-            diagnostics,
-            plan: None,
-            report: None,
-        }
-    }
-}
-
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
 ) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
@@ -1153,9 +1076,13 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        RUNTIME_API_VERSION, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
-        asset_store::{asset_kind, store_asset_with_id},
+        RUNTIME_API_VERSION, RuntimeEndpointConfig, RuntimeExtensionManager,
+        RuntimeExtensionRegistrySnapshot, RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
+        RuntimeIoDeviceManager, RuntimeLogStore, RuntimePackageManager,
+        RuntimePackageRegistrySnapshot, RuntimeSessionRegistry,
+        asset_store::{RuntimeAssetStore, asset_kind, store_asset_with_id},
         io_device_manager::RuntimeIoDeviceRegistry,
+        runtime_time::created_at_now,
         session_registry::DEFAULT_SESSION_ID,
     };
 
