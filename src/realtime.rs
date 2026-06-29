@@ -35,6 +35,8 @@ use crate::{
 #[cfg(test)]
 use crate::{EndpointBindingValueFormat, ValueOccurrenceHeader};
 
+type RuntimeRealtimeSocketSender = futures_util::stream::SplitSink<WebSocket, Message>;
+
 pub const RUNTIME_REALTIME_SCHEMA: &str = "skenion.runtime.realtime";
 pub const RUNTIME_REALTIME_SCHEMA_VERSION: &str = "0.1.0";
 pub const RUNTIME_REALTIME_REPLAY_LIMIT: usize = 256;
@@ -771,8 +773,10 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             }
                             FRAME_PRESENCE_UPDATE => {
                                 let Some(identity) = identity.as_ref() else {
-                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
-                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     continue;
@@ -787,8 +791,15 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                         }
                                     }
                                     Err(diagnostic) => {
-                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
-                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        if send_realtime_diagnostic(
+                                            &record,
+                                            &mut sender,
+                                            identity,
+                                            diagnostic,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -796,8 +807,10 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             }
                             FRAME_SELECTION_UPDATE => {
                                 let Some(identity) = identity.as_ref() else {
-                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
-                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     continue;
@@ -812,8 +825,15 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                         }
                                     }
                                     Err(diagnostic) => {
-                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
-                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        if send_realtime_diagnostic(
+                                            &record,
+                                            &mut sender,
+                                            identity,
+                                            diagnostic,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -821,8 +841,10 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             }
                             FRAME_CONTROL_COMMAND => {
                                 let Some(identity) = identity.as_ref() else {
-                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
-                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     continue;
@@ -844,8 +866,10 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             }
                             FRAME_GRAPH_COMMAND => {
                                 let Some(identity) = identity.as_ref() else {
-                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
-                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     continue;
@@ -866,8 +890,15 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                         }
                                     }
                                     Err(diagnostic) => {
-                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
-                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        if send_realtime_diagnostic(
+                                            &record,
+                                            &mut sender,
+                                            identity,
+                                            diagnostic,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -875,8 +906,10 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                             }
                             FRAME_NODE_CATALOG_REQUEST => {
                                 let Some(identity) = identity.as_ref() else {
-                                    let diagnostic = runtime_error(&record.id, None, Some(&frame), "realtime.session.not-attached", "send session.hello before client actions", None);
-                                    if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     continue;
@@ -888,8 +921,15 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                         }
                                     }
                                     Err(diagnostic) => {
-                                        let diagnostic = runtime_error(&record.id, Some(identity), None, &diagnostic.code, diagnostic.message, diagnostic.details);
-                                        if send_frame(&mut sender, &diagnostic).await.is_err() {
+                                        if send_realtime_diagnostic(
+                                            &record,
+                                            &mut sender,
+                                            identity,
+                                            diagnostic,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -3281,8 +3321,41 @@ fn sync_required_diagnostic(
     }
 }
 
+async fn send_not_attached(
+    record: &RuntimeSessionRecord,
+    sender: &mut RuntimeRealtimeSocketSender,
+    frame: &RuntimeRealtimeEnvelope,
+) -> Result<(), axum::Error> {
+    let diagnostic = runtime_error(
+        &record.id,
+        None,
+        Some(frame),
+        "realtime.session.not-attached",
+        "send session.hello before client actions",
+        None,
+    );
+    send_frame(sender, &diagnostic).await
+}
+
+async fn send_realtime_diagnostic(
+    record: &RuntimeSessionRecord,
+    sender: &mut RuntimeRealtimeSocketSender,
+    identity: &RuntimeRealtimeConnectionIdentity,
+    diagnostic: RuntimeRealtimeDiagnostic,
+) -> Result<(), axum::Error> {
+    let diagnostic = runtime_error(
+        &record.id,
+        Some(identity),
+        None,
+        &diagnostic.code,
+        diagnostic.message,
+        diagnostic.details,
+    );
+    send_frame(sender, &diagnostic).await
+}
+
 async fn send_frame(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    sender: &mut RuntimeRealtimeSocketSender,
     frame: &RuntimeRealtimeEnvelope,
 ) -> Result<(), axum::Error> {
     sender

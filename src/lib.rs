@@ -1,3 +1,4 @@
+mod asset_store;
 mod audio_backend;
 mod clock;
 mod collaboration;
@@ -7,6 +8,7 @@ mod control_value;
 mod conversion;
 mod dsp;
 mod extension_manager;
+mod http_live_disabled;
 mod io_device_manager;
 mod log_store;
 #[cfg(not(test))]

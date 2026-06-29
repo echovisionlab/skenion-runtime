@@ -1,11 +1,7 @@
 use std::{
-    collections::BTreeMap,
     convert::Infallible,
-    fs,
-    hash::{Hash, Hasher},
-    path::PathBuf,
-    sync::{Arc, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -47,9 +43,13 @@ use crate::{
     RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
     RuntimeSessionLoadModeCurrent, RuntimeSessionLoadRequestCurrent, RuntimeTelemetrySnapshot,
     SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    asset_store::{
+        RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse,
+        RuntimeAssetStore, SharedRuntimeAssetStore, store_asset,
+    },
     build_execution_plan_request_current, build_execution_plan_run_request_current,
-    generated_shader_response_from_preview_document, project_document_payload_schema_diagnostics,
-    project_document_validation_diagnostics_current,
+    generated_shader_response_from_preview_document, http_live_disabled,
+    project_document_payload_schema_diagnostics, project_document_validation_diagnostics_current,
     realtime::{handle_runtime_realtime_socket, node_catalog_snapshot_for_record},
     run_dummy_execution,
     runtime_time::created_at_now,
@@ -124,7 +124,7 @@ pub enum DiagnosticSeverity {
 #[derive(Clone)]
 pub struct RuntimeServerState {
     pub sessions: RuntimeSessionRegistry,
-    pub assets: Arc<RwLock<RuntimeAssetStore>>,
+    pub assets: SharedRuntimeAssetStore,
     pub io_devices: Arc<RuntimeIoDeviceManager>,
     pub extensions: Arc<RuntimeExtensionRegistrySnapshot>,
     pub packages: Arc<RuntimePackageRegistrySnapshot>,
@@ -149,7 +149,7 @@ impl RuntimeServerState {
         logs.record_runtime_diagnostics(package_scan.log_diagnostics());
         Self {
             sessions: RuntimeSessionRegistry::default(),
-            assets: Arc::new(RwLock::new(RuntimeAssetStore::default())),
+            assets: RuntimeAssetStore::shared(),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(extension_scan.into_snapshot()),
             packages: Arc::new(package_scan.into_snapshot()),
@@ -171,46 +171,6 @@ impl RuntimeServerState {
     pub fn sidecar_health_response(&self) -> RuntimeSidecarHealthResponse {
         sidecar_health_response(&self.endpoint, &self.started_at_wall_clock)
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RuntimeAssetStore {
-    assets: BTreeMap<String, RuntimeAsset>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeAsset {
-    pub id: String,
-    pub name: String,
-    pub mime_type: String,
-    pub kind: String,
-    pub size_bytes: u64,
-    pub runtime_uri: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeAssetImportResponse {
-    pub ok: bool,
-    pub asset: Option<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeAssetListResponse {
-    pub ok: bool,
-    pub assets: Vec<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeAssetGetResponse {
-    pub ok: bool,
-    pub asset: Option<RuntimeAsset>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 pub fn runtime_router() -> Router {
@@ -247,7 +207,7 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         )
         .route(
             "/v0/sessions/{session_id}/events/stream",
-            get(disabled_session_events_stream_by_id),
+            get(http_live_disabled::session_events_stream),
         )
         .route("/v0/sessions/{session_id}/load", post(load_session_by_id))
         .route(
@@ -258,27 +218,27 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/sessions/{session_id}/run", post(run_session_by_id))
         .route(
             "/v0/sessions/{session_id}/mutate",
-            post(disabled_session_mutate_by_id),
+            post(http_live_disabled::mutate),
         )
         .route(
             "/v0/sessions/{session_id}/operation",
-            post(disabled_session_operation_by_id),
+            post(http_live_disabled::operation),
         )
         .route(
             "/v0/sessions/{session_id}/operations",
-            post(disabled_session_operations_by_id),
+            post(http_live_disabled::operations),
         )
         .route(
             "/v0/sessions/{session_id}/collaboration/presence",
-            post(disabled_session_collaboration_presence_by_id),
+            post(http_live_disabled::collaboration_presence),
         )
         .route(
             "/v0/sessions/{session_id}/collaboration/selection",
-            post(disabled_session_collaboration_selection_by_id),
+            post(http_live_disabled::collaboration_selection),
         )
         .route(
             "/v0/sessions/{session_id}/collaboration/events/stream",
-            get(disabled_session_collaboration_events_stream_by_id),
+            get(http_live_disabled::collaboration_events_stream),
         )
         .route(
             "/v0/sessions/{session_id}/history",
@@ -286,15 +246,15 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         )
         .route(
             "/v0/sessions/{session_id}/undo",
-            post(disabled_session_undo_by_id),
+            post(http_live_disabled::undo),
         )
         .route(
             "/v0/sessions/{session_id}/redo",
-            post(disabled_session_redo_by_id),
+            post(http_live_disabled::redo),
         )
         .route(
             "/v0/sessions/{session_id}/control/event",
-            post(disabled_session_control_event_by_id),
+            post(http_live_disabled::control_event),
         )
         .route(
             "/v0/sessions/{session_id}/control/state",
@@ -423,129 +383,6 @@ async fn runtime_info() -> Json<RuntimeInfoResponse> {
             "io.devices",
         ],
     })
-}
-
-async fn disabled_session_events_stream_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "session.hello",
-            "details": "Use the WebSocket session and resume with payload.lastCursor for replay."
-        }),
-    )
-}
-
-async fn disabled_session_mutate_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kinds": ["view.patch", "graph.changeSet"]
-        }),
-    )
-}
-
-async fn disabled_session_operation_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kind": "graph.pasteFragment"
-        }),
-    )
-}
-
-async fn disabled_session_operations_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kinds": ["graph.changeSet", "graph.pasteFragment", "history.undo", "history.redo"]
-        }),
-    )
-}
-
-async fn disabled_session_collaboration_presence_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({ "type": "presence.update" }),
-    )
-}
-
-async fn disabled_session_collaboration_selection_by_id(
-    Path(session_id): Path<String>,
-) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({ "type": "selection.update" }),
-    )
-}
-
-async fn disabled_session_collaboration_events_stream_by_id(
-    Path(session_id): Path<String>,
-) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "session.hello",
-            "details": "Use WebSocket realtime events instead of collaboration SSE."
-        }),
-    )
-}
-
-async fn disabled_session_undo_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kind": "history.undo"
-        }),
-    )
-}
-
-async fn disabled_session_redo_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kind": "history.redo"
-        }),
-    )
-}
-
-async fn disabled_session_control_event_by_id(Path(session_id): Path<String>) -> Response {
-    http_live_channel_disabled_response(
-        &session_id,
-        serde_json::json!({
-            "type": "graph.command",
-            "kind": "node.input"
-        }),
-    )
-}
-
-fn http_live_channel_disabled_response(
-    session_id: &str,
-    replacement: serde_json::Value,
-) -> Response {
-    (
-        StatusCode::GONE,
-        Json(serde_json::json!({
-            "ok": false,
-            "schema": "skenion.runtime.http-live-channel-disabled",
-            "schemaVersion": "0.1.0",
-            "sessionId": session_id,
-            "diagnostics": [{
-                "severity": "error",
-                "code": "runtime.http-live-channel-disabled",
-                "message": "HTTP live mutation and event channels are disabled; use the session WebSocket instead.",
-                "details": {
-                    "websocketEndpoint": format!("/v0/sessions/{session_id}"),
-                    "replacement": replacement
-                }
-            }]
-        })),
-    )
-        .into_response()
 }
 
 async fn sidecar_startup(
@@ -1248,7 +1085,7 @@ async fn import_asset(
             }
         };
 
-        let response = store_asset(&state, name, mime_type, bytes);
+        let response = store_asset(&state.assets, name, mime_type, bytes);
         return asset_import_json(&state, response);
     }
 
@@ -1267,10 +1104,7 @@ async fn list_assets(State(state): State<RuntimeServerState>) -> Json<RuntimeAss
         .assets
         .read()
         .expect("runtime asset store lock should not be poisoned")
-        .assets
-        .values()
-        .cloned()
-        .collect();
+        .list();
     Json(RuntimeAssetListResponse {
         ok: true,
         assets,
@@ -1286,9 +1120,7 @@ async fn get_asset(
         .assets
         .read()
         .expect("runtime asset store lock should not be poisoned")
-        .assets
-        .get(&asset_id)
-        .cloned();
+        .get(&asset_id);
     let ok = asset.is_some();
     let response = RuntimeAssetGetResponse {
         ok,
@@ -1361,95 +1193,6 @@ fn telemetry_snapshot(
             .try_into()
             .unwrap_or(u64::MAX),
     )
-}
-
-fn store_asset(
-    state: &RuntimeServerState,
-    name: String,
-    mime_type: String,
-    bytes: Bytes,
-) -> RuntimeAssetImportResponse {
-    let id = asset_id(&name, &mime_type, &bytes);
-    store_asset_with_id(state, id, name, mime_type, bytes, runtime_asset_directory())
-}
-
-fn store_asset_with_id(
-    state: &RuntimeServerState,
-    id: String,
-    name: String,
-    mime_type: String,
-    bytes: Bytes,
-    directory: PathBuf,
-) -> RuntimeAssetImportResponse {
-    let kind = asset_kind(&mime_type);
-    let runtime_uri = format!("skenion-runtime://assets/{id}");
-    if let Err(error) = fs::create_dir_all(&directory) {
-        return RuntimeAssetImportResponse {
-            ok: false,
-            asset: None,
-            diagnostics: vec![RuntimeDiagnostic::error(format!(
-                "failed to create runtime asset directory: {error}"
-            ))],
-        };
-    }
-    let path = directory.join(&id);
-    if let Err(error) = fs::write(&path, &bytes) {
-        return RuntimeAssetImportResponse {
-            ok: false,
-            asset: None,
-            diagnostics: vec![RuntimeDiagnostic::error(format!(
-                "failed to store runtime asset: {error}"
-            ))],
-        };
-    }
-    let asset = RuntimeAsset {
-        id: id.clone(),
-        name,
-        mime_type,
-        kind,
-        size_bytes: bytes.len().try_into().unwrap_or(u64::MAX),
-        runtime_uri,
-    };
-    state
-        .assets
-        .write()
-        .expect("runtime asset store lock should not be poisoned")
-        .assets
-        .insert(id, asset.clone());
-    RuntimeAssetImportResponse {
-        ok: true,
-        asset: Some(asset),
-        diagnostics: Vec::new(),
-    }
-}
-
-fn runtime_asset_directory() -> PathBuf {
-    std::env::temp_dir().join("skenion-runtime-assets")
-}
-
-fn asset_id(name: &str, mime_type: &str, bytes: &Bytes) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hasher);
-    mime_type.hash(&mut hasher);
-    bytes.hash(&mut hasher);
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut hasher);
-    format!("asset_{:016x}", hasher.finish())
-}
-
-fn asset_kind(mime_type: &str) -> String {
-    if mime_type.starts_with("video/") {
-        "video".to_owned()
-    } else if mime_type.starts_with("image/") {
-        "image".to_owned()
-    } else if mime_type.starts_with("audio/") {
-        "audio".to_owned()
-    } else {
-        "binary".to_owned()
-    }
 }
 
 impl RuntimeApiResponse {
@@ -2007,7 +1750,9 @@ mod tests {
 
     use crate::{
         RuntimeIoDeviceDescriptor, RuntimeIoDeviceListResponse,
-        io_device_manager::RuntimeIoDeviceRegistry, session_registry::DEFAULT_SESSION_ID,
+        asset_store::{asset_kind, store_asset_with_id},
+        io_device_manager::RuntimeIoDeviceRegistry,
+        session_registry::DEFAULT_SESSION_ID,
     };
 
     use super::*;
@@ -2747,7 +2492,7 @@ mod tests {
         std::fs::write(&base, b"not a directory").expect("blocker should write");
 
         let create_error = store_asset_with_id(
-            &state,
+            &state.assets,
             "asset_create_error".to_owned(),
             "clip.mov".to_owned(),
             "video/quicktime".to_owned(),
@@ -2766,7 +2511,7 @@ mod tests {
         std::fs::create_dir(base.join("asset_write_error")).expect("asset blocker should create");
 
         let write_error = store_asset_with_id(
-            &state,
+            &state.assets,
             "asset_write_error".to_owned(),
             "clip.mov".to_owned(),
             "video/quicktime".to_owned(),
@@ -4128,7 +3873,7 @@ mod tests {
         let logs = std::sync::Arc::new(RuntimeLogStore::default());
         RuntimeServerState {
             sessions: RuntimeSessionRegistry::dry_preview(),
-            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            assets: RuntimeAssetStore::shared(),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::new()),
             extensions: std::sync::Arc::new(RuntimeExtensionRegistrySnapshot::default()),
             packages: std::sync::Arc::new(RuntimePackageRegistrySnapshot::default()),
@@ -4143,7 +3888,7 @@ mod tests {
         let logs = std::sync::Arc::new(RuntimeLogStore::default());
         runtime_router_with_state(RuntimeServerState {
             sessions: RuntimeSessionRegistry::dry_preview(),
-            assets: std::sync::Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            assets: RuntimeAssetStore::shared(),
             io_devices: std::sync::Arc::new(RuntimeIoDeviceManager::with_device_registry(
                 Arc::new(ServerFakeIoDeviceRegistry { devices }),
             )),
@@ -4163,7 +3908,7 @@ mod tests {
         logs.record_runtime_diagnostics(extension_scan.log_diagnostics());
         runtime_router_with_state(RuntimeServerState {
             sessions: RuntimeSessionRegistry::dry_preview(),
-            assets: Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            assets: RuntimeAssetStore::shared(),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(extension_scan.into_snapshot()),
             packages: Arc::new(RuntimePackageRegistrySnapshot::default()),
@@ -4182,7 +3927,7 @@ mod tests {
         logs.record_runtime_diagnostics(package_scan.log_diagnostics());
         let state = RuntimeServerState {
             sessions: RuntimeSessionRegistry::dry_preview(),
-            assets: Arc::new(std::sync::RwLock::new(RuntimeAssetStore::default())),
+            assets: RuntimeAssetStore::shared(),
             io_devices: Arc::new(RuntimeIoDeviceManager::new()),
             extensions: Arc::new(RuntimeExtensionRegistrySnapshot::default()),
             packages: Arc::new(package_scan.into_snapshot()),
