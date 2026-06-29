@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
@@ -12,67 +12,38 @@ use crate::{
     CanvasNodeView, CanvasViewState, ControlState, DataFlow, DataType, DummyExecutionReport, Edge,
     EdgeSpecCurrent, EndpointBindingValueFormat, ExecutionPlan, GraphDocument,
     GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphNode, GraphNodeCurrent,
-    GraphPatch, GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition,
-    NodeDefinitionCurrent, NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
-    PastePlacement, PatchPath, PlanError, Port, PortActivation, PortDirection,
-    PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent, PreviewContext,
-    PreviewControlStateSnapshot, ProjectDocumentCurrent, ProjectRequestCurrent,
-    RuntimeCollaborationChange, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlReadTarget,
-    RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeOperationDiagnostic,
-    RuntimeOperationEnvelope, StringOrStrings, ValueEndpointRef, ValueFormat, ViewState,
-    build_execution_plan, build_execution_plan_request_current, object_text::ObjectRegistry,
-    project_current::is_payload_identity_node_kind_current,
+    GraphTargetRef, IdConflictPolicy, IdRemapResult, NodeDefinition, NodeDefinitionCurrent,
+    NodeRegistry, PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
+    PlanError, Port, PortActivation, PortDirection, PortDirectionCurrent, PortRateCurrent, PortRef,
+    PortSpecCurrent, PreviewContext, PreviewControlStateSnapshot, ProjectDocumentCurrent,
+    ProjectRequestCurrent, RuntimeCollaborationChange, RuntimeControlEventRequest,
+    RuntimeControlEventResponse, RuntimeControlReadRequest, RuntimeControlReadResponse,
+    RuntimeControlReadTarget, RuntimeControlStateResponse, RuntimeDiagnostic,
+    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, StringOrStrings, ValueEndpointRef,
+    ValueFormat, ViewState, build_execution_plan, build_execution_plan_request_current,
+    object_text::ObjectRegistry, project_current::is_payload_identity_node_kind_current,
     project_document_validation_diagnostics_current, read_graph_param, read_graph_port,
     run_dummy_execution, server::registry_from_nodes, validate_project_request_current,
 };
 
 mod history;
+mod types;
 
+#[cfg(test)]
+use crate::GraphPatch;
 use history::{HistoryDirection, project_document_history_delta};
 #[cfg(test)]
 use history::{
     redo_graph_history_delta_current, undo_graph_history_delta_current,
     view_state_history_delta_current,
 };
+pub use types::{
+    RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
+    RuntimePatchResponse, RuntimeSessionResponse, RuntimeSessionSnapshot, RuntimeViewPatch,
+    RuntimeViewPatchOperation, SessionRunRequest,
+};
 
 const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeSessionSnapshot {
-    pub session_revision: u64,
-    pub view_revision: u64,
-    pub control_revision: u64,
-    #[serde(skip)]
-    pub package_registry_revision: Option<u64>,
-    pub project: Option<ProjectDocumentCurrent>,
-    pub binding_formats: Vec<EndpointBindingValueFormat>,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub plan: Option<ExecutionPlan>,
-}
-
-impl RuntimeSessionSnapshot {
-    pub fn loaded(&self) -> bool {
-        self.project.is_some()
-    }
-
-    pub fn graph_id(&self) -> Option<&str> {
-        self.project
-            .as_ref()
-            .map(|project| project.graph.id.as_str())
-    }
-
-    pub fn graph_revision(&self) -> Option<&str> {
-        self.project
-            .as_ref()
-            .map(|project| project.graph.revision.as_str())
-    }
-
-    pub fn view_state(&self) -> Option<&ViewState> {
-        self.project.as_ref().map(|project| &project.view_state)
-    }
-}
 
 pub(crate) fn derive_runtime_binding_formats(
     project: Option<&ProjectDocumentCurrent>,
@@ -222,51 +193,6 @@ fn sha256_hex_for_json<T: Serialize>(value: &T) -> String {
     hex
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeSessionResponse {
-    pub ok: bool,
-    pub snapshot: RuntimeSessionSnapshot,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-    pub report: Option<DummyExecutionReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimePatchResponse {
-    pub ok: bool,
-    pub applied: bool,
-    pub conflict: bool,
-    pub snapshot: RuntimeSessionSnapshot,
-    pub history: RuntimeHistory,
-    pub diagnostics: Vec<RuntimeDiagnostic>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionRunRequest {
-    pub frames: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeMutationRequest {
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) graph_patch: Option<GraphPatch>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub view_patch: Option<RuntimeViewPatch>,
-    #[serde(skip)]
-    pub actor_id: Option<String>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
 pub(crate) struct ApplyObjectNodeCreateCurrentRequest {
     pub(crate) target: GraphTargetRef,
     pub(crate) node: GraphNodeCurrent,
@@ -297,93 +223,6 @@ struct ObjectNodeReplaceCurrentEdit {
     view: Option<CanvasNodeView>,
     interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
     mutation: RuntimeMutationRequest,
-}
-
-impl RuntimeMutationRequest {
-    pub fn view_patch(view_patch: RuntimeViewPatch) -> Self {
-        Self {
-            graph_patch: None,
-            view_patch: Some(view_patch),
-            actor_id: None,
-            client_id: None,
-            description: None,
-        }
-    }
-
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
-        self
-    }
-
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeViewPatch {
-    pub base_view_revision: u64,
-    pub ops: Vec<RuntimeViewPatchOperation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "op")]
-pub enum RuntimeViewPatchOperation {
-    #[serde(rename = "setNodeView")]
-    SetNodeView {
-        #[serde(rename = "nodeId")]
-        node_id: String,
-        view: CanvasNodeView,
-    },
-    #[serde(rename = "moveNodeView")]
-    MoveNodeView {
-        #[serde(rename = "nodeId")]
-        node_id: String,
-        #[serde(default)]
-        from: Option<CanvasNodeView>,
-        to: CanvasNodeView,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeHistory {
-    pub schema: &'static str,
-    pub schema_version: &'static str,
-    pub entries: Vec<RuntimeHistoryEntry>,
-    pub can_undo: bool,
-    pub can_redo: bool,
-    pub undo_depth: u64,
-    pub redo_depth: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeHistoryEntry {
-    pub id: String,
-    pub sequence: u64,
-    pub kind: RuntimeHistoryEntryKind,
-    pub mutation: RuntimeMutationRequest,
-    pub inverse_mutation: RuntimeMutationRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject_event_id: Option<String>,
-    #[serde(skip)]
-    pub actor_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeHistoryEntryKind {
-    Apply,
-    Undo,
-    Redo,
 }
 
 #[derive(Debug, Clone)]
