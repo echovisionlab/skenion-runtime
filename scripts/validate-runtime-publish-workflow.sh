@@ -295,6 +295,14 @@ for token, label in (
     if "if: steps.existing.outputs.exists != 'true'" not in step_text(step):
         fail(f"runtime-assets {label} must be skipped when DSUB S3 already has the immutable artifact")
 
+publish_index = runtime_assets.index("--use-existing-manifest")
+attest_index = runtime_assets.index("actions/attest@v4")
+if attest_index < publish_index:
+    fail("runtime-assets attestation must run after DSUB S3 publish so provenance service failures cannot block artifact upload")
+attest_step = require_single_step(runtime_asset_steps, "actions/attest@v4", "runtime artifact attestation")
+if "continue-on-error: True" not in step_text(attest_step) and "continue-on-error: true" not in step_text(attest_step):
+    fail("runtime-assets attestation must be best-effort with continue-on-error")
+
 rust_target_step = require_single_step(runtime_asset_steps, "rustup target add", "conditional Rust target add step")
 if "steps.rust-target.outputs.installed != 'true'" not in step_text(rust_target_step):
     fail("runtime-assets Rust target add step must be gated by the installed-target check")
