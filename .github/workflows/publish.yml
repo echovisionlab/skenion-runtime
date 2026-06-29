@@ -322,15 +322,6 @@ jobs:
             "${RELEASE_TAG}" \
             "${{ steps.package.outputs.asset_path }}" \
             "${{ steps.package.outputs.checksum_path }}"
-      - id: attest
-        name: Generate runtime asset provenance
-        if: steps.existing.outputs.exists != 'true'
-        uses: actions/attest@v4
-        with:
-          subject-path: |
-            ${{ steps.package.outputs.asset_path }}
-            ${{ steps.package.outputs.checksum_path }}
-            ${{ steps.manifest.outputs.manifest_path }}
       - id: publish
         name: Publish Runtime artifact to DSUB S3
         if: steps.existing.outputs.exists != 'true'
@@ -355,9 +346,24 @@ jobs:
             "${RELEASE_TAG}" \
             "${{ steps.package.outputs.asset_path }}" \
             "${{ steps.package.outputs.checksum_path }}"
+      - id: attest
+        name: Generate runtime asset provenance
+        if: steps.existing.outputs.exists != 'true'
+        continue-on-error: true
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ steps.package.outputs.asset_path }}
+            ${{ steps.package.outputs.checksum_path }}
+            ${{ steps.manifest.outputs.manifest_path }}
       - name: Summarize runtime asset
         if: steps.existing.outputs.exists != 'true'
         run: |
+          if [[ "${{ steps.attest.outcome }}" == "success" ]]; then
+            provenance="${{ steps.attest.outputs.attestation-url }}"
+          else
+            provenance="not available; GitHub attestation is best-effort and did not block DSUB S3 publishing"
+          fi
           {
             echo "## Runtime Asset"
             echo ""
@@ -367,7 +373,7 @@ jobs:
             echo "- Artifact URL: ${{ steps.publish.outputs.asset_url }}"
             echo "- Checksum URL: ${{ steps.publish.outputs.checksum_url }}"
             echo "- Manifest URL: ${{ steps.publish.outputs.manifest_url }}"
-            echo "- Provenance: ${{ steps.attest.outputs.attestation-url }}"
+            echo "- Provenance: ${provenance}"
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Summarize existing runtime asset
         if: steps.existing.outputs.exists == 'true'
