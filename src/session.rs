@@ -4063,7 +4063,9 @@ mod tests {
     use super::{
         HistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest, RuntimePatchResponse,
         RuntimeSession, RuntimeViewPatch, RuntimeViewPatchOperation, lower_fragment_view_patch,
-        lower_port_for_execution, remap_edge, runtime_diagnostic_to_operation_diagnostic,
+        lower_port_for_execution, remap_edge, runtime_binding_format_revision,
+        runtime_diagnostic_to_operation_diagnostic, runtime_value_format_label,
+        value_format_for_port_type,
     };
 
     #[test]
@@ -6846,6 +6848,132 @@ mod tests {
                 .message
                 .contains("object text could not be resolved")
         );
+    }
+
+    #[test]
+    fn node_current_operations_report_no_project_without_mutation() {
+        let target = skenion_contracts::GraphTargetRef {
+            path: skenion_contracts::PatchPath::Root,
+            base_revision: "1".to_owned(),
+            target_revision: None,
+        };
+        let assert_code = |response: &RuntimePatchResponse, code: &str| {
+            assert_eq!(response.diagnostics[0].code.as_deref(), Some(code));
+        };
+        let mut session = RuntimeSession::default();
+        let create =
+            session.apply_object_node_create_current(super::ApplyObjectNodeCreateCurrentRequest {
+                target: target.clone(),
+                node: graph_node_current("created_value"),
+                view: None,
+                definition: None,
+                mutation: empty_runtime_mutation(),
+            });
+        assert_code(&create, "node.target.no-project");
+
+        let (replace, dropped_replace_edges) = session.apply_object_node_replace_current(
+            super::ApplyObjectNodeReplaceCurrentRequest {
+                target: target.clone(),
+                node: graph_node_current("value_1"),
+                view: None,
+                definition: None,
+                interface_incident_edge_policy: None,
+                mutation: empty_runtime_mutation(),
+            },
+        );
+        assert_code(&replace, "node.target.no-project");
+        assert!(dropped_replace_edges.is_empty());
+
+        let (delete, dropped_delete_edges) = session.apply_node_delete_current(
+            target.clone(),
+            "value_1".to_owned(),
+            None,
+            Some("client-test".to_owned()),
+            Some("delete without project".to_owned()),
+        );
+        assert_code(&delete, "node.target.no-project");
+        assert!(dropped_delete_edges.is_empty());
+
+        let update_empty = session.apply_node_update_current(
+            target.clone(),
+            "value_1".to_owned(),
+            serde_json::Map::new(),
+            None,
+            Some("client-test".to_owned()),
+            Some("empty update without project".to_owned()),
+        );
+        assert_code(&update_empty, "node.update.params-required");
+
+        let mut params = serde_json::Map::new();
+        params.insert("value".to_owned(), json!(1.0));
+        let update_no_project = session.apply_node_update_current(
+            target,
+            "value_1".to_owned(),
+            params,
+            None,
+            Some("client-test".to_owned()),
+            Some("update without project".to_owned()),
+        );
+        assert_code(&update_no_project, "node.target.no-project");
+    }
+
+    #[test]
+    fn runtime_value_format_contract_accepts_supported_value_ports() {
+        let typed_ports = [
+            ("value.core.message", None),
+            ("value.core.float32", Some("f32")),
+            ("value.core.int32", Some("i32")),
+            ("value.core.uint32", Some("u32")),
+            ("value.core.bool", None),
+            ("value.core.string", None),
+            ("value.core.color", Some("rgba32f")),
+            ("value.core.bang", None),
+            ("value.custom.vector3", None),
+        ];
+
+        for (port_type, expected_format) in typed_ports {
+            let value_format = value_format_for_port_type(port_type)
+                .unwrap_or_else(|| panic!("{port_type} should map to a runtime value format"));
+            assert_eq!(value_format.value_type_id, port_type);
+            assert_eq!(value_format.format.as_deref(), expected_format);
+        }
+
+        assert!(value_format_for_port_type("control.number.float").is_none());
+        assert!(value_format_for_port_type("asset.video").is_none());
+    }
+
+    #[test]
+    fn runtime_value_format_labels_cover_numeric_wire_formats() {
+        let labels = [
+            ("value.core.float16", Some("f16")),
+            ("value.core.float32", Some("f32")),
+            ("value.core.float64", Some("f64")),
+            ("value.core.ufloat8", Some("ufloat8")),
+            ("value.core.ufloat16", Some("ufloat16")),
+            ("value.core.ufloat32", Some("ufloat32")),
+            ("value.core.ufloat64", Some("ufloat64")),
+            ("value.core.int8", Some("i8")),
+            ("value.core.int16", Some("i16")),
+            ("value.core.int32", Some("i32")),
+            ("value.core.int64", Some("i64")),
+            ("value.core.uint8", Some("u8")),
+            ("value.core.uint16", Some("u16")),
+            ("value.core.uint32", Some("u32")),
+            ("value.core.uint64", Some("u64")),
+            ("value.core.color", Some("rgba32f")),
+            ("value.core.message", None),
+        ];
+
+        for (value_type_id, expected_label) in labels {
+            assert_eq!(runtime_value_format_label(value_type_id), expected_label);
+        }
+    }
+
+    #[test]
+    fn runtime_binding_format_revision_falls_back_to_one() {
+        assert_eq!(runtime_binding_format_revision("42"), 42);
+        assert_eq!(runtime_binding_format_revision("0"), 1);
+        assert_eq!(runtime_binding_format_revision("not-a-number"), 1);
     }
 
     #[test]

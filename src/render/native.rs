@@ -777,11 +777,13 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        ControlState, ExecutionPlan, GraphDocument, GraphNode,
+        ControlState, ControlValue, Edge, ExecutionPlan, GraphDocument, GraphNode, PortRef,
+        PreviewControlStateSnapshot, analyze_shader_interface_v01,
         render::{
             PREVIEW_DOCUMENT_SCHEMA, PREVIEW_DOCUMENT_SCHEMA_VERSION, RENDER_CLEAR_COLOR_KIND,
-            RENDER_OUTPUT_KIND,
+            RENDER_FULLSCREEN_SHADER_KIND, RENDER_OUTPUT_KIND,
         },
+        shader_interface_to_ports_v01, write_preview_control_state_snapshot,
     };
 
     #[test]
@@ -912,6 +914,96 @@ mod tests {
     }
 
     #[test]
+    fn preview_document_file_reports_read_and_decode_errors_before_window_start() {
+        let missing_path = std::env::temp_dir().join(format!(
+            "skenion-missing-preview-document-{}.json",
+            std::process::id()
+        ));
+        let missing_error = run_render_preview_document_file(
+            missing_path,
+            PreviewFrameLimit::Frames(1),
+            None,
+            None,
+        )
+        .expect_err("missing preview document should fail before opening a window");
+        assert!(missing_error.to_string().contains("No such file"));
+
+        let invalid_path = std::env::temp_dir().join(format!(
+            "skenion-invalid-preview-document-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&invalid_path, b"{").expect("invalid preview document fixture should write");
+        let decode_error = run_render_preview_document_file(
+            invalid_path.clone(),
+            PreviewFrameLimit::Frames(1),
+            None,
+            None,
+        )
+        .expect_err("invalid preview document should fail before opening a window");
+        assert!(decode_error.to_string().contains("EOF"));
+
+        let _ = std::fs::remove_file(invalid_path);
+    }
+
+    #[test]
+    fn native_preview_app_reloads_newer_control_state_and_reports_invalid_updates() {
+        let control_state_path = std::env::temp_dir().join(format!(
+            "skenion-preview-control-state-reload-{}.json",
+            std::process::id()
+        ));
+        let telemetry_path = std::env::temp_dir().join(format!(
+            "skenion-preview-control-state-reload-telemetry-{}.json",
+            std::process::id()
+        ));
+        let document = preview_document_with_nodes(vec![clear_color_node()]);
+        let mut app = NativePreviewApp::new(
+            document,
+            RenderScene::default(),
+            None,
+            PreviewFrameLimit::Frames(1),
+            Some(telemetry_path.clone()),
+            Some(control_state_path.clone()),
+            Some(1),
+        );
+        let mut control_state = ControlState::default();
+        control_state
+            .values
+            .insert("clear_1".to_owned(), ControlValue::float(0.25));
+        let snapshot = PreviewControlStateSnapshot::new(1, 2, &control_state);
+        write_preview_control_state_snapshot(&control_state_path, &snapshot)
+            .expect("preview control snapshot should write");
+
+        app.reload_control_state_if_needed();
+
+        assert_eq!(app.control_revision, Some(2));
+        assert_eq!(
+            app.document.control_state.values["clear_1"],
+            ControlValue::float(0.25)
+        );
+
+        let stale_state = ControlState::default();
+        let stale = PreviewControlStateSnapshot::new(1, 2, &stale_state);
+        write_preview_control_state_snapshot(&control_state_path, &stale)
+            .expect("stale preview control snapshot should write");
+        app.reload_control_state_if_needed();
+
+        assert_eq!(app.control_revision, Some(2));
+        assert_eq!(
+            app.document.control_state.values["clear_1"],
+            ControlValue::float(0.25)
+        );
+
+        std::fs::write(&control_state_path, b"{")
+            .expect("invalid preview control snapshot should write");
+        app.reload_control_state_if_needed();
+
+        assert_eq!(app.control_revision, Some(2));
+
+        let _ = std::fs::remove_file(control_state_path);
+        let _ = std::fs::remove_file(telemetry_path);
+    }
+
+    #[test]
     fn generated_shader_module_declares_dynamic_uniforms() {
         let scene = FullscreenShaderScene {
             language: crate::render::ShaderLanguage::Wgsl,
@@ -959,6 +1051,34 @@ mod tests {
             generated.source_map.user_source_start_line
         );
         assert!(generated.source_map.user_source_start_line > 1);
+    }
+
+    #[test]
+    fn generated_shader_response_returns_fullscreen_shader_source() {
+        let document = preview_document_with_nodes_and_edges(
+            vec![fullscreen_shader_node(), render_output_node()],
+            vec![edge("shader_1", "out", "output_1", "in")],
+        );
+
+        let response = generated_shader_response_from_preview_document(&document);
+
+        assert!(response.ok);
+        assert_eq!(response.node_id.as_deref(), Some("shader_1"));
+        assert_eq!(response.language.as_deref(), Some("wgsl"));
+        let source = response
+            .source
+            .as_deref()
+            .expect("generated shader source should be returned");
+        assert!(source.contains("struct SkenionFrame"));
+        assert!(source.contains("fn fs_main"));
+        let source_map = response
+            .source_map
+            .expect("generated shader source map should be returned");
+        assert_eq!(
+            source_map.generated_line_offset + 1,
+            source_map.user_source_start_line
+        );
+        assert!(response.diagnostics.is_empty());
     }
 
     #[test]
@@ -1037,13 +1157,20 @@ mod tests {
     }
 
     fn preview_document_with_nodes(nodes: Vec<GraphNode>) -> PreviewDocument {
+        preview_document_with_nodes_and_edges(nodes, Vec::new())
+    }
+
+    fn preview_document_with_nodes_and_edges(
+        nodes: Vec<GraphNode>,
+        edges: Vec<Edge>,
+    ) -> PreviewDocument {
         let graph = GraphDocument {
             schema: "skenion.graph".to_owned(),
             schema_version: "0.1.0".to_owned(),
             id: "render-response-graph".to_owned(),
             revision: "1".to_owned(),
             nodes,
-            edges: Vec::new(),
+            edges,
         };
         let control_state = ControlState::from_graph(&graph);
         PreviewDocument {
@@ -1081,6 +1208,34 @@ mod tests {
             kind_version: "0.1.0".to_owned(),
             params: serde_json::Map::new(),
             ports: Vec::new(),
+        }
+    }
+
+    fn fullscreen_shader_node() -> GraphNode {
+        let source = "@fragment\nfn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }";
+        let mut params = serde_json::Map::new();
+        params.insert("language".to_owned(), json!("wgsl"));
+        params.insert("source".to_owned(), json!(source));
+        let analysis = analyze_shader_interface_v01(source);
+        GraphNode {
+            id: "shader_1".to_owned(),
+            kind: RENDER_FULLSCREEN_SHADER_KIND.to_owned(),
+            kind_version: "0.1.0".to_owned(),
+            params,
+            ports: shader_interface_to_ports_v01(&analysis.shader_interface),
+        }
+    }
+
+    fn edge(from_node: &str, from_port: &str, to_node: &str, to_port: &str) -> Edge {
+        Edge {
+            from: PortRef {
+                node: from_node.to_owned(),
+                port: from_port.to_owned(),
+            },
+            to: PortRef {
+                node: to_node.to_owned(),
+                port: to_port.to_owned(),
+            },
         }
     }
 
