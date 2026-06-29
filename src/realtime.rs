@@ -3242,6 +3242,58 @@ mod tests {
     }
 
     #[test]
+    fn replay_after_reports_cursor_diagnostics_and_marks_replayed_events() {
+        let state = RuntimeRealtimeState::new("default", 2);
+        let current_cursor = state.current_cursor();
+        let (incarnation_id, _) = current_cursor
+            .rsplit_once(':')
+            .expect("runtime cursor should include sequence separator");
+
+        let invalid_shape = state
+            .replay_after("not-a-runtime-cursor")
+            .expect_err("cursor without sequence separator should be rejected");
+        assert_eq!(invalid_shape.code, "realtime.cursor.invalid");
+
+        let wrong_incarnation = state
+            .replay_after("other-incarnation:0")
+            .expect_err("cursor from another incarnation should be rejected");
+        assert_eq!(
+            wrong_incarnation.code,
+            "realtime.cursor.incarnation-mismatch"
+        );
+
+        let invalid_sequence = state
+            .replay_after(&format!("{incarnation_id}:not-a-number"))
+            .expect_err("cursor with non-numeric sequence should be rejected");
+        assert_eq!(invalid_sequence.code, "realtime.cursor.invalid");
+
+        let ahead = state
+            .replay_after(&format!("{incarnation_id}:1"))
+            .expect_err("cursor ahead of the current sequence should require sync");
+        assert_eq!(ahead.code, "realtime.cursor.unknown");
+
+        for expected_sequence in 1..=3 {
+            let sequence = state.next_event_sequence();
+            assert_eq!(sequence, expected_sequence);
+            let cursor = state.cursor_for(sequence);
+            state.publish(realtime_event("default", sequence, &cursor));
+        }
+
+        let expired = state
+            .replay_after(&state.cursor_for(0))
+            .expect_err("cursor before retained window should require sync");
+        assert_eq!(expired.code, "realtime.cursor.expired");
+
+        let replay = state
+            .replay_after(&state.cursor_for(2))
+            .expect("cursor inside retained window should replay later events");
+        assert_eq!(replay.high_water_sequence, 3);
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.events[0].sequence, Some(3));
+        assert_eq!(replay.events[0].payload["replayed"], true);
+    }
+
+    #[test]
     fn presence_entries_are_ttl_pruned_and_count_bounded() {
         let state = RuntimeRealtimeState::new("default", 1);
         let now = SystemTime::now();

@@ -225,6 +225,27 @@ async fn send_node_catalog_request(
     .await;
 }
 
+async fn send_node_catalog_request_payload(
+    socket: &mut TestSocket,
+    message_id: &str,
+    payload: Value,
+) {
+    send_json(
+        socket,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "nodeCatalog.request",
+            "messageId": message_id,
+            "sessionId": "default",
+            "commandId": message_id,
+            "correlationId": message_id,
+            "payload": payload
+        }),
+    )
+    .await;
+}
+
 async fn send_presence(socket: &mut TestSocket, message_id: &str, idempotency_key: &str) {
     send_presence_payload(
         socket,
@@ -451,6 +472,15 @@ fn node_create_payload(base_revision: &str, requested_node_id: &str, object_text
     node_create_payload_with_params(base_revision, requested_node_id, object_text, None)
 }
 
+fn node_create_payload_without_requested_id(base_revision: &str, object_text: &str) -> Value {
+    let mut payload = node_create_payload(base_revision, "removed-by-test", object_text);
+    payload
+        .as_object_mut()
+        .expect("node.create payload should be an object")
+        .remove("requestedNodeId");
+    payload
+}
+
 fn node_create_payload_with_params(
     base_revision: &str,
     requested_node_id: &str,
@@ -476,6 +506,30 @@ fn node_create_payload_with_params(
     payload
 }
 
+fn node_create_project_patch_payload(
+    patch_id: &str,
+    base_revision: &str,
+    requested_node_id: &str,
+    object_text: &str,
+) -> Value {
+    let mut payload = node_create_payload(base_revision, requested_node_id, object_text);
+    let object = payload
+        .as_object_mut()
+        .expect("node.create payload should be an object");
+    object.insert(
+        "target".to_owned(),
+        project_patch_target(patch_id, base_revision),
+    );
+    object.insert(
+        "surfacePath".to_owned(),
+        json!({
+            "surface": "graph",
+            "path": { "kind": "project-patch-definition", "patchId": patch_id }
+        }),
+    );
+    payload
+}
+
 fn node_resolve_payload(base_revision: &str, object_text: &str) -> Value {
     json!({
         "kind": "node.resolve",
@@ -485,6 +539,19 @@ fn node_resolve_payload(base_revision: &str, object_text: &str) -> Value {
         "surfacePath": { "surface": "objectText" },
         "objectText": object_text
     })
+}
+
+fn node_resolve_payload_with_target(
+    base_revision: &str,
+    object_text: &str,
+    target: Value,
+) -> Value {
+    let mut payload = node_resolve_payload(base_revision, object_text);
+    payload
+        .as_object_mut()
+        .expect("node.resolve payload should be an object")
+        .insert("target".to_owned(), target);
+    payload
 }
 
 fn node_replace_payload_with_params(
@@ -509,6 +576,20 @@ fn node_replace_payload_with_params(
             .expect("node.replace payload should be an object")
             .insert("params".to_owned(), params);
     }
+    payload
+}
+
+fn node_replace_payload_with_policy(
+    base_revision: &str,
+    node_id: &str,
+    object_text: &str,
+    policy: &str,
+) -> Value {
+    let mut payload = node_replace_payload_with_params(base_revision, node_id, object_text, None);
+    payload
+        .as_object_mut()
+        .expect("node.replace payload should be an object")
+        .insert("interfaceIncidentEdgePolicy".to_owned(), json!(policy));
     payload
 }
 
@@ -729,6 +810,243 @@ async fn websocket_attach_returns_server_issued_identity_snapshot_and_cursor() {
     assert!(attached["payload"]["currentRevisions"]["sessionRevision"].is_u64());
     assert!(attached["payload"]["snapshot"].is_object());
     assert!(attached["payload"]["globalCursor"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn websocket_rejects_invalid_frames_session_mismatch_and_pre_attach_commands() {
+    let runtime = spawn_runtime().await;
+    let mut socket = connect_session(&runtime, "default").await;
+
+    socket
+        .send(Message::Text("{".into()))
+        .await
+        .expect("invalid JSON frame sends");
+    let invalid_json = next_type(&mut socket, "runtime.error").await;
+    assert_eq!(
+        invalid_json["payload"]["diagnostic"]["code"],
+        "realtime.frame.invalid-json"
+    );
+
+    socket
+        .send(Message::Binary(vec![1, 2, 3].into()))
+        .await
+        .expect("binary frame sends");
+    let binary = next_type(&mut socket, "runtime.error").await;
+    assert_eq!(
+        binary["payload"]["diagnostic"]["code"],
+        "realtime.frame.binary-unsupported"
+    );
+
+    send_json(
+        &mut socket,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "session.hello",
+            "messageId": "hello-wrong-session",
+            "sessionId": "other",
+            "payload": {}
+        }),
+    )
+    .await;
+    let mismatch = next_type(&mut socket, "runtime.error").await;
+    assert_eq!(
+        mismatch["payload"]["diagnostic"]["code"],
+        "realtime.session.mismatch"
+    );
+    assert_eq!(
+        mismatch["payload"]["diagnostic"]["details"]["expectedSessionId"],
+        "default"
+    );
+    assert_eq!(
+        mismatch["payload"]["diagnostic"]["details"]["actualSessionId"],
+        "other"
+    );
+
+    for (message_type, payload) in [
+        (
+            "presence.update",
+            json!({
+                "ttlMs": 30000,
+                "presence": { "state": "active" }
+            }),
+        ),
+        (
+            "control.command",
+            json!({
+                "nodeId": "value_1",
+                "portId": "in",
+                "message": bang_message()
+            }),
+        ),
+        ("graph.command", view_patch_payload(1, 120.0, 120.0)),
+        ("nodeCatalog.request", json!({})),
+    ] {
+        send_json(
+            &mut socket,
+            json!({
+                "schema": "skenion.runtime.realtime",
+                "schemaVersion": "0.1.0",
+                "type": message_type,
+                "messageId": format!("pre-attach-{message_type}"),
+                "sessionId": "default",
+                "commandId": format!("pre-attach-{message_type}"),
+                "correlationId": format!("pre-attach-{message_type}"),
+                "idempotencyKey": format!("pre-attach-key-{message_type}"),
+                "payload": payload
+            }),
+        )
+        .await;
+        let error = next_type(&mut socket, "runtime.error").await;
+        assert_eq!(
+            error["payload"]["diagnostic"]["code"], "realtime.session.not-attached",
+            "{message_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn realtime_node_catalog_request_rejects_malformed_payload() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut socket = connect_session(&runtime, "default").await;
+    let attached = attach(&mut socket, "hello-1", None).await;
+
+    send_node_catalog_request_payload(
+        &mut socket,
+        "catalog-request-invalid",
+        Value::String("not-an-object".to_owned()),
+    )
+    .await;
+    let error = next_type(&mut socket, "runtime.error").await;
+
+    assert_eq!(attached["type"], "session.attached");
+    assert_eq!(
+        error["payload"]["diagnostic"]["code"],
+        "realtime.node-catalog.invalid-payload"
+    );
+    assert_eq!(error["connectionId"], attached["connectionId"]);
+    assert_eq!(error["clientId"], attached["clientId"]);
+    assert_eq!(error["windowId"], attached["windowId"]);
+}
+
+#[tokio::test]
+async fn realtime_attached_commands_reject_missing_idempotency_invalid_payloads_and_node_input_fields()
+ {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_json(
+        &mut client_a,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "presence.update",
+            "messageId": "presence-missing-idempotency",
+            "sessionId": "default",
+            "payload": {
+                "ttlMs": 30000,
+                "presence": { "state": "active" }
+            }
+        }),
+    )
+    .await;
+    let missing_presence_key = next_type(&mut client_a, "runtime.error").await;
+
+    send_json(
+        &mut client_a,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "control.command",
+            "messageId": "control-invalid-payload",
+            "sessionId": "default",
+            "idempotencyKey": "control-invalid-payload-key",
+            "payload": "not-an-object"
+        }),
+    )
+    .await;
+    let invalid_control_payload = next_type(&mut client_a, "runtime.error").await;
+
+    send_json(
+        &mut client_a,
+        json!({
+            "schema": "skenion.runtime.realtime",
+            "schemaVersion": "0.1.0",
+            "type": "graph.command",
+            "messageId": "graph-invalid-payload",
+            "sessionId": "default",
+            "idempotencyKey": "graph-invalid-payload-key",
+            "payload": "not-an-object"
+        }),
+    )
+    .await;
+    let invalid_graph_payload = next_type(&mut client_a, "runtime.error").await;
+
+    for (name, payload, expected_code) in [
+        (
+            "missing-node",
+            json!({
+                "kind": "node.input",
+                "baseSessionRevision": 1,
+                "portId": "in",
+                "message": bang_message()
+            }),
+            "graph.command.node-id-required",
+        ),
+        (
+            "missing-port",
+            json!({
+                "kind": "node.input",
+                "baseSessionRevision": 1,
+                "nodeId": "value_1",
+                "message": bang_message()
+            }),
+            "graph.command.port-id-required",
+        ),
+        (
+            "missing-message",
+            json!({
+                "kind": "node.input",
+                "baseSessionRevision": 1,
+                "nodeId": "value_1",
+                "portId": "in"
+            }),
+            "graph.command.message-required",
+        ),
+    ] {
+        send_graph_command(
+            &mut client_a,
+            &format!("node-input-{name}"),
+            &format!("node-input-{name}-key"),
+            payload,
+        )
+        .await;
+        let ack = next_type(&mut client_a, "graph.ack").await;
+        assert_eq!(ack["payload"]["status"], "rejected", "{name}");
+        assert_eq!(
+            ack["payload"]["diagnostics"][0]["code"], expected_code,
+            "{name}"
+        );
+    }
+
+    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+
+    assert_eq!(
+        missing_presence_key["payload"]["diagnostic"]["code"],
+        "realtime.command.idempotency-key-required"
+    );
+    assert_eq!(
+        invalid_control_payload["payload"]["diagnostic"]["code"],
+        "realtime.control.invalid-payload"
+    );
+    assert_eq!(
+        invalid_graph_payload["payload"]["diagnostic"]["code"],
+        "realtime.graph.invalid-payload"
+    );
+    assert!(no_broadcast.is_err());
 }
 
 #[tokio::test]
@@ -1611,6 +1929,50 @@ async fn realtime_graph_node_create_osc_materializes_node_through_ws_command() {
 }
 
 #[tokio::test]
+async fn realtime_graph_node_create_generates_slugged_ids_when_request_id_is_absent() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_graph_command(
+        &mut client_a,
+        "node-create-auto-1",
+        "node-create-auto-key-1",
+        node_create_payload_without_requested_id("1", "osc~ 220"),
+    )
+    .await;
+    let first_ack = next_type(&mut client_a, "graph.ack").await;
+    let first_broadcast = next_type(&mut client_b, "graph.applied").await;
+
+    let mut second_payload = node_create_payload_without_requested_id("2", "osc~ 220");
+    second_payload
+        .as_object_mut()
+        .expect("node.create payload should be an object")
+        .remove("baseSessionRevision");
+    send_graph_command(
+        &mut client_a,
+        "node-create-auto-2",
+        "node-create-auto-key-2",
+        second_payload,
+    )
+    .await;
+    let second_ack = next_type(&mut client_a, "graph.ack").await;
+    let second_broadcast = next_type(&mut client_b, "graph.applied").await;
+    let project = loaded_project_json(&runtime);
+
+    assert_eq!(first_ack["payload"]["status"], "accepted");
+    assert_eq!(first_ack["payload"]["node"]["nodeId"], "osc_220");
+    assert_eq!(first_broadcast["payload"]["node"]["nodeId"], "osc_220");
+    assert_eq!(second_ack["payload"]["status"], "accepted");
+    assert_eq!(second_ack["payload"]["node"]["nodeId"], "osc_220_2");
+    assert_eq!(second_broadcast["payload"]["node"]["nodeId"], "osc_220_2");
+    assert!(graph_node(&project, "osc_220").is_object());
+    assert!(graph_node(&project, "osc_220_2").is_object());
+}
+
+#[tokio::test]
 async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
@@ -1720,6 +2082,78 @@ async fn realtime_graph_node_resolve_unknown_returns_diagnostics_without_apply()
 }
 
 #[tokio::test]
+async fn realtime_graph_node_commands_validate_targets_before_session_mutation() {
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    let mut missing_target = node_create_payload("1", "missing_target_1", "osc~ 220");
+    missing_target
+        .as_object_mut()
+        .expect("node.create payload should be an object")
+        .remove("target");
+    send_graph_command(
+        &mut client_a,
+        "node-create-missing-target",
+        "node-create-missing-target-key",
+        missing_target,
+    )
+    .await;
+    let missing_target_ack = next_type(&mut client_a, "graph.ack").await;
+
+    let mut mismatched_target_revision =
+        node_create_payload("1", "mismatched_target_revision_1", "osc~ 220");
+    mismatched_target_revision
+        .as_object_mut()
+        .expect("node.create payload should be an object")
+        .insert("baseGraphRevision".to_owned(), json!("2"));
+    send_graph_command(
+        &mut client_a,
+        "node-create-target-revision-mismatch",
+        "node-create-target-revision-mismatch-key",
+        mismatched_target_revision,
+    )
+    .await;
+    let target_revision_ack = next_type(&mut client_a, "graph.ack").await;
+
+    send_graph_command(
+        &mut client_a,
+        "node-resolve-missing-graph",
+        "node-resolve-missing-graph-key",
+        node_resolve_payload_with_target(
+            "1",
+            "osc~ 220",
+            project_patch_target("missing-patcher", "1"),
+        ),
+    )
+    .await;
+    let missing_graph_ack = next_type(&mut client_a, "graph.ack").await;
+    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+    let project = loaded_project_json(&runtime);
+
+    assert_eq!(missing_target_ack["payload"]["status"], "rejected");
+    assert_eq!(
+        missing_target_ack["payload"]["diagnostics"][0]["code"],
+        "graph.command.target-required"
+    );
+    assert_eq!(target_revision_ack["payload"]["status"], "conflict");
+    assert_eq!(target_revision_ack["payload"]["conflict"], true);
+    assert_eq!(
+        target_revision_ack["payload"]["diagnostics"][0]["code"],
+        "graph.command.target-revision-conflict"
+    );
+    assert_eq!(missing_graph_ack["payload"]["status"], "rejected");
+    assert_eq!(
+        missing_graph_ack["payload"]["diagnostics"][0]["code"],
+        "node.target.missing-graph"
+    );
+    assert_eq!(project["graph"]["revision"], "1");
+    assert!(no_broadcast.is_err());
+}
+
+#[tokio::test]
 async fn realtime_graph_node_create_missing_materializes_diagnostic_node_by_default() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
@@ -1790,6 +2224,71 @@ async fn realtime_graph_node_create_ambiguous_shortcut_materializes_diagnostic_n
 }
 
 #[tokio::test]
+async fn realtime_graph_node_create_rejects_no_project_duplicate_and_patch_view_edges() {
+    let unloaded = spawn_runtime().await;
+    let mut unloaded_socket = connect_session(&unloaded, "default").await;
+    let _unloaded_attached = attach(&mut unloaded_socket, "hello-unloaded", None).await;
+
+    let mut no_project_payload = node_create_payload("1", "no_project_1", "osc~ 220");
+    no_project_payload
+        .as_object_mut()
+        .expect("node.create payload should be an object")
+        .remove("baseSessionRevision");
+    send_graph_command(
+        &mut unloaded_socket,
+        "node-create-no-project",
+        "node-create-no-project-key",
+        no_project_payload,
+    )
+    .await;
+    let no_project_ack = next_type(&mut unloaded_socket, "graph.ack").await;
+
+    let runtime = spawn_loaded_runtime().await;
+    let mut client_a = connect_session(&runtime, "default").await;
+    let mut client_b = connect_session(&runtime, "default").await;
+    let _attached_a = attach(&mut client_a, "hello-a", None).await;
+    let _attached_b = attach(&mut client_b, "hello-b", None).await;
+
+    send_graph_command(
+        &mut client_a,
+        "node-create-duplicate",
+        "node-create-duplicate-key",
+        node_create_payload("1", "value_1", "osc~ 220"),
+    )
+    .await;
+    let duplicate_ack = next_type(&mut client_a, "graph.ack").await;
+
+    send_graph_command(
+        &mut client_a,
+        "node-create-patch-view",
+        "node-create-patch-view-key",
+        node_create_project_patch_payload("my-patcher", "1", "patch_osc_1", "osc~ 220"),
+    )
+    .await;
+    let patch_view_ack = next_type(&mut client_a, "graph.ack").await;
+    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+    let project = loaded_project_json(&runtime);
+
+    assert_eq!(no_project_ack["payload"]["status"], "rejected");
+    assert_eq!(
+        no_project_ack["payload"]["diagnostics"][0]["code"],
+        "node.target.no-project"
+    );
+    assert_eq!(duplicate_ack["payload"]["status"], "rejected");
+    assert_eq!(
+        duplicate_ack["payload"]["diagnostics"][0]["code"],
+        "node.create.node-id-conflict"
+    );
+    assert_eq!(patch_view_ack["payload"]["status"], "rejected");
+    assert_eq!(
+        patch_view_ack["payload"]["diagnostics"][0]["code"],
+        "collaboration.patch-view-unsupported"
+    );
+    assert_eq!(project["graph"]["revision"], "1");
+    assert!(no_broadcast.is_err());
+}
+
+#[tokio::test]
 async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incident_edges() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
@@ -1843,6 +2342,51 @@ async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incide
             .any(|edge_id| edge_id == "edge_value_target")
     );
     assert!(graph_node(&project, "target_1").is_object());
+}
+
+#[tokio::test]
+async fn realtime_graph_node_replace_rejects_invalid_incident_edge_policies_without_mutation() {
+    for (policy, expected_code) in [
+        ("reject", "node.replace.invalid-incident-edge"),
+        (
+            "preserve-diagnostic",
+            "node.replace.preserve-diagnostic-unsupported",
+        ),
+    ] {
+        let runtime = spawn_loaded_runtime().await;
+        let mut client_a = connect_session(&runtime, "default").await;
+        let mut client_b = connect_session(&runtime, "default").await;
+        let _attached_a = attach(&mut client_a, &format!("hello-a-{policy}"), None).await;
+        let _attached_b = attach(&mut client_b, &format!("hello-b-{policy}"), None).await;
+
+        send_graph_command(
+            &mut client_a,
+            &format!("node-replace-policy-{policy}"),
+            &format!("node-replace-policy-key-{policy}"),
+            node_replace_payload_with_policy("1", "value_1", "osc~ 330", policy),
+        )
+        .await;
+        let ack = next_type(&mut client_a, "graph.ack").await;
+        let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+        let project = loaded_project_json(&runtime);
+        let node = graph_node(&project, "value_1");
+
+        assert_eq!(ack["payload"]["status"], "rejected", "{policy}");
+        assert_eq!(ack["payload"]["accepted"], false, "{policy}");
+        assert_eq!(
+            ack["payload"]["diagnostics"][0]["code"], expected_code,
+            "{policy}"
+        );
+        assert_eq!(project["graph"]["revision"], "1", "{policy}");
+        assert_eq!(node["kind"], "object.core.float", "{policy}");
+        assert!(
+            graph_edge_ids(&project)
+                .iter()
+                .any(|edge_id| edge_id == "edge_value_target"),
+            "{policy}"
+        );
+        assert!(no_broadcast.is_err(), "{policy}");
+    }
 }
 
 #[tokio::test]
