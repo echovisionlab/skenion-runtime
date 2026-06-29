@@ -1,5 +1,3 @@
-use std::{convert::Infallible, time::Duration};
-
 use axum::{
     Json, Router,
     body::Bytes,
@@ -11,15 +9,8 @@ use axum::{
         HeaderValue, Method, StatusCode,
         header::{CONTENT_TYPE, UPGRADE},
     },
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    response::{IntoResponse, Response},
     routing::{get, post},
-};
-use tokio_stream::{
-    Stream, StreamExt,
-    wrappers::{BroadcastStream, IntervalStream, errors::BroadcastStreamRecvError},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -27,9 +18,9 @@ use crate::{
     GeneratedShaderResponse, NodeDefinition, NodeRegistry, PackageRegistryListResponseV01,
     PreviewDocument, ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
     RuntimeControlStateResponse, RuntimeDiagnostic, RuntimeExtensionListResponse,
-    RuntimeIoDeviceListResponse, RuntimeLogSnapshotResponse, RuntimePreviewStartRequest,
-    RuntimeSessionEventKind, RuntimeSessionInfoResponse, RuntimeTelemetrySnapshot,
-    SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase, ShaderDiagnosticSource,
+    RuntimeIoDeviceListResponse, RuntimePreviewStartRequest, RuntimeSessionEventKind,
+    RuntimeSessionInfoResponse, SessionRunRequest, ShaderDiagnostic, ShaderDiagnosticPhase,
+    ShaderDiagnosticSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
     },
@@ -51,10 +42,14 @@ use crate::{
     validate_project_request_current,
 };
 
+mod logs;
 mod state;
+mod telemetry;
 mod types;
 
+use logs::{runtime_logs, runtime_logs_stream};
 pub use state::RuntimeServerState;
+use telemetry::{session_telemetry_by_id, session_telemetry_stream_by_id};
 pub use types::RuntimeApiResponse;
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -229,44 +224,6 @@ async fn runtime_packages(
     State(state): State<RuntimeServerState>,
 ) -> Json<PackageRegistryListResponseV01> {
     Json(state.packages.response())
-}
-
-async fn runtime_logs(State(state): State<RuntimeServerState>) -> Json<RuntimeLogSnapshotResponse> {
-    Json(state.logs.snapshot())
-}
-
-async fn runtime_logs_stream(
-    State(state): State<RuntimeServerState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let receiver = state.logs.subscribe();
-    let replay = tokio_stream::iter(
-        state
-            .logs
-            .snapshot()
-            .events
-            .into_iter()
-            .map(runtime_log_event),
-    );
-    let live = BroadcastStream::new(receiver).map(runtime_log_broadcast_event);
-    Sse::new(replay.chain(live)).keep_alive(KeepAlive::default())
-}
-
-fn runtime_log_broadcast_event(
-    result: Result<crate::RuntimeLogEvent, BroadcastStreamRecvError>,
-) -> Result<Event, Infallible> {
-    match result {
-        Ok(event) => runtime_log_event(event),
-        Err(_) => Ok(Event::default()
-            .event("log-gap")
-            .data("runtime log stream receiver lagged")),
-    }
-}
-
-fn runtime_log_event(event: crate::RuntimeLogEvent) -> Result<Event, Infallible> {
-    Ok(Event::default()
-        .event("log")
-        .json_data(event)
-        .expect("runtime log event should serialize"))
 }
 
 fn runtime_api_json(
@@ -949,65 +906,6 @@ async fn get_asset(
     asset_get_json(&state, response)
 }
 
-async fn session_telemetry_by_id(
-    State(state): State<RuntimeServerState>,
-    Path(session_id): Path<String>,
-) -> Json<RuntimeTelemetrySnapshot> {
-    Json(telemetry_snapshot(
-        &state,
-        state.sessions.get_or_create(&session_id),
-    ))
-}
-
-async fn session_telemetry_stream_by_id(
-    State(state): State<RuntimeServerState>,
-    Path(session_id): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    session_telemetry_stream_for(state, session_id)
-}
-
-fn session_telemetry_stream_for(
-    state: RuntimeServerState,
-    session_id: String,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream =
-        IntervalStream::new(tokio::time::interval(Duration::from_millis(1000))).map(move |_| {
-            let record = state.sessions.get_or_create(&session_id);
-            let event = Event::default()
-                .event("telemetry")
-                .json_data(telemetry_snapshot(&state, record))
-                .expect("telemetry snapshot should serialize");
-            Ok(event)
-        });
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-fn telemetry_snapshot(
-    state: &RuntimeServerState,
-    record: RuntimeSessionRecord,
-) -> RuntimeTelemetrySnapshot {
-    let snapshot = {
-        let session = record
-            .session
-            .read()
-            .expect("runtime session lock should not be poisoned");
-        session.snapshot()
-    };
-    let mut preview = record
-        .preview
-        .lock()
-        .expect("runtime preview lock should not be poisoned");
-    preview.telemetry(
-        snapshot,
-        state
-            .started_at
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX),
-    )
-}
-
 pub(crate) fn registry_from_nodes(
     nodes: Vec<NodeDefinition>,
 ) -> Result<NodeRegistry, Vec<RuntimeDiagnostic>> {
@@ -1058,6 +956,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
+        time::Duration,
     };
 
     use axum::{
@@ -1069,6 +968,7 @@ mod tests {
             },
         },
     };
+    use futures_util::StreamExt;
     use serde_json::{Value, json};
     use skenion_contracts::{
         CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
