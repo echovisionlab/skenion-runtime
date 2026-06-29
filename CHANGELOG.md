@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.1](https://github.com/skenion/skenion-runtime/compare/v0.49.0...v0.49.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **ci:** make runtime provenance non-blocking ([#208](https://github.com/skenion/skenion-runtime/issues/208)) ([e9f728c](https://github.com/skenion/skenion-runtime/commit/e9f728cf0269c0114d2d4f7be77119b6a4d28b91))
+
 ## [0.49.0](https://github.com/skenion/skenion-runtime/compare/v0.48.0...v0.49.0) (2026-06-29)
 
 
