@@ -51,6 +51,36 @@ fn validate_and_plan_fail_without_loaded_project() {
 }
 
 #[test]
+fn session_snapshot_accessors_and_view_mutation_builder_preserve_metadata() {
+    let mut session = RuntimeSession::default();
+    let empty = session.snapshot();
+    assert!(!empty.loaded());
+    assert_eq!(empty.graph_id(), None);
+    assert_eq!(empty.graph_revision(), None);
+    assert!(empty.view_state().is_none());
+
+    let response = session.load_project_current(sample_project_current());
+    assert!(response.ok);
+    let snapshot = response.snapshot;
+    assert!(snapshot.loaded());
+    assert_eq!(snapshot.graph_id(), Some("minimal-value"));
+    assert_eq!(snapshot.graph_revision(), Some("1"));
+    assert!(snapshot.view_state().is_some());
+
+    let request = RuntimeMutationRequest::view_patch(RuntimeViewPatch {
+        base_view_revision: snapshot.view_revision,
+        ops: Vec::new(),
+    })
+    .with_client_id("client-a")
+    .with_description("move canvas");
+
+    assert!(request.graph_patch.is_none());
+    assert!(request.view_patch.is_some());
+    assert_eq!(request.client_id.as_deref(), Some("client-a"));
+    assert_eq!(request.description.as_deref(), Some("move canvas"));
+}
+
+#[test]
 fn session_snapshot_derives_endpoint_binding_value_formats() {
     let mut session = RuntimeSession::default();
 

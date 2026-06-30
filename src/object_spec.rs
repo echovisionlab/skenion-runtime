@@ -523,6 +523,8 @@ use resolver::{
     explicit_project_patch_ref, failure, parse_object_spec_input_v01, unresolved_resolution,
     unsupported_first_party_audio_message,
 };
+#[cfg(test)]
+use resolver::{contract_object_spec_atom_to_runtime, runtime_object_spec_diagnostic_code};
 
 #[cfg(test)]
 mod tests;

@@ -46,7 +46,7 @@ pub(super) fn parse_object_spec_input_v01(
     )))
 }
 
-fn runtime_object_spec_diagnostic_code(code: &str) -> String {
+pub(super) fn runtime_object_spec_diagnostic_code(code: &str) -> String {
     match code {
         "empty-object-spec" => "object-spec.empty".to_owned(),
         "invalid-syntax" => "object-spec.invalid-syntax".to_owned(),
@@ -55,7 +55,7 @@ fn runtime_object_spec_diagnostic_code(code: &str) -> String {
     }
 }
 
-fn contract_object_spec_atom_to_runtime(
+pub(super) fn contract_object_spec_atom_to_runtime(
     atom: &skenion_contracts::ObjectSpecAtomV01,
 ) -> ObjectSpecAtom {
     match atom {

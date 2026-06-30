@@ -73,3 +73,6 @@ impl CoreNodeImplementation for CoreNodeDescriptor {
         self.constructor
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -328,6 +328,15 @@ fn reports_unresolved_and_syntax_diagnostics_without_runtime_mapping() {
 
     let empty = resolve_object_spec_v01("   ");
     assert_eq!(empty.diagnostics[0].code, "object-spec.empty");
+
+    assert_eq!(
+        runtime_object_spec_diagnostic_code("object-spec.custom-parser-code"),
+        "object-spec.custom-parser-code"
+    );
+    assert_eq!(
+        runtime_object_spec_diagnostic_code("custom-parser-code"),
+        "object-spec.custom-parser-code"
+    );
 }
 
 #[test]
@@ -368,6 +377,8 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
 
     let explicit = registry.resolve("p my-patcher");
     assert_kind(&explicit, "object.project.patch.my-patcher");
+    let explicit_canonical = registry.resolve("object.core.subpatch my-patcher");
+    assert_kind(&explicit_canonical, "object.project.patch.my-patcher");
 
     assert_diagnostic(
         &registry.resolve("my-patcher 1"),
@@ -402,6 +413,31 @@ fn project_patch_registry_projects_catalog_and_resolution_edges() {
         },
     );
     assert_diagnostic(&mismatched, "object-spec.unresolved");
+}
+
+#[test]
+fn object_spec_parser_preserves_runtime_atom_boundaries() {
+    let large_uint =
+        contract_object_spec_atom_to_runtime(&skenion_contracts::ObjectSpecAtomV01::Uint {
+            value: u64::MAX,
+            representation: None,
+        });
+    assert_eq!(large_uint, ObjectSpecAtom::Symbol(u64::MAX.to_string()));
+    let in_range_uint =
+        contract_object_spec_atom_to_runtime(&skenion_contracts::ObjectSpecAtomV01::Uint {
+            value: i64::MAX as u64,
+            representation: None,
+        });
+    assert_eq!(in_range_uint, ObjectSpecAtom::Int(i64::MAX));
+
+    assert_diagnostic(
+        &resolve_object_spec_v01("int false"),
+        "object-spec.invalid-arg-type",
+    );
+    assert_diagnostic(
+        &resolve_object_spec_v01("uint false"),
+        "object-spec.invalid-arg-type",
+    );
 }
 
 #[test]
