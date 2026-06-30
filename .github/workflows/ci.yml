@@ -216,10 +216,47 @@ jobs:
           post_expect_ok true /v0/run fixtures/current-0.1/valid/clear-color-render.project.json
           post_expect_ok false /v0/validate fixtures/current-0.1/invalid/incompatible-edge.project.json
 
-          curl --fail --silent \
+          LOAD_REQUEST="$(mktemp)"
+          python3 - "${LOAD_REQUEST}" <<'PY'
+          import json
+          import sys
+
+          graph = {
+              "schema": "skenion.graph",
+              "schemaVersion": "0.1.0",
+              "id": "runtime-smoke-empty",
+              "revision": "1",
+              "nodes": [],
+              "edges": [],
+          }
+          project = {
+              "schema": "skenion.project",
+              "schemaVersion": "0.1.0",
+              "id": graph["id"],
+              "documentId": "00000000-0000-0000-0000-000000000001",
+              "revision": graph["revision"],
+              "graph": graph,
+              "viewState": {
+                  "schema": "skenion.view-state",
+                  "schemaVersion": "0.1.0",
+                  "canvas": {"nodes": {}},
+              },
+              "patchLibrary": [],
+          }
+          load_request = {
+              "schema": "skenion.runtime.session-load-request",
+              "schemaVersion": "0.1.0",
+              "project": project,
+              "mode": "loadIfEmpty",
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as fh:
+              json.dump(load_request, fh)
+          PY
+          LOAD_RESPONSE="$(curl --fail --silent \
             -H "content-type: application/json" \
-            --data @fixtures/current-0.1/valid/clear-color-render.project.json \
-            http://127.0.0.1:3761/v0/sessions/default/load >/dev/null
+            --data @"${LOAD_REQUEST}" \
+            http://127.0.0.1:3761/v0/sessions/default/load)"
+          python3 -c 'import json, sys; r=json.loads(sys.argv[1]); assert r["ok"] is True' "${LOAD_RESPONSE}"
 
           PREVIEW_START="$(curl --fail --silent \
             -H "content-type: application/json" \
