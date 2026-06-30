@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::{Map, json};
 
 fn assert_kind(resolution: &ObjectSpecResolution, kind: &str) {
     assert!(resolution.ok(), "{resolution:?}");
