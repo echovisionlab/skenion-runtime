@@ -12,131 +12,20 @@ use crate::{
     nodes::{CoreNodeConstructor, CoreNodeImplementation, first_party_core_nodes},
 };
 
+mod types;
+
+pub(crate) use types::{
+    ObjectRegistry, ObjectSpecAtom, ObjectSpecCandidateSummary, ObjectSpecDiagnostic,
+    ObjectSpecPort, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
+    ObjectSpecResolution,
+};
+
+use types::{
+    ObjectRegistryCandidate, ObjectRegistrySource, ParsedObjectSpec, ProjectPatchCandidate,
+};
+
 const CURRENT_KIND_VERSION: &str = "0.1.0";
 pub(crate) const PROJECT_PATCH_OBJECT_KIND_PREFIX: &str = "object.project.patch.";
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ObjectSpecResolution {
-    pub(crate) input: String,
-    pub(crate) display_text: String,
-    pub(crate) class_symbol: String,
-    pub(crate) creation_args: Vec<ObjectSpecAtom>,
-    pub(crate) resolved_kind: Option<String>,
-    pub(crate) resolved_kind_version: Option<String>,
-    pub(crate) params: Map<String, Value>,
-    pub(crate) instance_ports: Vec<ObjectSpecPort>,
-    pub(crate) candidates: Vec<ObjectSpecCandidateSummary>,
-    pub(crate) diagnostics: Vec<ObjectSpecDiagnostic>,
-}
-
-impl ObjectSpecResolution {
-    pub(crate) fn ok(&self) -> bool {
-        self.diagnostics.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectSpecCandidateSummary {
-    pub(crate) id: String,
-    pub(crate) source: String,
-    pub(crate) kind: String,
-    pub(crate) display_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ObjectSpecAtom {
-    Float(f64),
-    Int(i64),
-    Bool(bool),
-    Symbol(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectSpecDiagnostic {
-    pub(crate) code: String,
-    pub(crate) message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectSpecPort {
-    pub(crate) id: String,
-    pub(crate) direction: ObjectSpecPortDirection,
-    pub(crate) port_type: String,
-    pub(crate) label: Option<String>,
-    pub(crate) rate: ObjectSpecPortRate,
-    pub(crate) accepts: Option<Vec<String>>,
-    pub(crate) activation: Option<ObjectSpecPortActivation>,
-    pub(crate) message_keys: Option<MessageKeyPolicyV01>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectSpecPortDirection {
-    Input,
-    Output,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectSpecPortRate {
-    Event,
-    Control,
-    Audio,
-    Render,
-    Gpu,
-    Resource,
-    Io,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectSpecPortActivation {
-    Trigger,
-    Latched,
-    Passive,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ObjectRegistry {
-    candidates: Vec<ObjectRegistryCandidate>,
-    allow_unchecked_project_patch_refs: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-enum ObjectRegistrySource {
-    FirstPartyCore,
-    ProjectPatch,
-    PackageProvider,
-    NativeProvider,
-}
-
-#[derive(Debug, Clone)]
-struct ObjectRegistryCandidate {
-    id: String,
-    source: ObjectRegistrySource,
-    aliases: Vec<String>,
-    kind: String,
-    kind_version: String,
-    display_name: String,
-    constructor: Option<CoreNodeConstructor>,
-    catalog_category: Option<&'static str>,
-    project_patch: Option<ProjectPatchCandidate>,
-}
-
-#[derive(Debug, Clone)]
-struct ProjectPatchCandidate {
-    patch_id: String,
-    revision: String,
-    description: Option<String>,
-    interface_digest: PackageChecksumV01,
-    ports: Vec<ObjectSpecPort>,
-}
-
-#[derive(Debug, Clone)]
-struct ParsedObjectSpec {
-    input: String,
-    display_text: String,
-    class_symbol: String,
-    creation_args: Vec<ObjectSpecAtom>,
-}
 
 impl ObjectRegistry {
     pub(crate) fn first_party_core() -> Self {
