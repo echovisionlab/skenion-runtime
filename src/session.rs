@@ -36,7 +36,9 @@ use binding_formats::derive_runtime_binding_formats;
 use binding_formats::{
     runtime_binding_format_revision, runtime_value_format_label, value_format_for_port_type,
 };
-use history::{HistoryDirection, project_document_history_delta};
+use history::{
+    HistoryApplyOutcome, HistoryDirection, HistoryEntry, project_document_history_delta,
+};
 #[cfg(test)]
 use history::{
     redo_graph_history_delta_current, undo_graph_history_delta_current,
@@ -138,56 +140,6 @@ impl Default for RuntimeSession {
             next_event_sequence: 1,
             package_registry_revision: None,
             node_catalog: RuntimeNodeCatalogCache::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum HistoryEntry {
-    Mutation {
-        event_id: String,
-        actor_id: Option<String>,
-        mutation: RuntimeMutationRequest,
-        inverse_mutation: RuntimeMutationRequest,
-    },
-    ProjectDocument {
-        event_id: String,
-        actor_id: Option<String>,
-        before: Box<ProjectDocumentCurrent>,
-        after: Box<ProjectDocumentCurrent>,
-        before_view_revision: u64,
-        after_view_revision: u64,
-        mutation: RuntimeMutationRequest,
-        inverse_mutation: RuntimeMutationRequest,
-    },
-}
-
-impl HistoryEntry {
-    fn actor_id(&self) -> Option<&str> {
-        match self {
-            Self::Mutation { actor_id, .. } => actor_id.as_deref(),
-            Self::ProjectDocument { actor_id, .. } => actor_id.as_deref(),
-        }
-    }
-}
-
-struct HistoryApplyOutcome {
-    applied: bool,
-    response: RuntimePatchResponse,
-}
-
-impl HistoryApplyOutcome {
-    fn applied(response: RuntimePatchResponse) -> Self {
-        Self {
-            applied: true,
-            response,
-        }
-    }
-
-    fn rejected(response: RuntimePatchResponse) -> Self {
-        Self {
-            applied: false,
-            response,
         }
     }
 }

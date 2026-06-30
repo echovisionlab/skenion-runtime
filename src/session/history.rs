@@ -6,6 +6,56 @@ pub(super) enum HistoryDirection {
     Redo,
 }
 
+#[derive(Debug, Clone)]
+pub(super) enum HistoryEntry {
+    Mutation {
+        event_id: String,
+        actor_id: Option<String>,
+        mutation: RuntimeMutationRequest,
+        inverse_mutation: RuntimeMutationRequest,
+    },
+    ProjectDocument {
+        event_id: String,
+        actor_id: Option<String>,
+        before: Box<ProjectDocumentCurrent>,
+        after: Box<ProjectDocumentCurrent>,
+        before_view_revision: u64,
+        after_view_revision: u64,
+        mutation: RuntimeMutationRequest,
+        inverse_mutation: RuntimeMutationRequest,
+    },
+}
+
+impl HistoryEntry {
+    pub(super) fn actor_id(&self) -> Option<&str> {
+        match self {
+            Self::Mutation { actor_id, .. } => actor_id.as_deref(),
+            Self::ProjectDocument { actor_id, .. } => actor_id.as_deref(),
+        }
+    }
+}
+
+pub(super) struct HistoryApplyOutcome {
+    pub(super) applied: bool,
+    pub(super) response: RuntimePatchResponse,
+}
+
+impl HistoryApplyOutcome {
+    pub(super) fn applied(response: RuntimePatchResponse) -> Self {
+        Self {
+            applied: true,
+            response,
+        }
+    }
+
+    pub(super) fn rejected(response: RuntimePatchResponse) -> Self {
+        Self {
+            applied: false,
+            response,
+        }
+    }
+}
+
 pub(super) fn project_document_history_delta(
     current: &ProjectDocumentCurrent,
     before: &ProjectDocumentCurrent,
