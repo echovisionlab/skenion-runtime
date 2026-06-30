@@ -1,8 +1,4 @@
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
-use skenion_contracts::{
-    InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01, PackageChecksumV01,
-};
+use serde_json::json;
 
 use super::node_catalog::{node_catalog_changed_event, node_catalog_snapshot_for_session};
 use super::protocol::*;
@@ -13,109 +9,23 @@ use super::wire::{
 mod control;
 mod events;
 mod object_nodes;
+mod outcome;
+mod types;
 
 use crate::runtime_time::created_at_now;
 use crate::{
-    CanvasNodeView, ControlMessage, DiagnosticSeverity, GraphTargetRef, PasteGraphFragmentRequest,
-    PasteGraphFragmentResponse, PatchPath, RuntimeCollaborationChange, RuntimeControlEventRequest,
-    RuntimeDiagnostic, RuntimeMutationRequest, RuntimeOperationAttribution,
-    RuntimeOperationDiagnostic, RuntimeOperationEnvelope, RuntimePatchResponse,
-    RuntimeSessionRecord, RuntimeViewPatch,
+    DiagnosticSeverity, PatchPath, RuntimeControlEventRequest, RuntimeDiagnostic,
+    RuntimeMutationRequest, RuntimeOperationAttribution, RuntimeOperationDiagnostic,
+    RuntimeOperationEnvelope, RuntimePatchResponse, RuntimeSessionRecord,
 };
 use control::{GraphControlEmission, apply_control_command};
 pub(super) use events::{control_emitted_event, graph_ack_from_cached};
 use events::{graph_ack, graph_applied_event};
-
-#[derive(Clone, Copy)]
-pub(super) struct RealtimeEventPosition<'a> {
-    pub(super) sequence: u64,
-    pub(super) cursor: &'a str,
-}
-
-struct GraphEventContext<'a> {
-    record: &'a RuntimeSessionRecord,
-    identity: &'a RuntimeRealtimeConnectionIdentity,
-    frame: &'a RuntimeRealtimeEnvelope,
-    command: &'a GraphCommandPayload,
-    response: &'a RuntimePatchResponse,
-    node_result: Option<&'a Value>,
-    operation_result: Option<&'a PasteGraphFragmentResponse>,
-    position: RealtimeEventPosition<'a>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct GraphCommandPayload {
-    kind: String,
-    #[serde(default)]
-    base_session_revision: Option<u64>,
-    #[serde(default)]
-    base_graph_revision: Option<String>,
-    #[serde(default)]
-    base_view_revision: Option<u64>,
-    #[serde(default)]
-    target: Option<GraphTargetRef>,
-    #[serde(default)]
-    view_patch: Option<RuntimeViewPatch>,
-    #[serde(default)]
-    changes: Option<Vec<RuntimeCollaborationChange>>,
-    #[serde(default)]
-    #[serde(rename = "objectSpec")]
-    object_spec: Option<String>,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    requested_node_id: Option<String>,
-    #[serde(default)]
-    view: Option<CanvasNodeView>,
-    #[serde(default)]
-    params: Option<Map<String, Value>>,
-    #[serde(default)]
-    port_id: Option<String>,
-    #[serde(default)]
-    message: Option<ControlMessage>,
-    #[serde(default)]
-    request: Option<PasteGraphFragmentRequest>,
-    #[serde(default)]
-    scope: Option<HistoryCommandScope>,
-    #[serde(default)]
-    unresolved_policy: Option<ObjectUnresolvedPolicy>,
-    #[serde(default)]
-    interface_incident_edge_policy: Option<InterfaceIncidentEdgePolicyV01>,
-    #[serde(default)]
-    surface_path: Option<Value>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-impl GraphCommandPayload {
-    fn command_kind(&self) -> Option<GraphCommandKind> {
-        GraphCommandKind::parse(&self.kind)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum HistoryCommandScope {
-    Client,
-    Global,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum ObjectUnresolvedPolicy {
-    Reject,
-    MaterializeDiagnostic,
-}
-
-#[derive(Debug)]
-pub(super) struct GraphCommandOutcome {
-    pub(super) response: RuntimePatchResponse,
-    node_result: Option<Value>,
-    operation_result: Option<PasteGraphFragmentResponse>,
-    control_emission: Option<GraphControlEmission>,
-    catalog_snapshot: Option<NodeCatalogSnapshotV01>,
-}
+pub(super) use outcome::GraphCommandOutcome;
+pub(super) use types::{
+    GraphCommandPayload, GraphEventContext, HistoryCommandScope, ObjectUnresolvedPolicy,
+    RealtimeEventPosition,
+};
 
 pub(super) fn handle_graph_command(
     record: &RuntimeSessionRecord,
@@ -670,69 +580,6 @@ fn operation_diagnostics_to_runtime(
             })),
         })
         .collect()
-}
-
-impl GraphCommandOutcome {
-    fn from_response(response: RuntimePatchResponse) -> Self {
-        Self {
-            response,
-            node_result: None,
-            operation_result: None,
-            control_emission: None,
-            catalog_snapshot: None,
-        }
-    }
-
-    fn with_operation_result(
-        response: RuntimePatchResponse,
-        operation_result: PasteGraphFragmentResponse,
-    ) -> Self {
-        Self {
-            response,
-            node_result: None,
-            operation_result: Some(operation_result),
-            control_emission: None,
-            catalog_snapshot: None,
-        }
-    }
-
-    fn with_node_result(response: RuntimePatchResponse, node_result: Value) -> Self {
-        Self {
-            response,
-            node_result: Some(node_result),
-            operation_result: None,
-            control_emission: None,
-            catalog_snapshot: None,
-        }
-    }
-
-    fn with_node_result_and_control_emission(
-        response: RuntimePatchResponse,
-        node_result: Value,
-        control_emission: Option<GraphControlEmission>,
-    ) -> Self {
-        Self {
-            response,
-            node_result: Some(node_result),
-            operation_result: None,
-            control_emission,
-            catalog_snapshot: None,
-        }
-    }
-
-    fn with_catalog_change(
-        mut self,
-        before_catalog_revision: PackageChecksumV01,
-        session: &crate::RuntimeSession,
-    ) -> Self {
-        if self.response.applied {
-            let snapshot = node_catalog_snapshot_for_session(session);
-            if snapshot.catalog_revision != before_catalog_revision {
-                self.catalog_snapshot = Some(snapshot);
-            }
-        }
-        self
-    }
 }
 
 pub(super) use object_nodes::{
