@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::object_text::{
+use crate::object_spec::{
     ObjectRegistry, PROJECT_PATCH_OBJECT_KIND_PREFIX, is_payload_identity_kind,
-    resolve_object_text_v01,
+    resolve_object_spec_v01,
 };
 use crate::{
     CycleValidationCurrent, DataFlow, DataType, EdgeEndpointCurrent, EdgeSpecCurrent,
@@ -704,7 +704,7 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
     ["patchRef", "patchId", "patch", "ref", "name", "id"]
         .into_iter()
         .find_map(|key| string_param(&node.params, key))
-        .or_else(|| subpatch_object_text(node).and_then(|text| parse_subpatch_object_text(&text)))
+        .or_else(|| subpatch_object_spec(node).and_then(|text| parse_subpatch_object_spec(&text)))
         .or_else(|| {
             node.kind
                 .strip_prefix(PROJECT_PATCH_OBJECT_KIND_PREFIX)
@@ -712,8 +712,8 @@ fn subpatch_ref(node: &GraphNodeCurrent) -> Option<String> {
         })
 }
 
-fn parse_subpatch_object_text(text: &str) -> Option<String> {
-    let resolution = resolve_object_text_v01(text);
+fn parse_subpatch_object_spec(text: &str) -> Option<String> {
+    let resolution = resolve_object_spec_v01(text);
     if resolution.resolved_kind.as_deref() != Some(SUBPATCH_KIND) || !resolution.ok() {
         return None;
     }
@@ -724,20 +724,12 @@ fn parse_subpatch_object_text(text: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn subpatch_object_text(node: &GraphNodeCurrent) -> Option<String> {
-    node.object_text.clone().or_else(|| {
-        ["objectText", "sourceText", "text"]
-            .into_iter()
-            .find_map(|key| string_param(&node.params, key))
-    })
+fn subpatch_object_spec(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_spec.clone()
 }
 
-fn node_object_text(node: &GraphNodeCurrent) -> Option<String> {
-    node.object_text.clone().or_else(|| {
-        ["objectText", "sourceText"]
-            .into_iter()
-            .find_map(|key| string_param(&node.params, key))
-    })
+fn node_object_spec(node: &GraphNodeCurrent) -> Option<String> {
+    node.object_spec.clone()
 }
 
 fn string_param(params: &Map<String, Value>, key: &str) -> Option<String> {
@@ -904,7 +896,7 @@ pub fn validate_project_current(
     );
 
     for node in &graph.nodes {
-        diagnostics.extend(object_text_diagnostics_current(graph, node));
+        diagnostics.extend(object_spec_diagnostics_current(graph, node));
         if is_payload_identity_node_kind_current(&node.kind) {
             diagnostics.push(payload_identity_node_kind_diagnostic_current(
                 None, graph, node,
@@ -943,28 +935,28 @@ pub(crate) fn is_payload_identity_node_kind_current(kind: &str) -> bool {
     is_payload_identity_kind(kind)
 }
 
-fn object_text_diagnostics_current(
+fn object_spec_diagnostics_current(
     graph: &GraphDocumentCurrent,
     node: &GraphNodeCurrent,
 ) -> Vec<RuntimeDiagnostic> {
-    let Some(object_text) = node_object_text(node) else {
+    let Some(object_spec) = node_object_spec(node) else {
         return Vec::new();
     };
-    let resolution = resolve_object_text_v01(&object_text);
+    let resolution = resolve_object_spec_v01(&object_spec);
     let mut diagnostics = resolution
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.code != "object-text.unresolved")
+        .filter(|diagnostic| diagnostic.code != "object-spec.unresolved")
         .map(|diagnostic| {
             RuntimeDiagnostic::structured_error(
                 diagnostic.code.clone(),
                 diagnostic.message.clone(),
                 json!({
-                    "surface": "object-text",
+                    "surface": "object-spec",
                     "graphId": graph.id,
                     "nodeId": node.id,
                     "kind": node.kind,
-                    "objectText": object_text,
+                    "objectSpec": object_spec,
                     "classSymbol": resolution.class_symbol,
                 }),
             )
@@ -978,16 +970,16 @@ fn object_text_diagnostics_current(
         && !is_subpatch_node(node)
     {
         diagnostics.push(RuntimeDiagnostic::structured_error(
-            "object-text.kind-mismatch",
+            "object-spec.kind-mismatch",
             format!(
-                "object text {} resolves to {}, but node {} uses kind {}",
-                object_text, resolved_kind, node.id, node.kind
+                "object spec {} resolves to {}, but node {} uses kind {}",
+                object_spec, resolved_kind, node.id, node.kind
             ),
             json!({
-                "surface": "object-text",
+                "surface": "object-spec",
                 "graphId": graph.id,
                 "nodeId": node.id,
-                "objectText": object_text,
+                "objectSpec": object_spec,
                 "classSymbol": resolution.class_symbol,
                 "resolvedKind": resolved_kind,
                 "nodeKind": node.kind,
@@ -2279,14 +2271,14 @@ mod tests {
     #[test]
     fn parses_subpatch_aliases_and_reports_missing_boundaries() {
         assert_eq!(
-            parse_subpatch_object_text("p identity").as_deref(),
+            parse_subpatch_object_spec("p identity").as_deref(),
             Some("identity")
         );
         assert_eq!(
-            parse_subpatch_object_text("object.core.subpatch identity").as_deref(),
+            parse_subpatch_object_spec("object.core.subpatch identity").as_deref(),
             Some("identity")
         );
-        assert_eq!(parse_subpatch_object_text("object identity"), None);
+        assert_eq!(parse_subpatch_object_spec("object identity"), None);
         assert_eq!(namespace_prefix(""), "");
 
         let params = serde_json::Map::from_iter([
@@ -2385,7 +2377,8 @@ mod tests {
               "id": "fx",
               "kind": "p",
               "kindVersion": "0.1.0",
-              "params": { "objectText": "p alias-patch" },
+              "objectSpec": "p alias-patch",
+              "params": {},
               "ports": [
                 { "id": "in", "direction": "input", "type": "value.core.tensor", "rate": "render" },
                 { "id": "out", "direction": "output", "type": "value.core.tensor", "rate": "render" }
@@ -2660,18 +2653,18 @@ mod tests {
     }
 
     #[test]
-    fn validates_runtime_owned_object_text_resolution() {
+    fn validates_runtime_owned_object_spec_resolution() {
         let graph = graph(json!({
           "schema": "skenion.graph",
           "schemaVersion": "0.1.0",
-          "id": "object-text",
+          "id": "object-spec",
           "revision": "1",
           "nodes": [
             {
               "id": "add",
               "kind": "object.core.operator.add",
               "kindVersion": "0.1.0",
-              "objectText": "+ 2",
+              "objectSpec": "+ 2",
               "params": {},
               "ports": []
             }
@@ -2680,18 +2673,18 @@ mod tests {
         }));
 
         validate_project_current(&graph, &[behavior_definition("object.core.operator.add")])
-            .expect("matching Runtime object text should validate");
+            .expect("matching Runtime object spec should validate");
 
         let mut invalid_arg = graph.clone();
-        invalid_arg.nodes[0].object_text = Some("+ true".to_owned());
+        invalid_arg.nodes[0].object_spec = Some("+ true".to_owned());
         let invalid_arg_result = validate_project_current(
             &invalid_arg,
             &[behavior_definition("object.core.operator.add")],
         )
-        .expect_err("invalid Runtime object-text args should fail");
+        .expect_err("invalid Runtime object-spec args should fail");
         assert!(invalid_arg_result.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("object-text.invalid-arg-type")
-                && diagnostic.details.as_ref().unwrap()["objectText"] == "+ true"
+            diagnostic.code.as_deref() == Some("object-spec.invalid-arg-type")
+                && diagnostic.details.as_ref().unwrap()["objectSpec"] == "+ true"
         }));
 
         let mut mismatch = graph.clone();
@@ -2702,7 +2695,7 @@ mod tests {
         )
         .expect_err("resolved object kind mismatch should fail");
         assert!(mismatch_result.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("object-text.kind-mismatch")
+            diagnostic.code.as_deref() == Some("object-spec.kind-mismatch")
                 && diagnostic.details.as_ref().unwrap()["resolvedKind"]
                     == "object.core.operator.add"
                 && diagnostic.details.as_ref().unwrap()["nodeKind"] == "object.core.operator.sub"
@@ -2710,23 +2703,23 @@ mod tests {
 
         let mut payload = graph.clone();
         payload.nodes[0].kind = "object.core.float".to_owned();
-        payload.nodes[0].object_text = Some("value.core.float32".to_owned());
+        payload.nodes[0].object_spec = Some("value.core.float32".to_owned());
         let payload_result =
             validate_project_current(&payload, &[behavior_definition("object.core.float")])
-                .expect_err("payload identity object text should fail");
+                .expect_err("payload identity object spec should fail");
         assert!(payload_result.iter().any(|diagnostic| {
-            diagnostic.code.as_deref() == Some("object-text.payload-identity")
-                && diagnostic.details.as_ref().unwrap()["objectText"] == "value.core.float32"
+            diagnostic.code.as_deref() == Some("object-spec.payload-identity")
+                && diagnostic.details.as_ref().unwrap()["objectSpec"] == "value.core.float32"
         }));
 
         let mut package_deferred = graph.clone();
         package_deferred.nodes[0].kind = "user.manipulator".to_owned();
-        package_deferred.nodes[0].object_text = Some("user.manipulator 1".to_owned());
+        package_deferred.nodes[0].object_spec = Some("user.manipulator 1".to_owned());
         validate_project_current(
             &package_deferred,
             &[behavior_definition("user.manipulator")],
         )
-        .expect("package-owned object text remains available to package resolver layers");
+        .expect("package-owned object spec remains available to package resolver layers");
     }
 
     #[test]

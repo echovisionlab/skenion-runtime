@@ -11,7 +11,7 @@ Source files checked for this inventory:
 - `src/realtime.rs`
 - `src/session.rs`
 - `src/control_state.rs`
-- `src/object_text.rs`
+- `src/object_spec.rs`
 
 ## Hard Rules For Studio
 
@@ -236,7 +236,7 @@ Node/object fields:
 
 | Field | Type | Used by |
 | --- | --- | --- |
-| `objectText` | string | `node.resolve`, `node.create`, `node.replace` |
+| `objectSpec` | string | `node.resolve`, `node.create`, `node.replace` |
 | `nodeId` | string | `node.replace`, `node.delete`, `node.update`, `node.input` |
 | `requestedNodeId` | string | `node.create` |
 | `view` | `CanvasNodeView` | `node.create`, `node.replace` |
@@ -245,7 +245,7 @@ Node/object fields:
 | `message` | `ControlMessage` | `node.input` |
 | `request` | `PasteGraphFragmentRequest` | `graph.pasteFragment` |
 | `scope` | `client` or `global` | `history.undo`, `history.redo`; defaults to `client` |
-| `unresolvedPolicy` | `reject` or `materialize-diagnostic` | object text materialization |
+| `unresolvedPolicy` | `reject` or `materialize-diagnostic` | object spec materialization |
 | `interfaceIncidentEdgePolicy` | Contracts enum | `node.replace` |
 
 View/collaboration fields:
@@ -264,9 +264,9 @@ View/collaboration fields:
 | `graph.pasteFragment` | `request` | yes | no | `graph.ack`, `graph.applied`; paste response appears under `payload.operation` |
 | `history.undo` | optional `scope` | yes if history entry is available | no | `graph.ack`, `graph.applied` |
 | `history.redo` | optional `scope` | yes if history entry is available | no | `graph.ack`, `graph.applied` |
-| `node.resolve` | `objectText`; valid target if supplied | no | no | `graph.ack` only |
-| `node.create` | `objectText`; optional `requestedNodeId`, `view`, `params`, target | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; may emit `nodeCatalog.changed` if catalog projection changes |
-| `node.replace` | `objectText`, `nodeId`; optional `interfaceIncidentEdgePolicy` | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; `node.droppedEdgeIds` in result when interface changed |
+| `node.resolve` | `objectSpec`; valid target if supplied | no | no | `graph.ack` only |
+| `node.create` | `objectSpec`; optional `requestedNodeId`, `view`, `params`, target | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; may emit `nodeCatalog.changed` if catalog projection changes |
+| `node.replace` | `objectSpec`, `nodeId`; optional `interfaceIncidentEdgePolicy` | yes if resolved/materialized | no | `graph.ack`, `graph.applied`; `node.droppedEdgeIds` in result when interface changed |
 | `node.delete` | `nodeId` | yes | no | `graph.ack`, `graph.applied`; `node.droppedEdgeIds` for incident edges |
 | `node.update` | `nodeId`, non-empty `params` | yes | no | `graph.ack`, `graph.applied` |
 | `node.input` | `nodeId`, `portId`, `message` | no | yes | `graph.ack`, local/remote `control.emitted` |
@@ -289,8 +289,8 @@ history.redo
 ```
 
 Old draft object command names such as `object.resolve`, `object.create`,
-`object.replace`, `objectText.resolve`, `objectText.create`, and
-`objectText.replace` are not supported live command kinds.
+`object.replace`, `objectSpec.resolve`, `objectSpec.create`, and
+`objectSpec.replace` are not supported live command kinds.
 
 ## Node Command Results
 
@@ -305,7 +305,7 @@ Current result facts from `src/realtime.rs`:
 - `node.input` returns `applied: false` because it is transient control input,
   not graph mutation.
 - `node.replace` and `node.delete` can return dropped incident edge ids.
-- unresolved object text returns `node.command.unresolved` unless the unresolved
+- unresolved object spec returns `node.command.unresolved` unless the unresolved
   policy materializes a diagnostic node.
 
 ## Catalog Revision Rules
@@ -358,7 +358,7 @@ Use WebSocket for:
 - initial live session attach and hydration
 - node catalog hydration for live sessions
 - node create/replace/delete/update
-- object text preview through `node.resolve`
+- object spec preview through `node.resolve`
 - bang/message/slider transient input through `node.input`
 - view patch/node movement
 - live graph applied events

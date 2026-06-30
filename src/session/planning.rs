@@ -13,18 +13,18 @@ pub(super) fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<Runtim
         .iter()
         .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
         .map(|node| {
-            let object_text = node
+            let object_spec = node
                 .params
-                .get("objectText")
+                .get("objectSpec")
                 .and_then(|value| value.as_str())
                 .unwrap_or(node.id.as_str());
             let diagnostic_message = node
                 .params
                 .get("diagnosticMessage")
                 .and_then(|value| value.as_str())
-                .unwrap_or("object text could not be resolved");
+                .unwrap_or("object spec could not be resolved");
             RuntimeDiagnostic::error(format!(
-                "unresolved object {object_text}: {diagnostic_message}"
+                "unresolved object {object_spec}: {diagnostic_message}"
             ))
         })
         .collect()
@@ -38,18 +38,18 @@ pub(super) fn unresolved_object_diagnostics_current(
         .iter()
         .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
         .map(|node| {
-            let object_text = node
+            let object_spec = node
                 .params
-                .get("objectText")
+                .get("objectSpec")
                 .and_then(|value| value.as_str())
                 .unwrap_or(node.id.as_str());
             let diagnostic_message = node
                 .params
                 .get("diagnosticMessage")
                 .and_then(|value| value.as_str())
-                .unwrap_or("object text could not be resolved");
+                .unwrap_or("object spec could not be resolved");
             RuntimeDiagnostic::error(format!(
-                "unresolved object {object_text}: {diagnostic_message}"
+                "unresolved object {object_spec}: {diagnostic_message}"
             ))
         })
         .collect()

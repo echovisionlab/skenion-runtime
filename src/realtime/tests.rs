@@ -134,11 +134,11 @@ fn test_identity() -> RuntimeRealtimeConnectionIdentity {
 
 fn port_for_json(
     id: &str,
-    direction: ObjectTextPortDirection,
-    rate: ObjectTextPortRate,
-    activation: Option<ObjectTextPortActivation>,
-) -> crate::object_text::ObjectTextPort {
-    crate::object_text::ObjectTextPort {
+    direction: ObjectSpecPortDirection,
+    rate: ObjectSpecPortRate,
+    activation: Option<ObjectSpecPortActivation>,
+) -> crate::object_spec::ObjectSpecPort {
+    crate::object_spec::ObjectSpecPort {
         id: id.to_owned(),
         direction,
         port_type: "value.core.float32".to_owned(),
@@ -150,57 +150,57 @@ fn port_for_json(
     }
 }
 
-fn resolved_float_object_text(input: &str) -> ObjectTextResolution {
+fn resolved_float_object_spec(input: &str) -> ObjectSpecResolution {
     ObjectRegistry::first_party_core().resolve(input)
 }
 
-fn object_text_resolution_with_all_port_variants() -> ObjectTextResolution {
-    let mut resolution = resolved_float_object_text("sig~ 440");
+fn object_spec_resolution_with_all_port_variants() -> ObjectSpecResolution {
+    let mut resolution = resolved_float_object_spec("sig~ 440");
     resolution.instance_ports = vec![
         port_for_json(
             "event_in",
-            ObjectTextPortDirection::Input,
-            ObjectTextPortRate::Event,
-            Some(ObjectTextPortActivation::Trigger),
+            ObjectSpecPortDirection::Input,
+            ObjectSpecPortRate::Event,
+            Some(ObjectSpecPortActivation::Trigger),
         ),
         port_for_json(
             "control_in",
-            ObjectTextPortDirection::Input,
-            ObjectTextPortRate::Control,
-            Some(ObjectTextPortActivation::Latched),
+            ObjectSpecPortDirection::Input,
+            ObjectSpecPortRate::Control,
+            Some(ObjectSpecPortActivation::Latched),
         ),
         port_for_json(
             "audio_out",
-            ObjectTextPortDirection::Output,
-            ObjectTextPortRate::Audio,
-            Some(ObjectTextPortActivation::Passive),
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Audio,
+            Some(ObjectSpecPortActivation::Passive),
         ),
         port_for_json(
             "render_out",
-            ObjectTextPortDirection::Output,
-            ObjectTextPortRate::Render,
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Render,
             None,
         ),
         port_for_json(
             "gpu_out",
-            ObjectTextPortDirection::Output,
-            ObjectTextPortRate::Gpu,
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Gpu,
             None,
         ),
         port_for_json(
             "resource_out",
-            ObjectTextPortDirection::Output,
-            ObjectTextPortRate::Resource,
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Resource,
             None,
         ),
         port_for_json(
             "io_out",
-            ObjectTextPortDirection::Output,
-            ObjectTextPortRate::Io,
+            ObjectSpecPortDirection::Output,
+            ObjectSpecPortRate::Io,
             None,
         ),
     ];
-    resolution.candidates = vec![crate::object_text::ObjectTextCandidateSummary {
+    resolution.candidates = vec![crate::object_spec::ObjectSpecCandidateSummary {
         id: "object.core.sig".to_owned(),
         source: "core".to_owned(),
         kind: "object.core.sig".to_owned(),
@@ -208,8 +208,8 @@ fn object_text_resolution_with_all_port_variants() -> ObjectTextResolution {
     }];
     resolution
         .diagnostics
-        .push(crate::object_text::ObjectTextDiagnostic {
-            code: "object-text.test-warning".to_owned(),
+        .push(crate::object_spec::ObjectSpecDiagnostic {
+            code: "object-spec.test-warning".to_owned(),
             message: "test warning".to_owned(),
         });
     resolution
@@ -616,14 +616,14 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
     let payload = graph_payload(json!({
         "kind": "node.replace",
         "target": root_target("1"),
-        "objectText": "sig~ 440",
+        "objectSpec": "sig~ 440",
         "nodeId": "oscillator",
         "requestedNodeId": "requested-oscillator",
         "unresolvedPolicy": "reject",
         "interfaceIncidentEdgePolicy": "reject",
         "surfacePath": ["root", "oscillator"]
     }));
-    let resolution = object_text_resolution_with_all_port_variants();
+    let resolution = object_spec_resolution_with_all_port_variants();
 
     let node_result = node_command_result(
         &payload,
@@ -666,19 +666,19 @@ fn node_command_result_serializes_resolution_ports_diagnostics_and_input() {
     );
     assert_eq!(
         node_result["resolution"]["diagnostics"][0]["code"],
-        "object-text.test-warning"
+        "object-spec.test-warning"
     );
 
-    let diagnostics = object_text_runtime_diagnostics(&resolution);
+    let diagnostics = object_spec_runtime_diagnostics(&resolution);
     assert_eq!(
         diagnostics[0].code.as_deref(),
-        Some("object-text.test-warning")
+        Some("object-spec.test-warning")
     );
     assert_eq!(
         diagnostics[0]
             .details
             .as_ref()
-            .expect("object text diagnostics should include structured details")["candidateCount"],
+            .expect("object spec diagnostics should include structured details")["candidateCount"],
         1
     );
 
@@ -706,23 +706,23 @@ fn object_command_materialization_respects_params_and_unresolved_policy() {
     let payload = graph_payload(json!({
         "kind": "node.create",
         "target": root_target("1"),
-        "objectText": "float 1",
+        "objectSpec": "float 1",
         "params": { "frequency": 880.0 }
     }));
     let materialized = materialize_object_command_node(
         &session,
         &payload,
-        &resolved_float_object_text("float 1"),
+        &resolved_float_object_spec("float 1"),
         "float_1",
     )
-    .expect("resolved object text should materialize");
+    .expect("resolved object spec should materialize");
     assert_eq!(materialized.0.params["frequency"], 880.0);
 
     let unresolved = ObjectRegistry::first_party_core().resolve("missingObject 1");
     let diagnostic_payload = graph_payload(json!({
         "kind": "node.create",
         "target": root_target("1"),
-        "objectText": "missingObject 1",
+        "objectSpec": "missingObject 1",
         "params": { "label": "keep me" }
     }));
     let diagnostic_node =
@@ -734,7 +734,7 @@ fn object_command_materialization_respects_params_and_unresolved_policy() {
     let reject_payload = graph_payload(json!({
         "kind": "node.create",
         "target": root_target("1"),
-        "objectText": "missingObject 1",
+        "objectSpec": "missingObject 1",
         "unresolvedPolicy": "reject"
     }));
     assert!(
@@ -755,7 +755,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
     );
     assert_response_diagnostic_code(
         &missing_resolve.response,
-        "graph.command.object-text-required",
+        "graph.command.object-spec-required",
     );
     let missing_create = apply_object_create_graph_command(
         &mut session,
@@ -765,7 +765,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
     );
     assert_response_diagnostic_code(
         &missing_create.response,
-        "graph.command.object-text-required",
+        "graph.command.object-spec-required",
     );
     let missing_replace = apply_object_replace_graph_command(
         &mut session,
@@ -775,7 +775,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
     );
     assert_response_diagnostic_code(
         &missing_replace.response,
-        "graph.command.object-text-required",
+        "graph.command.object-spec-required",
     );
     let missing_delete_node = apply_node_delete_graph_command(
         &mut session,
@@ -838,7 +838,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
 }
 
 #[test]
-fn node_id_generation_helpers_are_stable_for_object_text_commands() {
+fn node_id_generation_helpers_are_stable_for_object_spec_commands() {
     assert_eq!(
         node_id_slug("123 Weird Object!!"),
         Some("node_123_weird_object".to_owned())

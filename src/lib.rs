@@ -15,7 +15,7 @@ mod log_store;
 #[cfg(not(test))]
 mod midi_input;
 mod nodes;
-mod object_text;
+mod object_spec;
 mod package_registry;
 mod planner;
 mod preview_control_state;

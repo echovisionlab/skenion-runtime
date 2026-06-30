@@ -489,12 +489,12 @@ fn project_patch_internal_node_add_payload(patch_id: &str, base_revision: &str) 
     })
 }
 
-fn node_create_payload(base_revision: &str, requested_node_id: &str, object_text: &str) -> Value {
-    node_create_payload_with_params(base_revision, requested_node_id, object_text, None)
+fn node_create_payload(base_revision: &str, requested_node_id: &str, object_spec: &str) -> Value {
+    node_create_payload_with_params(base_revision, requested_node_id, object_spec, None)
 }
 
-fn node_create_payload_without_requested_id(base_revision: &str, object_text: &str) -> Value {
-    let mut payload = node_create_payload(base_revision, "removed-by-test", object_text);
+fn node_create_payload_without_requested_id(base_revision: &str, object_spec: &str) -> Value {
+    let mut payload = node_create_payload(base_revision, "removed-by-test", object_spec);
     payload
         .as_object_mut()
         .expect("node.create payload should be an object")
@@ -505,7 +505,7 @@ fn node_create_payload_without_requested_id(base_revision: &str, object_text: &s
 fn node_create_payload_with_params(
     base_revision: &str,
     requested_node_id: &str,
-    object_text: &str,
+    object_spec: &str,
     params: Option<Value>,
 ) -> Value {
     let mut payload = json!({
@@ -515,7 +515,7 @@ fn node_create_payload_with_params(
         "target": root_target(base_revision),
         "surfacePath": { "surface": "graph", "path": { "kind": "root" } },
         "requestedNodeId": requested_node_id,
-        "objectText": object_text,
+        "objectSpec": object_spec,
         "view": { "x": 420.0, "y": 144.0 }
     });
     if let Some(params) = params {
@@ -531,9 +531,9 @@ fn node_create_project_patch_payload(
     patch_id: &str,
     base_revision: &str,
     requested_node_id: &str,
-    object_text: &str,
+    object_spec: &str,
 ) -> Value {
-    let mut payload = node_create_payload(base_revision, requested_node_id, object_text);
+    let mut payload = node_create_payload(base_revision, requested_node_id, object_spec);
     let object = payload
         .as_object_mut()
         .expect("node.create payload should be an object");
@@ -551,23 +551,23 @@ fn node_create_project_patch_payload(
     payload
 }
 
-fn node_resolve_payload(base_revision: &str, object_text: &str) -> Value {
+fn node_resolve_payload(base_revision: &str, object_spec: &str) -> Value {
     json!({
         "kind": "node.resolve",
         "baseSessionRevision": 1,
         "baseGraphRevision": base_revision,
         "target": root_target(base_revision),
-        "surfacePath": { "surface": "objectText" },
-        "objectText": object_text
+        "surfacePath": { "surface": "objectSpec" },
+        "objectSpec": object_spec
     })
 }
 
 fn node_resolve_payload_with_target(
     base_revision: &str,
-    object_text: &str,
+    object_spec: &str,
     target: Value,
 ) -> Value {
-    let mut payload = node_resolve_payload(base_revision, object_text);
+    let mut payload = node_resolve_payload(base_revision, object_spec);
     payload
         .as_object_mut()
         .expect("node.resolve payload should be an object")
@@ -578,7 +578,7 @@ fn node_resolve_payload_with_target(
 fn node_replace_payload_with_params(
     base_revision: &str,
     node_id: &str,
-    object_text: &str,
+    object_spec: &str,
     params: Option<Value>,
 ) -> Value {
     let mut payload = json!({
@@ -588,7 +588,7 @@ fn node_replace_payload_with_params(
         "target": root_target(base_revision),
         "surfacePath": { "surface": "graph", "path": { "kind": "root" }, "nodeId": node_id },
         "nodeId": node_id,
-        "objectText": object_text,
+        "objectSpec": object_spec,
         "interfaceIncidentEdgePolicy": "drop"
     });
     if let Some(params) = params {
@@ -603,10 +603,10 @@ fn node_replace_payload_with_params(
 fn node_replace_payload_with_policy(
     base_revision: &str,
     node_id: &str,
-    object_text: &str,
+    object_spec: &str,
     policy: &str,
 ) -> Value {
-    let mut payload = node_replace_payload_with_params(base_revision, node_id, object_text, None);
+    let mut payload = node_replace_payload_with_params(base_revision, node_id, object_spec, None);
     payload
         .as_object_mut()
         .expect("node.replace payload should be an object")
@@ -654,7 +654,7 @@ fn legacy_object_command_payload(kind: &str) -> Value {
         "baseSessionRevision": 1,
         "baseGraphRevision": "1",
         "target": root_target("1"),
-        "objectText": "osc~ 220",
+        "objectSpec": "osc~ 220",
         "nodeId": "value_1",
         "requestedNodeId": "legacy_1"
     })
@@ -2105,7 +2105,7 @@ async fn realtime_graph_node_create_osc_materializes_node_through_ws_command() {
     assert_eq!(broadcast["payload"]["kind"], "node.create");
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "osc_1");
     assert_eq!(node["kind"], "object.core.audio.osc");
-    assert_eq!(node["objectText"], "osc~ 220");
+    assert_eq!(node["objectSpec"], "osc~ 220");
     assert_eq!(node["params"]["frequency"], 880.0);
     assert_eq!(node["params"]["label"], "Lead");
     assert_eq!(
@@ -2166,7 +2166,7 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
     let _attached_a = attach(&mut client_a, "hello-a", None).await;
     let _attached_b = attach(&mut client_b, "hello-b", None).await;
 
-    for (index, (object_text, expected_kind, expected_param)) in [
+    for (index, (object_spec, expected_kind, expected_param)) in [
         ("* .3", "object.core.operator.mul", Some(json!(0.3))),
         ("* 3", "object.core.operator.mul", Some(json!(3.0))),
         ("+", "object.core.operator.add", Some(json!(0.0))),
@@ -2191,20 +2191,20 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
             &mut client_a,
             &format!("node-resolve-{index}"),
             &format!("node-resolve-key-{index}"),
-            node_resolve_payload("1", object_text),
+            node_resolve_payload("1", object_spec),
         )
         .await;
         let ack = next_type(&mut client_a, "graph.ack").await;
 
-        assert_eq!(ack["payload"]["status"], "accepted", "{object_text}");
-        assert_eq!(ack["payload"]["applied"], false, "{object_text}");
+        assert_eq!(ack["payload"]["status"], "accepted", "{object_spec}");
+        assert_eq!(ack["payload"]["applied"], false, "{object_spec}");
         assert_eq!(
             ack["payload"]["node"]["resolution"]["resolvedKind"], expected_kind,
-            "{object_text}"
+            "{object_spec}"
         );
         assert_eq!(
             ack["payload"]["node"]["resolution"]["candidateCount"], 1,
-            "{object_text}"
+            "{object_spec}"
         );
         if let Some(expected_param) = expected_param {
             let param_key = if expected_kind.starts_with("object.project.patch.") {
@@ -2216,7 +2216,7 @@ async fn realtime_graph_node_resolve_uses_runtime_registry_candidates() {
             };
             assert_eq!(
                 ack["payload"]["node"]["resolution"]["params"][param_key], expected_param,
-                "{object_text}"
+                "{object_spec}"
             );
         }
     }
@@ -2251,11 +2251,11 @@ async fn realtime_graph_node_resolve_unknown_returns_diagnostics_without_apply()
     assert_eq!(ack["payload"]["node"]["resolution"]["resolved"], false);
     assert_eq!(
         ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
-        "object-text.unresolved"
+        "object-spec.unresolved"
     );
     assert_eq!(
         ack["payload"]["diagnostics"][0]["code"],
-        "object-text.unresolved"
+        "object-spec.unresolved"
     );
     assert_eq!(
         project["graph"]["nodes"]
@@ -2367,12 +2367,12 @@ async fn realtime_graph_node_create_missing_materializes_diagnostic_node_by_defa
     );
     assert_eq!(
         ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
-        "object-text.unresolved"
+        "object-spec.unresolved"
     );
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "missing_1");
     assert_eq!(node["kind"], "object.core.unresolved");
-    assert_eq!(node["objectText"], "mystery.object 1");
-    assert_eq!(node["params"]["diagnosticCode"], "object-text.unresolved");
+    assert_eq!(node["objectSpec"], "mystery.object 1");
+    assert_eq!(node["params"]["diagnosticCode"], "object-spec.unresolved");
     assert_eq!(node["params"]["candidateCount"], 0);
 }
 
@@ -2400,12 +2400,12 @@ async fn realtime_graph_node_create_ambiguous_shortcut_materializes_diagnostic_n
     assert_eq!(ack["payload"]["applied"], true);
     assert_eq!(
         ack["payload"]["node"]["resolution"]["diagnostics"][0]["code"],
-        "object-text.ambiguous"
+        "object-spec.ambiguous"
     );
     assert_eq!(ack["payload"]["node"]["resolution"]["candidateCount"], 2);
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "ambiguous_1");
     assert_eq!(node["kind"], "object.core.unresolved");
-    assert_eq!(node["params"]["diagnosticCode"], "object-text.ambiguous");
+    assert_eq!(node["params"]["diagnosticCode"], "object-spec.ambiguous");
     assert_eq!(node["params"]["candidateCount"], 2);
 }
 
@@ -2519,7 +2519,7 @@ async fn realtime_graph_node_replace_preserves_node_id_and_prunes_invalid_incide
     assert_eq!(broadcast["payload"]["node"]["nodeId"], "value_1");
     assert_eq!(node["id"], "value_1");
     assert_eq!(node["kind"], "object.core.audio.osc");
-    assert_eq!(node["objectText"], "osc~ 330");
+    assert_eq!(node["objectSpec"], "osc~ 330");
     assert_eq!(node["params"]["frequency"], 660.0);
     assert_eq!(node["params"]["label"], "Retuned");
     assert!(
@@ -2988,7 +2988,7 @@ async fn realtime_graph_legacy_object_commands_are_rejected_as_unsupported() {
 }
 
 #[tokio::test]
-async fn object_text_commands_do_not_add_http_endpoints() {
+async fn object_spec_commands_do_not_add_http_endpoints() {
     for path in [
         "/v0/sessions/default/object/resolve",
         "/v0/sessions/default/object/create",
@@ -3001,7 +3001,7 @@ async fn object_text_commands_do_not_add_http_endpoints() {
                     .method(Method::POST)
                     .uri(path)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "objectText": "osc~ 220" }).to_string()))
+                    .body(Body::from(json!({ "objectSpec": "osc~ 220" }).to_string()))
                     .expect("request builds"),
             )
             .await

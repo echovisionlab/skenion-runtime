@@ -16,27 +16,27 @@ const CURRENT_KIND_VERSION: &str = "0.1.0";
 pub(crate) const PROJECT_PATCH_OBJECT_KIND_PREFIX: &str = "object.project.patch.";
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ObjectTextResolution {
+pub(crate) struct ObjectSpecResolution {
     pub(crate) input: String,
     pub(crate) display_text: String,
     pub(crate) class_symbol: String,
-    pub(crate) creation_args: Vec<ObjectTextAtom>,
+    pub(crate) creation_args: Vec<ObjectSpecAtom>,
     pub(crate) resolved_kind: Option<String>,
     pub(crate) resolved_kind_version: Option<String>,
     pub(crate) params: Map<String, Value>,
-    pub(crate) instance_ports: Vec<ObjectTextPort>,
-    pub(crate) candidates: Vec<ObjectTextCandidateSummary>,
-    pub(crate) diagnostics: Vec<ObjectTextDiagnostic>,
+    pub(crate) instance_ports: Vec<ObjectSpecPort>,
+    pub(crate) candidates: Vec<ObjectSpecCandidateSummary>,
+    pub(crate) diagnostics: Vec<ObjectSpecDiagnostic>,
 }
 
-impl ObjectTextResolution {
+impl ObjectSpecResolution {
     pub(crate) fn ok(&self) -> bool {
         self.diagnostics.is_empty()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectTextCandidateSummary {
+pub(crate) struct ObjectSpecCandidateSummary {
     pub(crate) id: String,
     pub(crate) source: String,
     pub(crate) kind: String,
@@ -44,7 +44,7 @@ pub(crate) struct ObjectTextCandidateSummary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ObjectTextAtom {
+pub(crate) enum ObjectSpecAtom {
     Float(f64),
     Int(i64),
     Bool(bool),
@@ -52,31 +52,31 @@ pub(crate) enum ObjectTextAtom {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectTextDiagnostic {
+pub(crate) struct ObjectSpecDiagnostic {
     pub(crate) code: String,
     pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjectTextPort {
+pub(crate) struct ObjectSpecPort {
     pub(crate) id: String,
-    pub(crate) direction: ObjectTextPortDirection,
+    pub(crate) direction: ObjectSpecPortDirection,
     pub(crate) port_type: String,
     pub(crate) label: Option<String>,
-    pub(crate) rate: ObjectTextPortRate,
+    pub(crate) rate: ObjectSpecPortRate,
     pub(crate) accepts: Option<Vec<String>>,
-    pub(crate) activation: Option<ObjectTextPortActivation>,
+    pub(crate) activation: Option<ObjectSpecPortActivation>,
     pub(crate) message_keys: Option<MessageKeyPolicyV01>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectTextPortDirection {
+pub(crate) enum ObjectSpecPortDirection {
     Input,
     Output,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectTextPortRate {
+pub(crate) enum ObjectSpecPortRate {
     Event,
     Control,
     Audio,
@@ -87,7 +87,7 @@ pub(crate) enum ObjectTextPortRate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ObjectTextPortActivation {
+pub(crate) enum ObjectSpecPortActivation {
     Trigger,
     Latched,
     Passive,
@@ -127,15 +127,15 @@ struct ProjectPatchCandidate {
     revision: String,
     description: Option<String>,
     interface_digest: PackageChecksumV01,
-    ports: Vec<ObjectTextPort>,
+    ports: Vec<ObjectSpecPort>,
 }
 
 #[derive(Debug, Clone)]
-struct ParsedObjectText {
+struct ParsedObjectSpec {
     input: String,
     display_text: String,
     class_symbol: String,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
 }
 
 impl ObjectRegistry {
@@ -163,8 +163,8 @@ impl ObjectRegistry {
         self
     }
 
-    pub(crate) fn resolve(&self, input: &str) -> ObjectTextResolution {
-        let parsed = match parse_object_text_input_v01(input) {
+    pub(crate) fn resolve(&self, input: &str) -> ObjectSpecResolution {
+        let parsed = match parse_object_spec_input_v01(input) {
             Ok(parsed) => parsed,
             Err(resolution) => return *resolution,
         };
@@ -175,7 +175,7 @@ impl ObjectRegistry {
                 parsed.display_text,
                 &parsed.class_symbol,
                 parsed.creation_args,
-                "object-text.payload-identity",
+                "object-spec.payload-identity",
                 format!(
                     "{} is a payload identity, not an executable object",
                     parsed.class_symbol
@@ -189,7 +189,7 @@ impl ObjectRegistry {
                 parsed.display_text,
                 &parsed.class_symbol,
                 parsed.creation_args,
-                "object-text.unsupported-first-party",
+                "object-spec.unsupported-first-party",
                 message,
             );
         }
@@ -223,7 +223,7 @@ impl ObjectRegistry {
             diagnostic_node_definitions: vec![NodeCatalogDiagnosticNodeDefinitionV01 {
                 diagnostic_id: "runtime.unresolved-object".to_owned(),
                 reason: NodeCatalogDiagnosticNodeDefinitionReasonV01::UnresolvedObject,
-                definition: unresolved_object_text_node_definition_v01(),
+                definition: unresolved_object_spec_node_definition_v01(),
             }],
             diagnostics: None,
         };
@@ -255,18 +255,18 @@ impl ObjectRegistry {
             return None;
         }
 
-        let canonical_object_text = candidate.canonical_object_text()?;
-        let resolution = self.resolve(&canonical_object_text);
+        let canonical_object_spec = candidate.canonical_object_spec()?;
+        let resolution = self.resolve(&canonical_object_spec);
         if !resolution.ok() {
             return None;
         }
-        let mut definition = object_text_node_definition_v01(&resolution)?;
+        let mut definition = object_spec_node_definition_v01(&resolution)?;
         definition.display_name = candidate.display_name.clone();
         definition.category = core_catalog_category(candidate).to_owned();
 
         Some(NodeCatalogEntryV01 {
             catalog_id: catalog_id_for_core_candidate(candidate),
-            canonical_object_text,
+            canonical_object_spec,
             aliases: None,
             source: NodeCatalogSourceV01::Core,
             definition,
@@ -336,7 +336,7 @@ impl ObjectRegistry {
         }
     }
 
-    fn lookup_candidates(&self, parsed: &ParsedObjectText) -> Vec<ObjectRegistryCandidate> {
+    fn lookup_candidates(&self, parsed: &ParsedObjectSpec) -> Vec<ObjectRegistryCandidate> {
         if matches!(parsed.class_symbol.as_str(), "p" | "object.core.subpatch") {
             return self.lookup_explicit_project_patch_candidates(parsed);
         }
@@ -350,7 +350,7 @@ impl ObjectRegistry {
 
     fn lookup_explicit_project_patch_candidates(
         &self,
-        parsed: &ParsedObjectText,
+        parsed: &ParsedObjectSpec,
     ) -> Vec<ObjectRegistryCandidate> {
         let Some(patch_id) = explicit_project_patch_ref(parsed) else {
             return self
@@ -405,9 +405,9 @@ impl ObjectRegistry {
 
     fn construct_candidate(
         &self,
-        parsed: ParsedObjectText,
+        parsed: ParsedObjectSpec,
         candidate: &ObjectRegistryCandidate,
-    ) -> ObjectTextResolution {
+    ) -> ObjectSpecResolution {
         match candidate.source {
             ObjectRegistrySource::FirstPartyCore => construct_first_party_core(parsed, candidate),
             ObjectRegistrySource::ProjectPatch => construct_project_patch(parsed, candidate),
@@ -417,7 +417,7 @@ impl ObjectRegistry {
                     parsed.display_text,
                     &parsed.class_symbol,
                     parsed.creation_args,
-                    "object-text.provider-unavailable",
+                    "object-spec.provider-unavailable",
                     "package and native object providers are reserved but not loaded in this Runtime tranche",
                 )
             }
@@ -430,8 +430,8 @@ impl ObjectRegistryCandidate {
         self.aliases.iter().any(|alias| alias == class_symbol)
     }
 
-    fn summary(&self) -> ObjectTextCandidateSummary {
-        ObjectTextCandidateSummary {
+    fn summary(&self) -> ObjectSpecCandidateSummary {
+        ObjectSpecCandidateSummary {
             id: self.id.clone(),
             source: match self.source {
                 ObjectRegistrySource::FirstPartyCore => "first-party-core",
@@ -445,7 +445,7 @@ impl ObjectRegistryCandidate {
         }
     }
 
-    fn canonical_object_text(&self) -> Option<String> {
+    fn canonical_object_spec(&self) -> Option<String> {
         self.aliases
             .iter()
             .find(|alias| !alias.starts_with("object."))
@@ -462,7 +462,7 @@ fn project_patch_catalog_entry(candidate: &ObjectRegistryCandidate) -> Option<No
             "project.{}",
             skenion_contracts::sanitize_project_patch_id_v01(&patch.patch_id)
         ),
-        canonical_object_text: patch.patch_id.clone(),
+        canonical_object_spec: patch.patch_id.clone(),
         aliases: None,
         source: NodeCatalogSourceV01::ProjectPatch {
             patch_id: patch.patch_id.clone(),
@@ -489,7 +489,7 @@ fn project_patch_catalog_definition(
     let ports = patch
         .ports
         .iter()
-        .map(object_text_port_to_current)
+        .map(object_spec_port_to_current)
         .collect::<Vec<_>>();
     let has_audio_port = ports
         .iter()
@@ -543,21 +543,21 @@ fn zero_catalog_revision_checksum() -> PackageChecksumV01 {
     }
 }
 
-pub(crate) fn resolve_object_text_v01(input: &str) -> ObjectTextResolution {
+pub(crate) fn resolve_object_spec_v01(input: &str) -> ObjectSpecResolution {
     ObjectRegistry::first_party_core()
         .allow_unchecked_project_patch_refs()
         .resolve(input)
 }
 
-fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, Box<ObjectTextResolution>> {
-    let parsed = skenion_contracts::parse_object_text_v01(input);
+fn parse_object_spec_input_v01(input: &str) -> Result<ParsedObjectSpec, Box<ObjectSpecResolution>> {
+    let parsed = skenion_contracts::parse_object_spec_v01(input);
     let creation_args = parsed
         .creation_args
         .iter()
-        .map(contract_object_text_atom_to_runtime)
+        .map(contract_object_spec_atom_to_runtime)
         .collect::<Vec<_>>();
     if parsed.ok {
-        return Ok(ParsedObjectText {
+        return Ok(ParsedObjectSpec {
             input: parsed.input,
             display_text: parsed.display_text,
             class_symbol: parsed.class_name,
@@ -567,11 +567,11 @@ fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, Box<Obje
 
     let diagnostic = parsed.diagnostics.first();
     let code = diagnostic
-        .map(|diagnostic| runtime_object_text_diagnostic_code(&diagnostic.code))
-        .unwrap_or_else(|| "object-text.invalid-syntax".to_owned());
+        .map(|diagnostic| runtime_object_spec_diagnostic_code(&diagnostic.code))
+        .unwrap_or_else(|| "object-spec.invalid-syntax".to_owned());
     let message = diagnostic
         .map(|diagnostic| diagnostic.message.clone())
-        .unwrap_or_else(|| "object text could not be parsed".to_owned());
+        .unwrap_or_else(|| "object spec could not be parsed".to_owned());
     Err(Box::new(failure(
         &parsed.input,
         parsed.display_text,
@@ -582,41 +582,41 @@ fn parse_object_text_input_v01(input: &str) -> Result<ParsedObjectText, Box<Obje
     )))
 }
 
-fn runtime_object_text_diagnostic_code(code: &str) -> String {
+fn runtime_object_spec_diagnostic_code(code: &str) -> String {
     match code {
-        "empty-object-text" => "object-text.empty".to_owned(),
-        "invalid-syntax" => "object-text.invalid-syntax".to_owned(),
-        value if value.starts_with("object-text.") => value.to_owned(),
-        value => format!("object-text.{value}"),
+        "empty-object-spec" => "object-spec.empty".to_owned(),
+        "invalid-syntax" => "object-spec.invalid-syntax".to_owned(),
+        value if value.starts_with("object-spec.") => value.to_owned(),
+        value => format!("object-spec.{value}"),
     }
 }
 
-fn contract_object_text_atom_to_runtime(
-    atom: &skenion_contracts::ObjectTextAtomV01,
-) -> ObjectTextAtom {
+fn contract_object_spec_atom_to_runtime(
+    atom: &skenion_contracts::ObjectSpecAtomV01,
+) -> ObjectSpecAtom {
     match atom {
-        skenion_contracts::ObjectTextAtomV01::Float { value, .. } => ObjectTextAtom::Float(*value),
-        skenion_contracts::ObjectTextAtomV01::Int { value, .. } => ObjectTextAtom::Int(*value),
-        skenion_contracts::ObjectTextAtomV01::Uint { value, .. } => {
+        skenion_contracts::ObjectSpecAtomV01::Float { value, .. } => ObjectSpecAtom::Float(*value),
+        skenion_contracts::ObjectSpecAtomV01::Int { value, .. } => ObjectSpecAtom::Int(*value),
+        skenion_contracts::ObjectSpecAtomV01::Uint { value, .. } => {
             if *value <= i64::MAX as u64 {
-                ObjectTextAtom::Int(*value as i64)
+                ObjectSpecAtom::Int(*value as i64)
             } else {
-                ObjectTextAtom::Symbol(value.to_string())
+                ObjectSpecAtom::Symbol(value.to_string())
             }
         }
-        skenion_contracts::ObjectTextAtomV01::Bool { value } => ObjectTextAtom::Bool(*value),
-        skenion_contracts::ObjectTextAtomV01::Identifier { value }
-        | skenion_contracts::ObjectTextAtomV01::String { value } => {
-            ObjectTextAtom::Symbol(value.clone())
+        skenion_contracts::ObjectSpecAtomV01::Bool { value } => ObjectSpecAtom::Bool(*value),
+        skenion_contracts::ObjectSpecAtomV01::Identifier { value }
+        | skenion_contracts::ObjectSpecAtomV01::String { value } => {
+            ObjectSpecAtom::Symbol(value.clone())
         }
     }
 }
 
 fn construct_first_party_core(
-    parsed: ParsedObjectText,
+    parsed: ParsedObjectSpec,
     candidate: &ObjectRegistryCandidate,
-) -> ObjectTextResolution {
-    let ParsedObjectText {
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
         input,
         display_text,
         class_symbol,
@@ -659,7 +659,7 @@ fn construct_first_party_core(
                 creation_args,
                 candidate,
                 "patchRef",
-                "subpatch object text requires exactly one patch reference",
+                "subpatch object spec requires exactly one patch reference",
             );
         }
         Some(CoreNodeConstructor::BoundaryPort) => {
@@ -681,7 +681,7 @@ fn construct_first_party_core(
         &class_symbol,
         creation_args,
         vec![candidate.summary()],
-        "object-text.unresolved",
+        "object-spec.unresolved",
         format!(
             "{} is registered but has no Runtime constructor",
             candidate.kind
@@ -690,10 +690,10 @@ fn construct_first_party_core(
 }
 
 fn construct_project_patch(
-    parsed: ParsedObjectText,
+    parsed: ParsedObjectSpec,
     candidate: &ObjectRegistryCandidate,
-) -> ObjectTextResolution {
-    let ParsedObjectText {
+) -> ObjectSpecResolution {
+    let ParsedObjectSpec {
         input,
         display_text,
         class_symbol,
@@ -706,7 +706,7 @@ fn construct_project_patch(
             &class_symbol,
             creation_args,
             vec![candidate.summary()],
-            "object-text.unresolved",
+            "object-spec.unresolved",
             "project patch candidate is missing patch metadata",
         );
     };
@@ -719,8 +719,8 @@ fn construct_project_patch(
                 &class_symbol,
                 creation_args,
                 vec![candidate.summary()],
-                "object-text.invalid-arg-count",
-                "subpatch object text requires exactly one patch reference",
+                "object-spec.invalid-arg-count",
+                "subpatch object spec requires exactly one patch reference",
             );
         }
         let Some(reference) = symbol_value(&creation_args[0]) else {
@@ -730,7 +730,7 @@ fn construct_project_patch(
                 &class_symbol,
                 creation_args,
                 vec![candidate.summary()],
-                "object-text.invalid-arg-type",
+                "object-spec.invalid-arg-type",
                 format!("{class_symbol} reference argument must be a symbol"),
             );
         };
@@ -741,7 +741,7 @@ fn construct_project_patch(
                 &class_symbol,
                 creation_args,
                 vec![candidate.summary()],
-                "object-text.unresolved",
+                "object-spec.unresolved",
                 format!("project patch {reference} is not available in the active project"),
             );
         }
@@ -752,7 +752,7 @@ fn construct_project_patch(
             &class_symbol,
             creation_args,
             vec![candidate.summary()],
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             format!("{class_symbol} project patch shortcut accepts no creation arguments"),
         );
     }
@@ -774,20 +774,20 @@ fn construct_project_patch(
     )
 }
 
-fn explicit_project_patch_ref(parsed: &ParsedObjectText) -> Option<String> {
+fn explicit_project_patch_ref(parsed: &ParsedObjectSpec) -> Option<String> {
     if parsed.creation_args.len() != 1 {
         return None;
     }
     symbol_value(&parsed.creation_args[0])
 }
 
-fn unresolved_resolution(parsed: ParsedObjectText) -> ObjectTextResolution {
+fn unresolved_resolution(parsed: ParsedObjectSpec) -> ObjectSpecResolution {
     failure(
         &parsed.input,
         parsed.display_text,
         &parsed.class_symbol,
         parsed.creation_args,
-        "object-text.unresolved",
+        "object-spec.unresolved",
         format!(
             "{} is not available in the local Runtime object registry",
             parsed.class_symbol
@@ -796,9 +796,9 @@ fn unresolved_resolution(parsed: ParsedObjectText) -> ObjectTextResolution {
 }
 
 fn ambiguous_resolution(
-    parsed: ParsedObjectText,
+    parsed: ParsedObjectSpec,
     candidates: Vec<ObjectRegistryCandidate>,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     let summaries = candidates
         .iter()
         .map(ObjectRegistryCandidate::summary)
@@ -814,7 +814,7 @@ fn ambiguous_resolution(
         &parsed.class_symbol,
         parsed.creation_args,
         summaries,
-        "object-text.ambiguous",
+        "object-spec.ambiguous",
         format!(
             "{} matches multiple Runtime object candidates: {candidate_list}",
             parsed.class_symbol
@@ -838,46 +838,46 @@ fn project_patch_object_kind(patch_id: &str) -> String {
     )
 }
 
-fn project_patch_ports(patch: &PatchDefinitionCurrent) -> Vec<ObjectTextPort> {
+fn project_patch_ports(patch: &PatchDefinitionCurrent) -> Vec<ObjectSpecPort> {
     skenion_contracts::derive_patch_contract_v01(patch)
         .ports
         .iter()
-        .map(|port| object_text_port_from_current(&port.port))
+        .map(|port| object_spec_port_from_current(&port.port))
         .collect()
 }
 
-fn object_text_port_from_current(port: &PortSpecCurrent) -> ObjectTextPort {
-    ObjectTextPort {
+fn object_spec_port_from_current(port: &PortSpecCurrent) -> ObjectSpecPort {
+    ObjectSpecPort {
         id: port.id.clone(),
         direction: match &port.direction {
-            PortDirectionCurrent::Input => ObjectTextPortDirection::Input,
-            PortDirectionCurrent::Output => ObjectTextPortDirection::Output,
+            PortDirectionCurrent::Input => ObjectSpecPortDirection::Input,
+            PortDirectionCurrent::Output => ObjectSpecPortDirection::Output,
         },
         port_type: port.port_type.clone(),
         label: port.label.clone(),
         rate: match port.rate.as_ref().unwrap_or(&PortRateCurrent::Control) {
-            PortRateCurrent::Event => ObjectTextPortRate::Event,
-            PortRateCurrent::Control => ObjectTextPortRate::Control,
-            PortRateCurrent::Audio => ObjectTextPortRate::Audio,
-            PortRateCurrent::Render => ObjectTextPortRate::Render,
-            PortRateCurrent::Gpu => ObjectTextPortRate::Gpu,
-            PortRateCurrent::Resource => ObjectTextPortRate::Resource,
-            PortRateCurrent::Io => ObjectTextPortRate::Io,
+            PortRateCurrent::Event => ObjectSpecPortRate::Event,
+            PortRateCurrent::Control => ObjectSpecPortRate::Control,
+            PortRateCurrent::Audio => ObjectSpecPortRate::Audio,
+            PortRateCurrent::Render => ObjectSpecPortRate::Render,
+            PortRateCurrent::Gpu => ObjectSpecPortRate::Gpu,
+            PortRateCurrent::Resource => ObjectSpecPortRate::Resource,
+            PortRateCurrent::Io => ObjectSpecPortRate::Io,
         },
         accepts: port.accepts.clone(),
         activation: port.trigger_mode.as_ref().map(|mode| match mode {
-            skenion_contracts::TriggerModeV01::Trigger => ObjectTextPortActivation::Trigger,
-            skenion_contracts::TriggerModeV01::Latched => ObjectTextPortActivation::Latched,
-            skenion_contracts::TriggerModeV01::Passive => ObjectTextPortActivation::Passive,
+            skenion_contracts::TriggerModeV01::Trigger => ObjectSpecPortActivation::Trigger,
+            skenion_contracts::TriggerModeV01::Latched => ObjectSpecPortActivation::Latched,
+            skenion_contracts::TriggerModeV01::Passive => ObjectSpecPortActivation::Passive,
         }),
         message_keys: port.message_keys.clone(),
     }
 }
 
-pub(crate) fn materialize_object_text_node_v01(
-    resolution: &ObjectTextResolution,
+pub(crate) fn materialize_object_spec_node_v01(
+    resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
-) -> Result<GraphNodeCurrent, ObjectTextDiagnostic> {
+) -> Result<GraphNodeCurrent, ObjectSpecDiagnostic> {
     let Some(resolved_kind) = resolution.resolved_kind.clone() else {
         return Err(primary_resolution_diagnostic(resolution));
     };
@@ -889,27 +889,27 @@ pub(crate) fn materialize_object_text_node_v01(
         id: node_id.into(),
         kind: resolved_kind,
         kind_version: resolved_kind_version,
-        object_text: Some(resolution.display_text.clone()),
+        object_spec: Some(resolution.display_text.clone()),
         binding_ref: None,
         params: resolution.params.clone(),
         ports: resolution
             .instance_ports
             .iter()
-            .map(object_text_port_to_current)
+            .map(object_spec_port_to_current)
             .collect(),
         port_groups: None,
     })
 }
 
-pub(crate) fn object_text_node_definition_v01(
-    resolution: &ObjectTextResolution,
+pub(crate) fn object_spec_node_definition_v01(
+    resolution: &ObjectSpecResolution,
 ) -> Option<NodeDefinitionCurrent> {
     let resolved_kind = resolution.resolved_kind.as_ref()?;
     let resolved_kind_version = resolution.resolved_kind_version.as_ref()?;
     let ports = resolution
         .instance_ports
         .iter()
-        .map(object_text_port_to_current)
+        .map(object_spec_port_to_current)
         .collect::<Vec<_>>();
     let has_audio_port = ports
         .iter()
@@ -920,8 +920,8 @@ pub(crate) fn object_text_node_definition_v01(
         schema_version: CURRENT_KIND_VERSION.to_owned(),
         id: resolved_kind.clone(),
         version: resolved_kind_version.clone(),
-        display_name: object_text_definition_display_name(resolved_kind),
-        category: object_text_definition_category(resolved_kind).to_owned(),
+        display_name: object_spec_definition_display_name(resolved_kind),
+        category: object_spec_definition_category(resolved_kind).to_owned(),
         script_api_version: None,
         bundle_hash: None,
         surface: None,
@@ -941,14 +941,14 @@ pub(crate) fn object_text_node_definition_v01(
     })
 }
 
-pub(crate) fn materialize_unresolved_object_text_node_v01(
-    resolution: &ObjectTextResolution,
+pub(crate) fn materialize_unresolved_object_spec_node_v01(
+    resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
 ) -> GraphNodeCurrent {
     let diagnostic = primary_resolution_diagnostic(resolution);
     let mut params = Map::new();
     params.insert(
-        "objectText".to_owned(),
+        "objectSpec".to_owned(),
         Value::String(resolution.display_text.clone()),
     );
     params.insert(
@@ -971,7 +971,7 @@ pub(crate) fn materialize_unresolved_object_text_node_v01(
                 resolution
                     .candidates
                     .iter()
-                    .map(object_text_candidate_json)
+                    .map(object_spec_candidate_json)
                     .collect(),
             ),
         );
@@ -981,7 +981,7 @@ pub(crate) fn materialize_unresolved_object_text_node_v01(
         id: node_id.into(),
         kind: "object.core.unresolved".to_owned(),
         kind_version: CURRENT_KIND_VERSION.to_owned(),
-        object_text: Some(resolution.display_text.clone()),
+        object_spec: Some(resolution.display_text.clone()),
         binding_ref: None,
         params,
         ports: Vec::new(),
@@ -989,7 +989,7 @@ pub(crate) fn materialize_unresolved_object_text_node_v01(
     }
 }
 
-fn object_text_candidate_json(candidate: &ObjectTextCandidateSummary) -> Value {
+fn object_spec_candidate_json(candidate: &ObjectSpecCandidateSummary) -> Value {
     json!({
         "id": candidate.id,
         "source": candidate.source,
@@ -998,7 +998,7 @@ fn object_text_candidate_json(candidate: &ObjectTextCandidateSummary) -> Value {
     })
 }
 
-pub(crate) fn unresolved_object_text_node_definition_v01() -> NodeDefinitionCurrent {
+pub(crate) fn unresolved_object_spec_node_definition_v01() -> NodeDefinitionCurrent {
     NodeDefinitionCurrent {
         schema: "skenion.node.definition".to_owned(),
         schema_version: CURRENT_KIND_VERSION.to_owned(),
@@ -1041,13 +1041,13 @@ pub(crate) fn is_payload_identity_kind(kind: &str) -> bool {
         || kind.starts_with("control.")
 }
 
-fn primary_resolution_diagnostic(resolution: &ObjectTextResolution) -> ObjectTextDiagnostic {
+fn primary_resolution_diagnostic(resolution: &ObjectSpecResolution) -> ObjectSpecDiagnostic {
     resolution
         .diagnostics
         .first()
         .cloned()
-        .unwrap_or_else(|| ObjectTextDiagnostic {
-            code: "object-text.unresolved".to_owned(),
+        .unwrap_or_else(|| ObjectSpecDiagnostic {
+            code: "object-spec.unresolved".to_owned(),
             message: format!(
                 "{} is not available in the local Runtime object resolver",
                 resolution.class_symbol
@@ -1055,23 +1055,23 @@ fn primary_resolution_diagnostic(resolution: &ObjectTextResolution) -> ObjectTex
         })
 }
 
-fn object_text_port_to_current(port: &ObjectTextPort) -> PortSpecCurrent {
+fn object_spec_port_to_current(port: &ObjectSpecPort) -> PortSpecCurrent {
     PortSpecCurrent {
         id: port.id.clone(),
         direction: match &port.direction {
-            ObjectTextPortDirection::Input => PortDirectionCurrent::Input,
-            ObjectTextPortDirection::Output => PortDirectionCurrent::Output,
+            ObjectSpecPortDirection::Input => PortDirectionCurrent::Input,
+            ObjectSpecPortDirection::Output => PortDirectionCurrent::Output,
         },
         port_type: port.port_type.clone(),
         label: port.label.clone(),
         rate: Some(match &port.rate {
-            ObjectTextPortRate::Event => PortRateCurrent::Event,
-            ObjectTextPortRate::Control => PortRateCurrent::Control,
-            ObjectTextPortRate::Audio => PortRateCurrent::Audio,
-            ObjectTextPortRate::Render => PortRateCurrent::Render,
-            ObjectTextPortRate::Gpu => PortRateCurrent::Gpu,
-            ObjectTextPortRate::Resource => PortRateCurrent::Resource,
-            ObjectTextPortRate::Io => PortRateCurrent::Io,
+            ObjectSpecPortRate::Event => PortRateCurrent::Event,
+            ObjectSpecPortRate::Control => PortRateCurrent::Control,
+            ObjectSpecPortRate::Audio => PortRateCurrent::Audio,
+            ObjectSpecPortRate::Render => PortRateCurrent::Render,
+            ObjectSpecPortRate::Gpu => PortRateCurrent::Gpu,
+            ObjectSpecPortRate::Resource => PortRateCurrent::Resource,
+            ObjectSpecPortRate::Io => PortRateCurrent::Io,
         }),
         accepts: port.accepts.clone().or_else(|| message_input_accepts(port)),
         min_connections: None,
@@ -1079,9 +1079,9 @@ fn object_text_port_to_current(port: &ObjectTextPort) -> PortSpecCurrent {
         merge_policy: None,
         fan_out_policy: None,
         trigger_mode: port.activation.as_ref().map(|activation| match activation {
-            ObjectTextPortActivation::Trigger => skenion_contracts::TriggerModeV01::Trigger,
-            ObjectTextPortActivation::Latched => skenion_contracts::TriggerModeV01::Latched,
-            ObjectTextPortActivation::Passive => skenion_contracts::TriggerModeV01::Passive,
+            ObjectSpecPortActivation::Trigger => skenion_contracts::TriggerModeV01::Trigger,
+            ObjectSpecPortActivation::Latched => skenion_contracts::TriggerModeV01::Latched,
+            ObjectSpecPortActivation::Passive => skenion_contracts::TriggerModeV01::Passive,
         }),
         message_keys: port
             .message_keys
@@ -1089,15 +1089,15 @@ fn object_text_port_to_current(port: &ObjectTextPort) -> PortSpecCurrent {
             .or_else(|| default_message_input_key_policy(port)),
         default_value: None,
         latch: None,
-        required: matches!(&port.direction, ObjectTextPortDirection::Input).then_some(false),
+        required: matches!(&port.direction, ObjectSpecPortDirection::Input).then_some(false),
         style_key: None,
         group: None,
         description: None,
     }
 }
 
-fn message_input_accepts(port: &ObjectTextPort) -> Option<Vec<String>> {
-    if matches!(&port.direction, ObjectTextPortDirection::Input)
+fn message_input_accepts(port: &ObjectSpecPort) -> Option<Vec<String>> {
+    if matches!(&port.direction, ObjectSpecPortDirection::Input)
         && port.port_type == "value.core.message"
     {
         return Some(
@@ -1117,8 +1117,8 @@ fn message_input_accepts(port: &ObjectTextPort) -> Option<Vec<String>> {
     None
 }
 
-fn default_message_input_key_policy(port: &ObjectTextPort) -> Option<MessageKeyPolicyV01> {
-    if matches!(&port.direction, ObjectTextPortDirection::Input)
+fn default_message_input_key_policy(port: &ObjectSpecPort) -> Option<MessageKeyPolicyV01> {
+    if matches!(&port.direction, ObjectSpecPortDirection::Input)
         && port.port_type == "value.core.message"
     {
         return Some(message_key_policy(
@@ -1132,7 +1132,7 @@ fn default_message_input_key_policy(port: &ObjectTextPort) -> Option<MessageKeyP
     None
 }
 
-fn object_text_definition_display_name(kind: &str) -> String {
+fn object_spec_definition_display_name(kind: &str) -> String {
     kind.rsplit('.')
         .next()
         .filter(|segment| !segment.is_empty())
@@ -1140,7 +1140,7 @@ fn object_text_definition_display_name(kind: &str) -> String {
         .replace('-', " ")
 }
 
-fn object_text_definition_category(kind: &str) -> &'static str {
+fn object_spec_definition_category(kind: &str) -> &'static str {
     if kind.starts_with("object.core.audio.") {
         "Runtime Audio"
     } else {
@@ -1152,9 +1152,9 @@ fn resolve_control_operator(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     let kind = candidate.kind.as_str();
     if kind == "object.core.operator.sqrt" {
         if !creation_args.is_empty() {
@@ -1163,7 +1163,7 @@ fn resolve_control_operator(
                 display_text,
                 class_symbol,
                 creation_args,
-                "object-text.invalid-arg-count",
+                "object-spec.invalid-arg-count",
                 "sqrt accepts no creation arguments",
             );
         }
@@ -1184,7 +1184,7 @@ fn resolve_control_operator(
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             format!("{class_symbol} accepts at most one creation argument"),
         );
     }
@@ -1198,7 +1198,7 @@ fn resolve_control_operator(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-type",
+                    "object-spec.invalid-arg-type",
                     format!("{class_symbol} creation argument must be numeric"),
                 );
             }
@@ -1222,9 +1222,9 @@ fn resolve_control_value(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     let kind = candidate.kind.as_str();
     match kind {
         "object.core.bang" => {
@@ -1234,7 +1234,7 @@ fn resolve_control_value(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-count",
+                    "object-spec.invalid-arg-count",
                     format!("{class_symbol} accepts no creation arguments"),
                 );
             }
@@ -1313,7 +1313,7 @@ fn resolve_control_value(
 
 struct NumberValueSpec<T> {
     port_type: &'static str,
-    coerce: fn(&ObjectTextAtom) -> Option<T>,
+    coerce: fn(&ObjectSpecAtom) -> Option<T>,
     to_json: fn(T) -> Value,
 }
 
@@ -1321,17 +1321,17 @@ fn resolve_number_value<T>(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
     spec: NumberValueSpec<T>,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     if creation_args.len() > 1 {
         return failure(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             format!("{class_symbol} accepts at most one creation argument"),
         );
     }
@@ -1345,7 +1345,7 @@ fn resolve_number_value<T>(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-type",
+                    "object-spec.invalid-arg-type",
                     format!("{class_symbol} creation argument has the wrong numeric type"),
                 );
             }
@@ -1369,9 +1369,9 @@ fn resolve_audio_object(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     let kind = candidate.kind.as_str();
     match kind {
         "object.core.audio.sig" => resolve_audio_number_param(
@@ -1405,7 +1405,7 @@ fn resolve_audio_object(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-count",
+                    "object-spec.invalid-arg-count",
                     "*~ accepts no creation arguments in the current Runtime audio substrate",
                 );
             }
@@ -1426,7 +1426,7 @@ fn resolve_audio_object(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-count",
+                    "object-spec.invalid-arg-count",
                     format!("{class_symbol} accepts no creation arguments"),
                 );
             }
@@ -1452,24 +1452,24 @@ fn resolve_audio_object(
 struct AudioNumberParamSpec {
     param_key: &'static str,
     default_value: f64,
-    ports: Vec<ObjectTextPort>,
+    ports: Vec<ObjectSpecPort>,
 }
 
 fn resolve_audio_number_param(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
     spec: AudioNumberParamSpec,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     if creation_args.len() > 1 {
         return failure(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             format!("{class_symbol} accepts at most one creation argument"),
         );
     }
@@ -1482,7 +1482,7 @@ fn resolve_audio_number_param(
                     display_text,
                     class_symbol,
                     creation_args,
-                    "object-text.invalid-arg-type",
+                    "object-spec.invalid-arg-type",
                     format!("{class_symbol} creation argument must be numeric"),
                 );
             }
@@ -1506,18 +1506,18 @@ fn resolve_named_ref_object(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
     param_key: &'static str,
     count_message: &'static str,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     if creation_args.len() != 1 {
         return failure(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             count_message,
         );
     }
@@ -1527,7 +1527,7 @@ fn resolve_named_ref_object(
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-type",
+            "object-spec.invalid-arg-type",
             format!("{class_symbol} reference argument must be a symbol"),
         );
     };
@@ -1548,17 +1548,17 @@ fn resolve_optional_named_ref_object(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
     param_key: &'static str,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     if creation_args.len() > 1 {
         return failure(
             input,
             display_text,
             class_symbol,
             creation_args,
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
             format!("{class_symbol} accepts at most one creation argument"),
         );
     }
@@ -1570,7 +1570,7 @@ fn resolve_optional_named_ref_object(
                 display_text,
                 class_symbol,
                 creation_args,
-                "object-text.invalid-arg-type",
+                "object-spec.invalid-arg-type",
                 format!("{class_symbol} reference argument must be a symbol"),
             );
         };
@@ -1591,13 +1591,13 @@ fn success(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     candidate: &ObjectRegistryCandidate,
     params: Map<String, Value>,
-    instance_ports: Vec<ObjectTextPort>,
-) -> ObjectTextResolution {
+    instance_ports: Vec<ObjectSpecPort>,
+) -> ObjectSpecResolution {
     let summary = candidate.summary();
-    ObjectTextResolution {
+    ObjectSpecResolution {
         input: input.to_owned(),
         display_text,
         class_symbol: class_symbol.to_owned(),
@@ -1615,10 +1615,10 @@ fn failure(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
+    creation_args: Vec<ObjectSpecAtom>,
     code: impl Into<String>,
     message: impl Into<String>,
-) -> ObjectTextResolution {
+) -> ObjectSpecResolution {
     failure_with_candidates(
         input,
         display_text,
@@ -1634,12 +1634,12 @@ fn failure_with_candidates(
     input: &str,
     display_text: String,
     class_symbol: &str,
-    creation_args: Vec<ObjectTextAtom>,
-    candidates: Vec<ObjectTextCandidateSummary>,
+    creation_args: Vec<ObjectSpecAtom>,
+    candidates: Vec<ObjectSpecCandidateSummary>,
     code: impl Into<String>,
     message: impl Into<String>,
-) -> ObjectTextResolution {
-    ObjectTextResolution {
+) -> ObjectSpecResolution {
+    ObjectSpecResolution {
         input: input.to_owned(),
         display_text,
         class_symbol: class_symbol.to_owned(),
@@ -1649,50 +1649,50 @@ fn failure_with_candidates(
         params: Map::new(),
         instance_ports: Vec::new(),
         candidates,
-        diagnostics: vec![ObjectTextDiagnostic {
+        diagnostics: vec![ObjectSpecDiagnostic {
             code: code.into(),
             message: message.into(),
         }],
     }
 }
 
-fn numeric_value(atom: &ObjectTextAtom) -> Option<f64> {
+fn numeric_value(atom: &ObjectSpecAtom) -> Option<f64> {
     match atom {
-        ObjectTextAtom::Float(value) => Some(*value),
-        ObjectTextAtom::Int(value) => Some(*value as f64),
-        ObjectTextAtom::Bool(_) | ObjectTextAtom::Symbol(_) => None,
+        ObjectSpecAtom::Float(value) => Some(*value),
+        ObjectSpecAtom::Int(value) => Some(*value as f64),
+        ObjectSpecAtom::Bool(_) | ObjectSpecAtom::Symbol(_) => None,
     }
 }
 
-fn integer_value(atom: &ObjectTextAtom) -> Option<i64> {
+fn integer_value(atom: &ObjectSpecAtom) -> Option<i64> {
     match atom {
-        ObjectTextAtom::Int(value) => Some(*value),
-        ObjectTextAtom::Float(_) | ObjectTextAtom::Bool(_) | ObjectTextAtom::Symbol(_) => None,
+        ObjectSpecAtom::Int(value) => Some(*value),
+        ObjectSpecAtom::Float(_) | ObjectSpecAtom::Bool(_) | ObjectSpecAtom::Symbol(_) => None,
     }
 }
 
-fn unsigned_value(atom: &ObjectTextAtom) -> Option<u64> {
+fn unsigned_value(atom: &ObjectSpecAtom) -> Option<u64> {
     match atom {
-        ObjectTextAtom::Int(value) if *value >= 0 => Some(*value as u64),
-        ObjectTextAtom::Float(_) | ObjectTextAtom::Bool(_) | ObjectTextAtom::Symbol(_) => None,
-        ObjectTextAtom::Int(_) => None,
+        ObjectSpecAtom::Int(value) if *value >= 0 => Some(*value as u64),
+        ObjectSpecAtom::Float(_) | ObjectSpecAtom::Bool(_) | ObjectSpecAtom::Symbol(_) => None,
+        ObjectSpecAtom::Int(_) => None,
     }
 }
 
-fn symbol_value(atom: &ObjectTextAtom) -> Option<String> {
+fn symbol_value(atom: &ObjectSpecAtom) -> Option<String> {
     match atom {
-        ObjectTextAtom::Symbol(value) if !value.is_empty() => Some(value.clone()),
-        ObjectTextAtom::Float(_) | ObjectTextAtom::Int(_) | ObjectTextAtom::Bool(_) => None,
-        ObjectTextAtom::Symbol(_) => None,
+        ObjectSpecAtom::Symbol(value) if !value.is_empty() => Some(value.clone()),
+        ObjectSpecAtom::Float(_) | ObjectSpecAtom::Int(_) | ObjectSpecAtom::Bool(_) => None,
+        ObjectSpecAtom::Symbol(_) => None,
     }
 }
 
-fn atom_display_text(atom: &ObjectTextAtom) -> String {
+fn atom_display_text(atom: &ObjectSpecAtom) -> String {
     match atom {
-        ObjectTextAtom::Float(value) => value.to_string(),
-        ObjectTextAtom::Int(value) => value.to_string(),
-        ObjectTextAtom::Bool(value) => value.to_string(),
-        ObjectTextAtom::Symbol(value) => value.clone(),
+        ObjectSpecAtom::Float(value) => value.to_string(),
+        ObjectSpecAtom::Int(value) => value.to_string(),
+        ObjectSpecAtom::Bool(value) => value.to_string(),
+        ObjectSpecAtom::Symbol(value) => value.clone(),
     }
 }
 
@@ -1723,12 +1723,12 @@ fn unsupported_first_party_audio_message(class_symbol: &str) -> Option<&'static 
 fn input_port(
     id: &str,
     port_type: &str,
-    rate: ObjectTextPortRate,
-    activation: ObjectTextPortActivation,
-) -> ObjectTextPort {
-    ObjectTextPort {
+    rate: ObjectSpecPortRate,
+    activation: ObjectSpecPortActivation,
+) -> ObjectSpecPort {
+    ObjectSpecPort {
         id: id.to_owned(),
-        direction: ObjectTextPortDirection::Input,
+        direction: ObjectSpecPortDirection::Input,
         port_type: port_type.to_owned(),
         label: None,
         rate,
@@ -1738,10 +1738,10 @@ fn input_port(
     }
 }
 
-fn output_port(id: &str, port_type: &str, rate: ObjectTextPortRate) -> ObjectTextPort {
-    ObjectTextPort {
+fn output_port(id: &str, port_type: &str, rate: ObjectSpecPortRate) -> ObjectSpecPort {
+    ObjectSpecPort {
         id: id.to_owned(),
-        direction: ObjectTextPortDirection::Output,
+        direction: ObjectSpecPortDirection::Output,
         port_type: port_type.to_owned(),
         label: None,
         rate,
@@ -1751,28 +1751,28 @@ fn output_port(id: &str, port_type: &str, rate: ObjectTextPortRate) -> ObjectTex
     }
 }
 
-fn with_accepts(mut port: ObjectTextPort, accepts: &[&str]) -> ObjectTextPort {
+fn with_accepts(mut port: ObjectSpecPort, accepts: &[&str]) -> ObjectSpecPort {
     port.accepts = Some(string_list(accepts));
     port
 }
 
-fn with_message_keys(mut port: ObjectTextPort, policy: MessageKeyPolicyV01) -> ObjectTextPort {
+fn with_message_keys(mut port: ObjectSpecPort, policy: MessageKeyPolicyV01) -> ObjectSpecPort {
     port.message_keys = Some(policy);
     port
 }
 
 fn message_input_port(
     id: &str,
-    activation: ObjectTextPortActivation,
+    activation: ObjectSpecPortActivation,
     accepts: &[&str],
     policy: MessageKeyPolicyV01,
-) -> ObjectTextPort {
+) -> ObjectSpecPort {
     with_message_keys(
         with_accepts(
             input_port(
                 id,
                 "value.core.message",
-                ObjectTextPortRate::Control,
+                ObjectSpecPortRate::Control,
                 activation,
             ),
             accepts,
@@ -1839,11 +1839,11 @@ fn comment_message_input_policy() -> MessageKeyPolicyV01 {
     )
 }
 
-fn stored_value_ports(port_type: &str) -> Vec<ObjectTextPort> {
+fn stored_value_ports(port_type: &str) -> Vec<ObjectSpecPort> {
     vec![
         message_input_port(
             "in",
-            ObjectTextPortActivation::Trigger,
+            ObjectSpecPortActivation::Trigger,
             &[
                 "value.core.float32",
                 "value.core.int32",
@@ -1856,60 +1856,60 @@ fn stored_value_ports(port_type: &str) -> Vec<ObjectTextPort> {
         input_port(
             "cold",
             port_type,
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Latched,
         ),
-        output_port("value", port_type, ObjectTextPortRate::Control),
+        output_port("value", port_type, ObjectSpecPortRate::Control),
     ]
 }
 
-fn control_operator_ports() -> Vec<ObjectTextPort> {
+fn control_operator_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "in",
             "value.core.float32",
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Trigger,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Trigger,
         ),
         input_port(
             "right",
             "value.core.float32",
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Latched,
         ),
-        output_port("out", "value.core.float32", ObjectTextPortRate::Control),
+        output_port("out", "value.core.float32", ObjectSpecPortRate::Control),
     ]
 }
 
-fn control_sqrt_ports() -> Vec<ObjectTextPort> {
+fn control_sqrt_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "in",
             "value.core.float32",
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Trigger,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Trigger,
         ),
-        output_port("out", "value.core.float32", ObjectTextPortRate::Control),
+        output_port("out", "value.core.float32", ObjectSpecPortRate::Control),
     ]
 }
 
-fn bang_ports() -> Vec<ObjectTextPort> {
+fn bang_ports() -> Vec<ObjectSpecPort> {
     vec![
         message_input_port(
             "in",
-            ObjectTextPortActivation::Trigger,
+            ObjectSpecPortActivation::Trigger,
             &["value.core.bang"],
             bang_message_input_policy(),
         ),
-        output_port("out", "value.core.bang", ObjectTextPortRate::Event),
+        output_port("out", "value.core.bang", ObjectSpecPortRate::Event),
     ]
 }
 
-fn message_ports() -> Vec<ObjectTextPort> {
+fn message_ports() -> Vec<ObjectSpecPort> {
     vec![
         message_input_port(
             "in",
-            ObjectTextPortActivation::Trigger,
+            ObjectSpecPortActivation::Trigger,
             &[
                 "value.core.float32",
                 "value.core.int32",
@@ -1920,14 +1920,14 @@ fn message_ports() -> Vec<ObjectTextPort> {
             ],
             stored_message_input_policy(),
         ),
-        output_port("out", "value.core.message", ObjectTextPortRate::Control),
+        output_port("out", "value.core.message", ObjectSpecPortRate::Control),
     ]
 }
 
-fn comment_ports() -> Vec<ObjectTextPort> {
+fn comment_ports() -> Vec<ObjectSpecPort> {
     vec![message_input_port(
         "in",
-        ObjectTextPortActivation::Trigger,
+        ObjectSpecPortActivation::Trigger,
         &[
             "value.core.float32",
             "value.core.int32",
@@ -1939,68 +1939,68 @@ fn comment_ports() -> Vec<ObjectTextPort> {
     )]
 }
 
-fn audio_sig_ports() -> Vec<ObjectTextPort> {
+fn audio_sig_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "value",
             "value.core.float32",
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Latched,
         ),
-        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectSpecPortRate::Audio),
     ]
 }
 
-fn audio_osc_ports() -> Vec<ObjectTextPort> {
+fn audio_osc_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "frequency",
             "value.core.float32",
-            ObjectTextPortRate::Control,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Control,
+            ObjectSpecPortActivation::Latched,
         ),
-        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectSpecPortRate::Audio),
     ]
 }
 
-fn audio_binary_ports() -> Vec<ObjectTextPort> {
+fn audio_binary_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "left",
             "value.core.float32",
-            ObjectTextPortRate::Audio,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Audio,
+            ObjectSpecPortActivation::Latched,
         ),
         input_port(
             "right",
             "value.core.float32",
-            ObjectTextPortRate::Audio,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Audio,
+            ObjectSpecPortActivation::Latched,
         ),
-        output_port("out", "value.core.float32", ObjectTextPortRate::Audio),
+        output_port("out", "value.core.float32", ObjectSpecPortRate::Audio),
     ]
 }
 
-fn audio_input_ports() -> Vec<ObjectTextPort> {
+fn audio_input_ports() -> Vec<ObjectSpecPort> {
     vec![
-        output_port("left", "value.core.float32", ObjectTextPortRate::Audio),
-        output_port("right", "value.core.float32", ObjectTextPortRate::Audio),
+        output_port("left", "value.core.float32", ObjectSpecPortRate::Audio),
+        output_port("right", "value.core.float32", ObjectSpecPortRate::Audio),
     ]
 }
 
-fn audio_output_ports() -> Vec<ObjectTextPort> {
+fn audio_output_ports() -> Vec<ObjectSpecPort> {
     vec![
         input_port(
             "left",
             "value.core.float32",
-            ObjectTextPortRate::Audio,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Audio,
+            ObjectSpecPortActivation::Latched,
         ),
         input_port(
             "right",
             "value.core.float32",
-            ObjectTextPortRate::Audio,
-            ObjectTextPortActivation::Latched,
+            ObjectSpecPortRate::Audio,
+            ObjectSpecPortActivation::Latched,
         ),
     ]
 }
@@ -2009,13 +2009,13 @@ fn audio_output_ports() -> Vec<ObjectTextPort> {
 mod tests {
     use super::*;
 
-    fn assert_kind(resolution: &ObjectTextResolution, kind: &str) {
+    fn assert_kind(resolution: &ObjectSpecResolution, kind: &str) {
         assert!(resolution.ok(), "{resolution:?}");
         assert_eq!(resolution.resolved_kind.as_deref(), Some(kind));
         assert_eq!(resolution.resolved_kind_version.as_deref(), Some("0.1.0"));
     }
 
-    fn assert_diagnostic(resolution: &ObjectTextResolution, code: &str) {
+    fn assert_diagnostic(resolution: &ObjectSpecResolution, code: &str) {
         assert_eq!(resolution.resolved_kind, None);
         assert_eq!(resolution.diagnostics[0].code, code);
     }
@@ -2071,7 +2071,7 @@ mod tests {
 
     #[test]
     fn resolves_runtime_control_aliases_and_validates_args() {
-        let add = resolve_object_text_v01("[+ 1e3]");
+        let add = resolve_object_spec_v01("[+ 1e3]");
         assert!(add.ok());
         assert_eq!(add.display_text, "+ 1e3");
         assert_eq!(add.class_symbol, "+");
@@ -2083,11 +2083,11 @@ mod tests {
         assert_eq!(add.params["right"], json!(1000.0));
         assert_eq!(add.instance_ports[0].id, "in");
 
-        let sqrt = resolve_object_text_v01("sqrt 2");
-        assert_eq!(sqrt.diagnostics[0].code, "object-text.invalid-arg-count");
+        let sqrt = resolve_object_spec_v01("sqrt 2");
+        assert_eq!(sqrt.diagnostics[0].code, "object-spec.invalid-arg-count");
 
-        let invalid = resolve_object_text_v01("+ true");
-        assert_eq!(invalid.diagnostics[0].code, "object-text.invalid-arg-type");
+        let invalid = resolve_object_spec_v01("+ true");
+        assert_eq!(invalid.diagnostics[0].code, "object-spec.invalid-arg-type");
 
         for (input, kind, param, value) in [
             ("- -2", "object.core.operator.sub", "right", json!(-2.0)),
@@ -2097,47 +2097,47 @@ mod tests {
             ("max 8", "object.core.operator.max", "right", json!(8.0)),
             ("min 1", "object.core.operator.min", "right", json!(1.0)),
         ] {
-            let resolution = resolve_object_text_v01(input);
+            let resolution = resolve_object_spec_v01(input);
             assert_kind(&resolution, kind);
             assert_eq!(resolution.params[param], value);
             assert_eq!(resolution.instance_ports.len(), 3);
         }
 
-        let sqrt = resolve_object_text_v01("sqrt");
+        let sqrt = resolve_object_spec_v01("sqrt");
         assert_kind(&sqrt, "object.core.operator.sqrt");
         assert_eq!(sqrt.instance_ports.len(), 2);
 
-        let default_add = resolve_object_text_v01("object.core.operator.add");
+        let default_add = resolve_object_spec_v01("object.core.operator.add");
         assert_kind(&default_add, "object.core.operator.add");
         assert_eq!(default_add.params["right"], json!(0.0));
 
         assert_diagnostic(
-            &resolve_object_text_v01("sqrt 1"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("sqrt 1"),
+            "object-spec.invalid-arg-count",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("+ 1 2"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("+ 1 2"),
+            "object-spec.invalid-arg-count",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("object.core.operator.mul false"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("object.core.operator.mul false"),
+            "object-spec.invalid-arg-type",
         );
     }
 
     #[test]
     fn resolves_runtime_value_audio_and_subpatch_aliases() {
-        let float = resolve_object_text_v01("f 0.25");
+        let float = resolve_object_spec_v01("f 0.25");
         assert!(float.ok());
         assert_eq!(float.resolved_kind.as_deref(), Some("object.core.float"));
         assert_eq!(float.params["value"], json!(0.25));
 
-        let osc = resolve_object_text_v01("osc~ 220");
+        let osc = resolve_object_spec_v01("osc~ 220");
         assert!(osc.ok());
         assert_eq!(osc.resolved_kind.as_deref(), Some("object.core.audio.osc"));
         assert_eq!(osc.params["frequency"], json!(220.0));
 
-        let mul = resolve_object_text_v01("*~");
+        let mul = resolve_object_spec_v01("*~");
         assert!(mul.ok());
         assert_eq!(
             mul.resolved_kind.as_deref(),
@@ -2145,16 +2145,16 @@ mod tests {
         );
         assert_eq!(mul.instance_ports.len(), 3);
 
-        let scalar_mul = resolve_object_text_v01("*~ 0.5");
+        let scalar_mul = resolve_object_spec_v01("*~ 0.5");
         assert_eq!(
             scalar_mul.diagnostics[0].code,
-            "object-text.invalid-arg-count"
+            "object-spec.invalid-arg-count"
         );
 
-        let unsupported = resolve_object_text_v01("+~");
+        let unsupported = resolve_object_spec_v01("+~");
         assert_eq!(
             unsupported.diagnostics[0].code,
-            "object-text.unsupported-first-party"
+            "object-spec.unsupported-first-party"
         );
 
         for input in [
@@ -2167,42 +2167,42 @@ mod tests {
             "object.core.audio.phasor",
         ] {
             assert_diagnostic(
-                &resolve_object_text_v01(input),
-                "object-text.unsupported-first-party",
+                &resolve_object_spec_v01(input),
+                "object-spec.unsupported-first-party",
             );
         }
 
-        let sig = resolve_object_text_v01("sig~");
+        let sig = resolve_object_spec_v01("sig~");
         assert_kind(&sig, "object.core.audio.sig");
         assert_eq!(sig.params["value"], json!(0.0));
 
-        let invalid_sig = resolve_object_text_v01("sig~ false");
-        assert_diagnostic(&invalid_sig, "object-text.invalid-arg-type");
+        let invalid_sig = resolve_object_spec_v01("sig~ false");
+        assert_diagnostic(&invalid_sig, "object-spec.invalid-arg-type");
         assert_diagnostic(
-            &resolve_object_text_v01("sig~ 1 2"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("sig~ 1 2"),
+            "object-spec.invalid-arg-count",
         );
 
-        let osc = resolve_object_text_v01("object.core.audio.osc 220");
+        let osc = resolve_object_spec_v01("object.core.audio.osc 220");
         assert_kind(&osc, "object.core.audio.osc");
         assert_eq!(osc.params["frequency"], json!(220.0));
         assert_diagnostic(
-            &resolve_object_text_v01("osc~ nope"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("osc~ nope"),
+            "object-spec.invalid-arg-type",
         );
 
-        let audio_input = resolve_object_text_v01("adc~");
+        let audio_input = resolve_object_spec_v01("adc~");
         assert_kind(&audio_input, "object.core.audio.input");
         assert_eq!(audio_input.instance_ports[0].id, "left");
 
-        let audio_output = resolve_object_text_v01("dac~");
+        let audio_output = resolve_object_spec_v01("dac~");
         assert_kind(&audio_output, "object.core.audio.output");
         assert_eq!(audio_output.instance_ports[0].id, "left");
 
-        let invalid_audio_output = resolve_object_text_v01("dac~ 1");
-        assert_diagnostic(&invalid_audio_output, "object-text.invalid-arg-count");
+        let invalid_audio_output = resolve_object_spec_v01("dac~ 1");
+        assert_diagnostic(&invalid_audio_output, "object-spec.invalid-arg-count");
 
-        let subpatch = resolve_object_text_v01("p voice");
+        let subpatch = resolve_object_spec_v01("p voice");
         assert!(subpatch.ok());
         assert_eq!(
             subpatch.resolved_kind.as_deref(),
@@ -2218,88 +2218,88 @@ mod tests {
             ("int -7", "object.core.int", json!(-7)),
             ("uint 9", "object.core.uint", json!(9)),
         ] {
-            let resolution = resolve_object_text_v01(input);
+            let resolution = resolve_object_spec_v01(input);
             assert_kind(&resolution, kind);
             assert_eq!(resolution.params["value"], value);
             assert_eq!(resolution.instance_ports.len(), 3);
         }
 
         assert_diagnostic(
-            &resolve_object_text_v01("int 1.5"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("int 1.5"),
+            "object-spec.invalid-arg-type",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("uint -1"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("uint -1"),
+            "object-spec.invalid-arg-type",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("float 1 2"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("float 1 2"),
+            "object-spec.invalid-arg-count",
         );
 
-        let bang = resolve_object_text_v01("bang");
+        let bang = resolve_object_spec_v01("bang");
         assert_kind(&bang, "object.core.bang");
         assert!(bang.params.is_empty());
         assert_eq!(bang.instance_ports[1].port_type, "value.core.bang");
         assert_diagnostic(
-            &resolve_object_text_v01("object.core.bang 1"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("object.core.bang 1"),
+            "object-spec.invalid-arg-count",
         );
 
-        let float_alias = resolve_object_text_v01("f 1.5");
+        let float_alias = resolve_object_spec_v01("f 1.5");
         assert_kind(&float_alias, "object.core.float");
         assert_eq!(float_alias.params["value"], json!(1.5));
         assert_diagnostic(
-            &resolve_object_text_v01("float true"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("float true"),
+            "object-spec.invalid-arg-type",
         );
 
-        let message = resolve_object_text_v01("message set gain");
+        let message = resolve_object_spec_v01("message set gain");
         assert_kind(&message, "object.core.message");
         assert_eq!(message.params["text"], json!("set gain"));
-        let empty_message = resolve_object_text_v01("msg");
+        let empty_message = resolve_object_spec_v01("msg");
         assert_kind(&empty_message, "object.core.message");
         assert_eq!(empty_message.params["text"], json!(""));
 
-        let comment = resolve_object_text_v01("comment hello world");
+        let comment = resolve_object_spec_v01("comment hello world");
         assert_kind(&comment, "object.core.comment");
         assert_eq!(comment.params["text"], json!("hello world"));
         assert_eq!(comment.instance_ports.len(), 1);
-        let empty_comment = resolve_object_text_v01("object.core.comment");
+        let empty_comment = resolve_object_spec_v01("object.core.comment");
         assert_kind(&empty_comment, "object.core.comment");
         assert_eq!(empty_comment.params["text"], json!(""));
 
-        let inlet = resolve_object_text_v01("inlet left");
+        let inlet = resolve_object_spec_v01("inlet left");
         assert_kind(&inlet, "object.core.inlet");
         assert_eq!(inlet.params["portId"], json!("left"));
 
-        let anonymous_outlet = resolve_object_text_v01("outlet");
+        let anonymous_outlet = resolve_object_spec_v01("outlet");
         assert_kind(&anonymous_outlet, "object.core.outlet");
         assert!(anonymous_outlet.params.is_empty());
-        let named_outlet = resolve_object_text_v01("object.core.outlet right");
+        let named_outlet = resolve_object_spec_v01("object.core.outlet right");
         assert_kind(&named_outlet, "object.core.outlet");
         assert_eq!(named_outlet.params["portId"], json!("right"));
 
         assert_diagnostic(
-            &resolve_object_text_v01("p"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("p"),
+            "object-spec.invalid-arg-count",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("p true"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("p true"),
+            "object-spec.invalid-arg-type",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("inlet left right"),
-            "object-text.invalid-arg-count",
+            &resolve_object_spec_v01("inlet left right"),
+            "object-spec.invalid-arg-count",
         );
         assert_diagnostic(
-            &resolve_object_text_v01("outlet 1"),
-            "object-text.invalid-arg-type",
+            &resolve_object_spec_v01("outlet 1"),
+            "object-spec.invalid-arg-type",
         );
     }
 
     #[test]
-    fn rejects_payload_identities_as_object_text() {
+    fn rejects_payload_identities_as_object_spec() {
         for input in [
             "value",
             "data",
@@ -2317,25 +2317,25 @@ mod tests {
             "payload.vendor.frame",
             "control.float",
         ] {
-            let resolution = resolve_object_text_v01(input);
+            let resolution = resolve_object_spec_v01(input);
             assert_eq!(resolution.resolved_kind, None);
             assert_eq!(
                 resolution.diagnostics[0].code,
-                "object-text.payload-identity"
+                "object-spec.payload-identity"
             );
         }
     }
 
     #[test]
     fn reports_unresolved_and_syntax_diagnostics_without_runtime_mapping() {
-        let unresolved = resolve_object_text_v01("user.manipulator 1");
-        assert_eq!(unresolved.diagnostics[0].code, "object-text.unresolved");
+        let unresolved = resolve_object_spec_v01("user.manipulator 1");
+        assert_eq!(unresolved.diagnostics[0].code, "object-spec.unresolved");
 
-        let invalid = resolve_object_text_v01("[+ 1");
-        assert_eq!(invalid.diagnostics[0].code, "object-text.invalid-syntax");
+        let invalid = resolve_object_spec_v01("[+ 1");
+        assert_eq!(invalid.diagnostics[0].code, "object-spec.invalid-syntax");
 
-        let empty = resolve_object_text_v01("   ");
-        assert_eq!(empty.diagnostics[0].code, "object-text.empty");
+        let empty = resolve_object_spec_v01("   ");
+        assert_eq!(empty.diagnostics[0].code, "object-spec.empty");
     }
 
     #[test]
@@ -2356,7 +2356,7 @@ mod tests {
             .expect("project patch should appear in catalog");
 
         assert_eq!(project_entry.catalog_id, "project.my-patcher");
-        assert_eq!(project_entry.canonical_object_text, "my-patcher");
+        assert_eq!(project_entry.canonical_object_spec, "my-patcher");
         assert_eq!(project_entry.display.title, "Patch my-patcher");
         assert_eq!(
             project_patch_object_kind("my patch/1"),
@@ -2379,17 +2379,17 @@ mod tests {
 
         assert_diagnostic(
             &registry.resolve("my-patcher 1"),
-            "object-text.invalid-arg-count",
+            "object-spec.invalid-arg-count",
         );
-        assert_diagnostic(&registry.resolve("p"), "object-text.invalid-arg-count");
-        assert_diagnostic(&registry.resolve("p true"), "object-text.invalid-arg-type");
+        assert_diagnostic(&registry.resolve("p"), "object-spec.invalid-arg-count");
+        assert_diagnostic(&registry.resolve("p true"), "object-spec.invalid-arg-type");
 
         let mismatched = construct_project_patch(
-            ParsedObjectText {
+            ParsedObjectSpec {
                 input: "p other".to_owned(),
                 display_text: "p other".to_owned(),
                 class_symbol: "p".to_owned(),
-                creation_args: vec![ObjectTextAtom::Symbol("other".to_owned())],
+                creation_args: vec![ObjectSpecAtom::Symbol("other".to_owned())],
             },
             &ObjectRegistryCandidate {
                 id: "project-patch:my-patcher".to_owned(),
@@ -2409,7 +2409,7 @@ mod tests {
                 }),
             },
         );
-        assert_diagnostic(&mismatched, "object-text.unresolved");
+        assert_diagnostic(&mismatched, "object-spec.unresolved");
     }
 
     #[test]
@@ -2430,7 +2430,7 @@ mod tests {
         };
         assert_diagnostic(
             &provider_registry.resolve("vendor.node"),
-            "object-text.provider-unavailable",
+            "object-spec.provider-unavailable",
         );
 
         let ambiguous_registry = ObjectRegistry {
@@ -2461,7 +2461,7 @@ mod tests {
             allow_unchecked_project_patch_refs: false,
         };
         let ambiguous = ambiguous_registry.resolve("shared.node");
-        assert_diagnostic(&ambiguous, "object-text.ambiguous");
+        assert_diagnostic(&ambiguous, "object-spec.ambiguous");
         assert_eq!(ambiguous.candidates[0].source, "package-provider");
         assert_eq!(ambiguous.candidates[1].source, "native-provider");
 
@@ -2481,7 +2481,7 @@ mod tests {
         };
         assert_diagnostic(
             &missing_patch_metadata.resolve("broken"),
-            "object-text.unresolved",
+            "object-spec.unresolved",
         );
 
         let core_without_constructor = ObjectRegistry {
@@ -2500,27 +2500,27 @@ mod tests {
         };
         assert_diagnostic(
             &core_without_constructor.resolve("future"),
-            "object-text.unresolved",
+            "object-spec.unresolved",
         );
     }
 
     #[test]
-    fn object_text_materialization_and_port_projection_cover_diagnostic_edges() {
-        let unresolved = ObjectTextResolution {
+    fn object_spec_materialization_and_port_projection_cover_diagnostic_edges() {
+        let unresolved = ObjectSpecResolution {
             input: "future".to_owned(),
             display_text: "future".to_owned(),
             class_symbol: "future".to_owned(),
             creation_args: vec![
-                ObjectTextAtom::Float(1.5),
-                ObjectTextAtom::Int(2),
-                ObjectTextAtom::Bool(true),
-                ObjectTextAtom::Symbol("arg".to_owned()),
+                ObjectSpecAtom::Float(1.5),
+                ObjectSpecAtom::Int(2),
+                ObjectSpecAtom::Bool(true),
+                ObjectSpecAtom::Symbol("arg".to_owned()),
             ],
             resolved_kind: None,
             resolved_kind_version: None,
             params: Map::new(),
             instance_ports: Vec::new(),
-            candidates: vec![ObjectTextCandidateSummary {
+            candidates: vec![ObjectSpecCandidateSummary {
                 id: "package:future".to_owned(),
                 source: "package-provider".to_owned(),
                 kind: "object.future".to_owned(),
@@ -2529,12 +2529,12 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let materialize_error = materialize_object_text_node_v01(&unresolved, "future_1")
+        let materialize_error = materialize_object_spec_node_v01(&unresolved, "future_1")
             .expect_err("unresolved object should not materialize as resolved node");
-        assert_eq!(materialize_error.code, "object-text.unresolved");
+        assert_eq!(materialize_error.code, "object-spec.unresolved");
         assert!(materialize_error.message.contains("future"));
 
-        let diagnostic_node = materialize_unresolved_object_text_node_v01(&unresolved, "future_1");
+        let diagnostic_node = materialize_unresolved_object_spec_node_v01(&unresolved, "future_1");
         assert_eq!(diagnostic_node.kind, "object.core.unresolved");
         assert_eq!(diagnostic_node.params["candidateCount"], json!(1));
         assert_eq!(
@@ -2543,17 +2543,17 @@ mod tests {
         );
 
         for (rate, expected_rate) in [
-            (ObjectTextPortRate::Event, PortRateCurrent::Event),
-            (ObjectTextPortRate::Render, PortRateCurrent::Render),
-            (ObjectTextPortRate::Gpu, PortRateCurrent::Gpu),
-            (ObjectTextPortRate::Resource, PortRateCurrent::Resource),
-            (ObjectTextPortRate::Io, PortRateCurrent::Io),
+            (ObjectSpecPortRate::Event, PortRateCurrent::Event),
+            (ObjectSpecPortRate::Render, PortRateCurrent::Render),
+            (ObjectSpecPortRate::Gpu, PortRateCurrent::Gpu),
+            (ObjectSpecPortRate::Resource, PortRateCurrent::Resource),
+            (ObjectSpecPortRate::Io, PortRateCurrent::Io),
         ] {
-            let current = object_text_port_to_current(&input_port(
+            let current = object_spec_port_to_current(&input_port(
                 "in",
                 "value.core.message",
                 rate,
-                ObjectTextPortActivation::Passive,
+                ObjectSpecPortActivation::Passive,
             ));
             assert_eq!(current.rate, Some(expected_rate));
             assert_eq!(

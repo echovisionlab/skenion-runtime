@@ -4,7 +4,7 @@ use crate::{
     DataFlow, DataType, Edge, EdgeSpecCurrent, GraphDocument, GraphDocumentCurrent, GraphNode,
     GraphNodeCurrent, NodeDefinition, NodeDefinitionCurrent, Port, PortActivation, PortDirection,
     PortDirectionCurrent, PortRateCurrent, PortRef, PortSpecCurrent, ProjectDocumentCurrent,
-    StringOrStrings, object_text::ObjectRegistry,
+    StringOrStrings, object_spec::ObjectRegistry,
 };
 
 pub(super) fn normalized_node_definitions_current(

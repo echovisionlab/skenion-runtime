@@ -2038,7 +2038,7 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
     assert!(
         unresolved[0]
             .message
-            .contains("object text could not be resolved")
+            .contains("object spec could not be resolved")
     );
 }
 
@@ -2782,7 +2782,7 @@ fn collaboration_private_helpers_cover_patch_target_error_matrix() {
     assert!(
         unresolved[0]
             .message
-            .contains("object text could not be resolved")
+            .contains("object spec could not be resolved")
     );
 }
 
@@ -3755,15 +3755,15 @@ fn value_binding_ports_current_json() -> Value {
     ])
 }
 
-fn unresolved_node_json(id: &str, object_text: &str) -> Value {
+fn unresolved_node_json(id: &str, object_spec: &str) -> Value {
     json!({
       "id": id,
       "kind": "object.core.unresolved",
       "kindVersion": "0.1.0",
       "params": {
-        "objectText": object_text,
-        "diagnosticMessage": format!("{object_text} is not available in the local runtime registry."),
-        "requestedKind": object_text
+        "objectSpec": object_spec,
+        "diagnosticMessage": format!("{object_spec} is not available in the local runtime registry."),
+        "requestedKind": object_spec
       },
       "ports": []
     })

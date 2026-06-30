@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use skenion_contracts::NodeCatalogSnapshotV01;
 
-use crate::{ProjectDocumentCurrent, object_text::ObjectRegistry};
+use crate::{ProjectDocumentCurrent, object_spec::ObjectRegistry};
 
 #[derive(Debug, Clone)]
 pub(super) struct RuntimeNodeCatalogCache {

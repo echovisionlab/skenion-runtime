@@ -20,11 +20,11 @@ use crate::{
     RuntimeDiagnostic, RuntimeMutationRequest, RuntimeOperationAttribution,
     RuntimeOperationDiagnostic, RuntimeOperationEnvelope, RuntimePatchResponse,
     RuntimeSessionRecord, RuntimeSessionSnapshot, RuntimeViewPatch,
-    object_text::{
-        ObjectRegistry, ObjectTextPortActivation, ObjectTextPortDirection, ObjectTextPortRate,
-        ObjectTextResolution, materialize_object_text_node_v01,
-        materialize_unresolved_object_text_node_v01, object_text_node_definition_v01,
-        unresolved_object_text_node_definition_v01,
+    object_spec::{
+        ObjectRegistry, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
+        ObjectSpecResolution, materialize_object_spec_node_v01,
+        materialize_unresolved_object_spec_node_v01, object_spec_node_definition_v01,
+        unresolved_object_spec_node_definition_v01,
     },
     runtime_time::created_at_now,
     session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest},
@@ -466,7 +466,8 @@ struct GraphCommandPayload {
     #[serde(default)]
     changes: Option<Vec<RuntimeCollaborationChange>>,
     #[serde(default)]
-    object_text: Option<String>,
+    #[serde(rename = "objectSpec")]
+    object_spec: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
     #[serde(default)]
@@ -1381,28 +1382,28 @@ impl GraphCommandOutcome {
 
 fn resolve_object_command_text(
     session: &crate::RuntimeSession,
-    object_text: &str,
-) -> ObjectTextResolution {
+    object_spec: &str,
+) -> ObjectSpecResolution {
     let project = session.project_document_current();
-    ObjectRegistry::for_project(project.as_ref()).resolve(object_text)
+    ObjectRegistry::for_project(project.as_ref()).resolve(object_spec)
 }
 
 fn apply_object_resolve_graph_command(
     session: &crate::RuntimeSession,
     payload: &GraphCommandPayload,
 ) -> GraphCommandOutcome {
-    let Some(object_text) = payload.object_text.as_deref() else {
+    let Some(object_spec) = payload.object_spec.as_deref() else {
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
             RuntimeDiagnostic::structured_error(
-                "graph.command.object-text-required",
-                "graph.command kind node.resolve requires payload.objectText",
+                "graph.command.object-spec-required",
+                "graph.command kind node.resolve requires payload.objectSpec",
                 json!({ "commandKind": payload.kind }),
             ),
         ));
     };
-    let resolution = resolve_object_command_text(session, object_text);
+    let resolution = resolve_object_command_text(session, object_spec);
     let node_result = node_command_result(payload, Some(&resolution), None, Vec::new(), None);
     if let Err(response) = validate_object_command_target(session, payload, true) {
         return GraphCommandOutcome::with_node_result(*response, node_result);
@@ -1415,7 +1416,7 @@ fn apply_object_resolve_graph_command(
             conflict: false,
             snapshot: session.snapshot(),
             history: session.history(),
-            diagnostics: object_text_runtime_diagnostics(&resolution),
+            diagnostics: object_spec_runtime_diagnostics(&resolution),
         },
         node_result,
     )
@@ -1427,18 +1428,18 @@ fn apply_object_create_graph_command(
     frame: &RuntimeRealtimeEnvelope,
     payload: &GraphCommandPayload,
 ) -> GraphCommandOutcome {
-    let Some(object_text) = payload.object_text.as_deref() else {
+    let Some(object_spec) = payload.object_spec.as_deref() else {
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
             RuntimeDiagnostic::structured_error(
-                "graph.command.object-text-required",
-                "graph.command kind node.create requires payload.objectText",
+                "graph.command.object-spec-required",
+                "graph.command kind node.create requires payload.objectSpec",
                 json!({ "commandKind": payload.kind }),
             ),
         ));
     };
-    let resolution = resolve_object_command_text(session, object_text);
+    let resolution = resolve_object_command_text(session, object_spec);
     let node_result = node_command_result(
         payload,
         Some(&resolution),
@@ -1465,11 +1466,11 @@ fn apply_object_create_graph_command(
                 false,
                 RuntimeDiagnostic::structured_error(
                     "node.command.unresolved",
-                    "object text could not be resolved for node.create",
+                    "object spec could not be resolved for node.create",
                     json!({
                         "commandKind": payload.kind,
                         "target": target,
-                        "objectText": object_text,
+                        "objectSpec": object_spec,
                         "unresolvedPolicy": object_unresolved_policy(payload),
                         "resolution": object_resolution_json(&resolution),
                     }),
@@ -1506,18 +1507,18 @@ fn apply_object_replace_graph_command(
     frame: &RuntimeRealtimeEnvelope,
     payload: &GraphCommandPayload,
 ) -> GraphCommandOutcome {
-    let Some(object_text) = payload.object_text.as_deref() else {
+    let Some(object_spec) = payload.object_spec.as_deref() else {
         return GraphCommandOutcome::from_response(graph_command_rejected_response(
             session,
             false,
             RuntimeDiagnostic::structured_error(
-                "graph.command.object-text-required",
-                "graph.command kind node.replace requires payload.objectText",
+                "graph.command.object-spec-required",
+                "graph.command kind node.replace requires payload.objectSpec",
                 json!({ "commandKind": payload.kind }),
             ),
         ));
     };
-    let resolution = resolve_object_command_text(session, object_text);
+    let resolution = resolve_object_command_text(session, object_spec);
     let node_id = payload.node_id.clone();
     let node_result = node_command_result(
         payload,
@@ -1553,12 +1554,12 @@ fn apply_object_replace_graph_command(
                 false,
                 RuntimeDiagnostic::structured_error(
                     "node.command.unresolved",
-                    "object text could not be resolved for node.replace",
+                    "object spec could not be resolved for node.replace",
                     json!({
                         "commandKind": payload.kind,
                         "target": target,
                         "nodeId": node_id,
-                        "objectText": object_text,
+                        "objectSpec": object_spec,
                         "unresolvedPolicy": object_unresolved_policy(payload),
                         "resolution": object_resolution_json(&resolution),
                     }),
@@ -1775,7 +1776,7 @@ fn validate_object_command_target(
 fn generated_node_id_for_create(
     session: &crate::RuntimeSession,
     target: &GraphTargetRef,
-    resolution: &ObjectTextResolution,
+    resolution: &ObjectSpecResolution,
 ) -> String {
     let base = node_id_slug(&resolution.display_text)
         .or_else(|| node_id_slug(&resolution.class_symbol))
@@ -1858,19 +1859,19 @@ fn next_generated_node_id(base: &str, used: &[String]) -> String {
 fn materialize_object_command_node(
     _session: &crate::RuntimeSession,
     payload: &GraphCommandPayload,
-    resolution: &ObjectTextResolution,
+    resolution: &ObjectSpecResolution,
     node_id: &str,
 ) -> Option<(crate::GraphNodeCurrent, crate::NodeDefinitionCurrent)> {
     if resolution.ok() {
-        let mut node = materialize_object_text_node_v01(resolution, node_id).ok()?;
+        let mut node = materialize_object_spec_node_v01(resolution, node_id).ok()?;
         merge_payload_params(&mut node.params, payload.params.as_ref());
-        let definition = object_text_node_definition_v01(resolution)?;
+        let definition = object_spec_node_definition_v01(resolution)?;
         return Some((node, definition));
     }
     if object_unresolved_policy(payload) == ObjectUnresolvedPolicy::MaterializeDiagnostic {
-        let mut node = materialize_unresolved_object_text_node_v01(resolution, node_id);
+        let mut node = materialize_unresolved_object_spec_node_v01(resolution, node_id);
         merge_payload_params(&mut node.params, payload.params.as_ref());
-        return Some((node, unresolved_object_text_node_definition_v01()));
+        return Some((node, unresolved_object_spec_node_definition_v01()));
     }
     None
 }
@@ -1890,7 +1891,7 @@ fn object_unresolved_policy(payload: &GraphCommandPayload) -> ObjectUnresolvedPo
         .unwrap_or(ObjectUnresolvedPolicy::MaterializeDiagnostic)
 }
 
-fn object_text_runtime_diagnostics(resolution: &ObjectTextResolution) -> Vec<RuntimeDiagnostic> {
+fn object_spec_runtime_diagnostics(resolution: &ObjectSpecResolution) -> Vec<RuntimeDiagnostic> {
     resolution
         .diagnostics
         .iter()
@@ -1899,12 +1900,12 @@ fn object_text_runtime_diagnostics(resolution: &ObjectTextResolution) -> Vec<Run
                 diagnostic.code.clone(),
                 diagnostic.message.clone(),
                 json!({
-                    "surface": "object-text",
-                    "objectText": resolution.input,
+                    "surface": "object-spec",
+                    "objectSpec": resolution.input,
                     "displayText": resolution.display_text,
                     "classSymbol": resolution.class_symbol,
                     "candidateCount": resolution.candidates.len(),
-                    "candidates": resolution.candidates.iter().map(object_text_candidate_json).collect::<Vec<_>>(),
+                    "candidates": resolution.candidates.iter().map(object_spec_candidate_json).collect::<Vec<_>>(),
                 }),
             )
         })
@@ -1913,7 +1914,7 @@ fn object_text_runtime_diagnostics(resolution: &ObjectTextResolution) -> Vec<Run
 
 fn node_command_result(
     payload: &GraphCommandPayload,
-    resolution: Option<&ObjectTextResolution>,
+    resolution: Option<&ObjectSpecResolution>,
     node_id: Option<&str>,
     dropped_edge_ids: Vec<String>,
     input: Option<Value>,
@@ -1923,7 +1924,7 @@ fn node_command_result(
         "nodeId": node_id,
         "requestedNodeId": payload.requested_node_id,
         "target": payload.target,
-        "objectText": payload.object_text,
+        "objectSpec": payload.object_spec,
         "unresolvedPolicy": object_unresolved_policy(payload),
         "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
         "droppedEdgeIds": dropped_edge_ids,
@@ -1947,7 +1948,7 @@ fn node_input_result(
     })
 }
 
-fn object_resolution_json(resolution: &ObjectTextResolution) -> Value {
+fn object_resolution_json(resolution: &ObjectSpecResolution) -> Value {
     json!({
         "input": resolution.input,
         "displayText": resolution.display_text,
@@ -1956,9 +1957,9 @@ fn object_resolution_json(resolution: &ObjectTextResolution) -> Value {
         "resolvedKind": resolution.resolved_kind,
         "resolvedKindVersion": resolution.resolved_kind_version,
         "candidateCount": resolution.candidates.len(),
-        "candidates": resolution.candidates.iter().map(object_text_candidate_json).collect::<Vec<_>>(),
+        "candidates": resolution.candidates.iter().map(object_spec_candidate_json).collect::<Vec<_>>(),
         "params": resolution.params,
-        "ports": resolution.instance_ports.iter().map(object_text_port_json).collect::<Vec<_>>(),
+        "ports": resolution.instance_ports.iter().map(object_spec_port_json).collect::<Vec<_>>(),
         "diagnostics": resolution.diagnostics.iter().map(|diagnostic| {
             json!({
                 "code": diagnostic.code,
@@ -1968,7 +1969,7 @@ fn object_resolution_json(resolution: &ObjectTextResolution) -> Value {
     })
 }
 
-fn object_text_candidate_json(candidate: &crate::object_text::ObjectTextCandidateSummary) -> Value {
+fn object_spec_candidate_json(candidate: &crate::object_spec::ObjectSpecCandidateSummary) -> Value {
     json!({
         "id": candidate.id,
         "source": candidate.source,
@@ -1977,27 +1978,27 @@ fn object_text_candidate_json(candidate: &crate::object_text::ObjectTextCandidat
     })
 }
 
-fn object_text_port_json(port: &crate::object_text::ObjectTextPort) -> Value {
+fn object_spec_port_json(port: &crate::object_spec::ObjectSpecPort) -> Value {
     json!({
         "id": port.id,
         "direction": match &port.direction {
-            ObjectTextPortDirection::Input => "input",
-            ObjectTextPortDirection::Output => "output",
+            ObjectSpecPortDirection::Input => "input",
+            ObjectSpecPortDirection::Output => "output",
         },
         "type": port.port_type,
         "rate": match &port.rate {
-            ObjectTextPortRate::Event => "event",
-            ObjectTextPortRate::Control => "control",
-            ObjectTextPortRate::Audio => "audio",
-            ObjectTextPortRate::Render => "render",
-            ObjectTextPortRate::Gpu => "gpu",
-            ObjectTextPortRate::Resource => "resource",
-            ObjectTextPortRate::Io => "io",
+            ObjectSpecPortRate::Event => "event",
+            ObjectSpecPortRate::Control => "control",
+            ObjectSpecPortRate::Audio => "audio",
+            ObjectSpecPortRate::Render => "render",
+            ObjectSpecPortRate::Gpu => "gpu",
+            ObjectSpecPortRate::Resource => "resource",
+            ObjectSpecPortRate::Io => "io",
         },
         "activation": port.activation.as_ref().map(|activation| match activation {
-            ObjectTextPortActivation::Trigger => "trigger",
-            ObjectTextPortActivation::Latched => "latched",
-            ObjectTextPortActivation::Passive => "passive",
+            ObjectSpecPortActivation::Trigger => "trigger",
+            ObjectSpecPortActivation::Latched => "latched",
+            ObjectSpecPortActivation::Passive => "passive",
         }),
     })
 }
