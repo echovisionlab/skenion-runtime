@@ -2363,7 +2363,7 @@ async fn realtime_graph_node_commands_validate_targets_before_session_mutation()
 }
 
 #[tokio::test]
-async fn realtime_graph_node_create_missing_rejects_without_materializing_diagnostic_node() {
+async fn realtime_graph_node_create_missing_materializes_unresolved_object_node() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -2378,19 +2378,16 @@ async fn realtime_graph_node_create_missing_rejects_without_materializing_diagno
     )
     .await;
     let ack = next_type(&mut client_a, "graph.ack").await;
-    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+    let broadcast = next_type(&mut client_b, "graph.applied").await;
     let project = loaded_project_json(&runtime);
 
-    assert_eq!(ack["payload"]["status"], "rejected");
-    assert_eq!(ack["payload"]["accepted"], false);
-    assert_eq!(ack["payload"]["applied"], false);
+    assert_eq!(ack["payload"]["status"], "accepted");
+    assert_eq!(ack["payload"]["accepted"], true);
+    assert_eq!(ack["payload"]["applied"], true);
+    assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(
         ack["payload"]["node"]["unresolvedPolicy"],
         "materialize-diagnostic"
-    );
-    assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
-        "node.command.unresolved"
     );
     assert_eq!(
         ack["payload"]["node"]["objectResolution"]["status"],
@@ -2407,12 +2404,16 @@ async fn realtime_graph_node_create_missing_rejects_without_materializing_diagno
             .len(),
         0
     );
-    assert!(graph_node_option(&project, "missing_1").is_none());
-    assert!(no_broadcast.is_err());
+    assert_eq!(broadcast["payload"]["kind"], "node.create");
+    assert_eq!(broadcast["payload"]["node"]["nodeId"], "missing_1");
+    let node = graph_node(&project, "missing_1");
+    assert_eq!(node["objectSpec"], "mystery.object 1");
+    assert_eq!(node["objectResolution"]["status"], "unresolved");
+    assert!(node.get("implementation").is_none());
 }
 
 #[tokio::test]
-async fn realtime_graph_node_create_ambiguous_shortcut_rejects_without_materializing_node() {
+async fn realtime_graph_node_create_ambiguous_shortcut_materializes_unresolved_object_node() {
     let runtime = spawn_loaded_runtime().await;
     let mut client_a = connect_session(&runtime, "default").await;
     let mut client_b = connect_session(&runtime, "default").await;
@@ -2427,19 +2428,16 @@ async fn realtime_graph_node_create_ambiguous_shortcut_rejects_without_materiali
     )
     .await;
     let ack = next_type(&mut client_a, "graph.ack").await;
-    let no_broadcast = timeout(Duration::from_millis(200), next_json(&mut client_b)).await;
+    let broadcast = next_type(&mut client_b, "graph.applied").await;
     let project = loaded_project_json(&runtime);
 
-    assert_eq!(ack["payload"]["status"], "rejected");
-    assert_eq!(ack["payload"]["accepted"], false);
-    assert_eq!(ack["payload"]["applied"], false);
-    assert_eq!(
-        ack["payload"]["diagnostics"][0]["code"],
-        "node.command.unresolved"
-    );
+    assert_eq!(ack["payload"]["status"], "accepted");
+    assert_eq!(ack["payload"]["accepted"], true);
+    assert_eq!(ack["payload"]["applied"], true);
+    assert_eq!(ack["payload"]["graphRevision"], "2");
     assert_eq!(
         ack["payload"]["node"]["objectResolution"]["status"],
-        "ambiguous"
+        "unresolved"
     );
     assert_eq!(
         ack["payload"]["node"]["diagnostics"][0]["code"],
@@ -2452,8 +2450,12 @@ async fn realtime_graph_node_create_ambiguous_shortcut_rejects_without_materiali
             .len(),
         2
     );
-    assert!(graph_node_option(&project, "ambiguous_1").is_none());
-    assert!(no_broadcast.is_err());
+    assert_eq!(broadcast["payload"]["kind"], "node.create");
+    assert_eq!(broadcast["payload"]["node"]["nodeId"], "ambiguous_1");
+    let node = graph_node(&project, "ambiguous_1");
+    assert_eq!(node["objectSpec"], "add");
+    assert_eq!(node["objectResolution"]["status"], "unresolved");
+    assert!(node.get("implementation").is_none());
 }
 
 #[tokio::test]

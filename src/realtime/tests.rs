@@ -141,6 +141,34 @@ fn root_target(base_revision: &str) -> GraphTargetRef {
     }
 }
 
+fn empty_project_request_current() -> crate::ProjectRequestCurrent {
+    let document: crate::ProjectDocumentCurrent = serde_json::from_value(json!({
+      "schema": "skenion.project",
+      "schemaVersion": "0.1.0",
+      "id": "realtime-empty-project",
+      "documentId": "10000000-0000-0000-0000-00000000a001",
+      "revision": "1",
+      "graph": {
+        "schema": "skenion.graph",
+        "schemaVersion": "0.1.0",
+        "id": "root",
+        "revision": "1",
+        "nodes": [],
+        "edges": []
+      },
+      "viewState": {
+        "schema": "skenion.view-state",
+        "schemaVersion": "0.1.0",
+        "canvas": {
+          "nodes": {}
+        }
+      },
+      "patchLibrary": []
+    }))
+    .expect("empty current project should parse");
+    crate::ProjectRequestCurrent::from(document)
+}
+
 fn package_patch_target(base_revision: &str) -> GraphTargetRef {
     GraphTargetRef {
         path: PatchPath::PackagePatchDefinition {
@@ -761,10 +789,24 @@ fn object_command_materialization_respects_params_and_unresolved_policy() {
         "objectSpec": "missingObject 1",
         "params": { "label": "keep me" }
     }));
-    assert!(
+    let unresolved_materialized =
         materialize_object_command_node(&session, &diagnostic_payload, &unresolved, "missing_1")
-            .is_none()
+            .expect("default unresolved policy should materialize an unresolved Object node");
+    assert_eq!(
+        unresolved_materialized.0.object_spec.as_deref(),
+        Some("missingObject 1")
     );
+    assert!(matches!(
+        unresolved_materialized
+            .0
+            .object_resolution
+            .as_ref()
+            .expect("unresolved node should include object resolution")
+            .status,
+        crate::ObjectResolutionStatusCurrent::Unresolved
+    ));
+    assert_eq!(unresolved_materialized.0.params["label"], "keep me");
+    assert!(unresolved_materialized.1.is_none());
 
     let reject_payload = graph_payload(json!({
         "kind": "node.create",
@@ -798,10 +840,7 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &frame,
         &graph_payload(json!({ "kind": "node.create" })),
     );
-    assert_response_diagnostic_code(
-        &missing_create.response,
-        "graph.command.object-spec-required",
-    );
+    assert_response_diagnostic_code(&missing_create.response, "graph.command.target-required");
     let missing_replace = apply_object_replace_graph_command(
         &mut session,
         &identity,
@@ -812,6 +851,46 @@ fn object_command_helpers_validate_required_fields_and_targets() {
         &missing_replace.response,
         "graph.command.object-spec-required",
     );
+    let mut object_session = crate::RuntimeSession::default();
+    let loaded = object_session.load_project_current(empty_project_request_current());
+    assert!(loaded.ok);
+    let create_empty_object = apply_object_create_graph_command(
+        &mut object_session,
+        &identity,
+        &frame,
+        &graph_payload(json!({
+            "kind": "node.create",
+            "target": root_target("1"),
+            "view": { "x": 128.0, "y": 96.0 }
+        })),
+    );
+    assert!(create_empty_object.response.ok);
+    assert!(create_empty_object.response.applied);
+    let node_result = create_empty_object
+        .node_result
+        .as_ref()
+        .expect("empty object create should include node result");
+    assert_eq!(node_result["objectSpec"], Value::Null);
+    assert_eq!(node_result["objectResolution"]["status"], "unresolved");
+    let project = object_session
+        .project_document_current()
+        .expect("empty object create should keep project loaded");
+    let created = project
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "object")
+        .expect("empty object create should append generated Object node");
+    assert!(created.object_spec.is_none());
+    assert!(created.implementation.is_none());
+    assert!(matches!(
+        created
+            .object_resolution
+            .as_ref()
+            .expect("empty object node should carry unresolved status")
+            .status,
+        crate::ObjectResolutionStatusCurrent::Unresolved
+    ));
     let missing_delete_node = apply_node_delete_graph_command(
         &mut session,
         &identity,

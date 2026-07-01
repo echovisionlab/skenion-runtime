@@ -584,9 +584,21 @@ fn reserved_providers_and_unconstructable_candidates_fail_closed() {
         )],
         allow_unchecked_project_patch_refs: false,
     };
-    assert_diagnostic(
-        &provider_registry.resolve("vendor.node"),
-        "object-spec.provider-unavailable",
+    let unavailable_provider = provider_registry.resolve("vendor.node");
+    assert_eq!(
+        unavailable_provider
+            .implementation
+            .as_ref()
+            .map(|implementation| implementation.object_id.as_str()),
+        Some("object.vendor.node")
+    );
+    assert_eq!(
+        unavailable_provider.object_resolution.status,
+        ObjectResolutionStatusV01::Error
+    );
+    assert_eq!(
+        unavailable_provider.diagnostics[0].code,
+        "object-spec.provider-unavailable"
     );
 
     let ambiguous_registry = ObjectRegistry {

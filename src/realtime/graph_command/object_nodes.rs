@@ -7,12 +7,14 @@ use super::{
 };
 use crate::object_spec::{
     ObjectRegistry, ObjectSpecPortActivation, ObjectSpecPortDirection, ObjectSpecPortRate,
-    ObjectSpecResolution, materialize_object_spec_node_v01, object_spec_node_definition_v01,
+    ObjectSpecResolution, materialize_object_spec_node_v01,
+    materialize_unresolved_object_spec_node_v01, object_spec_node_definition_v01,
 };
 use crate::session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest};
 use crate::{
-    GraphTargetRef, PatchPath, RuntimeControlEventRequest, RuntimeControlEventResponse,
-    RuntimeDiagnostic, RuntimeMutationRequest, RuntimePatchResponse,
+    GraphTargetRef, ObjectResolutionCurrent, ObjectResolutionStatusCurrent, PatchPath,
+    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeDiagnostic,
+    RuntimeMutationRequest, RuntimePatchResponse,
 };
 
 fn resolve_object_command_text(
@@ -65,29 +67,58 @@ pub(in crate::realtime) fn apply_object_create_graph_command(
     frame: &RuntimeRealtimeEnvelope,
     payload: &GraphCommandPayload,
 ) -> GraphCommandOutcome {
-    let Some(object_spec) = payload.object_spec.as_deref() else {
-        return GraphCommandOutcome::from_response(graph_command_rejected_response(
-            session,
-            false,
-            RuntimeDiagnostic::structured_error(
-                "graph.command.object-spec-required",
-                "graph.command kind node.create requires payload.objectSpec",
-                json!({ "commandKind": payload.kind }),
-            ),
-        ));
-    };
-    let resolution = resolve_object_command_text(session, object_spec);
-    let node_result = node_command_result(
-        payload,
-        Some(&resolution),
-        payload.requested_node_id.as_deref(),
-        Vec::new(),
-        None,
-    );
     let target = match validate_object_command_target(session, payload, false) {
         Ok(target) => target,
-        Err(response) => return GraphCommandOutcome::with_node_result(*response, node_result),
+        Err(response) => {
+            return GraphCommandOutcome::with_node_result(
+                *response,
+                node_command_result(
+                    payload,
+                    None,
+                    payload.requested_node_id.as_deref(),
+                    Vec::new(),
+                    None,
+                ),
+            );
+        }
     };
+
+    let Some(object_spec) = payload
+        .object_spec
+        .as_deref()
+        .map(str::trim)
+        .filter(|object_spec| !object_spec.is_empty())
+    else {
+        let node_id = payload
+            .requested_node_id
+            .clone()
+            .unwrap_or_else(|| generated_node_id_for_base(session, &target, "object"));
+        let mut node = empty_unresolved_object_command_node(&node_id);
+        merge_payload_params(&mut node.params, payload.params.as_ref());
+        let response =
+            session.apply_object_node_create_current(ApplyObjectNodeCreateCurrentRequest {
+                target,
+                node,
+                view: payload.view.clone(),
+                definition: None,
+                mutation: RuntimeMutationRequest {
+                    graph_patch: None,
+                    view_patch: None,
+                    actor_id: Some(identity.client_id.clone()),
+                    client_id: Some(identity.client_id.clone()),
+                    description: payload
+                        .description
+                        .clone()
+                        .or_else(|| Some(format!("Realtime graph command {}", frame.message_id))),
+                },
+            });
+        return GraphCommandOutcome::with_node_result(
+            response,
+            empty_object_node_result(payload, &node_id),
+        );
+    };
+
+    let resolution = resolve_object_command_text(session, object_spec);
     let node_id = payload
         .requested_node_id
         .clone()
@@ -121,7 +152,7 @@ pub(in crate::realtime) fn apply_object_create_graph_command(
         target,
         node,
         view: payload.view.clone(),
-        definition: Some(definition),
+        definition,
         mutation: RuntimeMutationRequest {
             graph_patch: None,
             view_patch: None,
@@ -211,7 +242,7 @@ pub(in crate::realtime) fn apply_object_replace_graph_command(
             target,
             node,
             view: payload.view.clone(),
-            definition: Some(definition),
+            definition,
             interface_incident_edge_policy: payload.interface_incident_edge_policy,
             mutation: RuntimeMutationRequest {
                 graph_patch: None,
@@ -418,6 +449,14 @@ fn generated_node_id_for_create(
     let base = node_id_slug(&resolution.display_text)
         .or_else(|| node_id_slug(&resolution.class_symbol))
         .unwrap_or_else(|| "node".to_owned());
+    generated_node_id_for_base(session, target, &base)
+}
+
+fn generated_node_id_for_base(
+    session: &crate::RuntimeSession,
+    target: &GraphTargetRef,
+    base: &str,
+) -> String {
     let used = session
         .project_document_current()
         .and_then(|project| graph_for_node_command_target(&project, target).cloned())
@@ -429,7 +468,7 @@ fn generated_node_id_for_create(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    next_generated_node_id(&base, &used)
+    next_generated_node_id(base, &used)
 }
 
 fn graph_for_node_command_target<'a>(
@@ -498,12 +537,20 @@ pub(in crate::realtime) fn materialize_object_command_node(
     payload: &GraphCommandPayload,
     resolution: &ObjectSpecResolution,
     node_id: &str,
-) -> Option<(crate::GraphNodeCurrent, crate::NodeDefinitionCurrent)> {
+) -> Option<(
+    crate::GraphNodeCurrent,
+    Option<crate::NodeDefinitionCurrent>,
+)> {
     if resolution.ok() {
         let mut node = materialize_object_spec_node_v01(resolution, node_id).ok()?;
         merge_payload_params(&mut node.params, payload.params.as_ref());
         let definition = object_spec_node_definition_v01(resolution)?;
-        return Some((node, definition));
+        return Some((node, Some(definition)));
+    }
+    if object_unresolved_policy(payload) == ObjectUnresolvedPolicy::MaterializeDiagnostic {
+        let mut node = materialize_unresolved_object_spec_node_v01(resolution, node_id);
+        merge_payload_params(&mut node.params, payload.params.as_ref());
+        return Some((node, None));
     }
     None
 }
@@ -514,6 +561,24 @@ fn merge_payload_params(params: &mut Map<String, Value>, overrides: Option<&Map<
     };
     for (key, value) in overrides {
         params.insert(key.clone(), value.clone());
+    }
+}
+
+fn empty_unresolved_object_command_node(node_id: &str) -> crate::GraphNodeCurrent {
+    crate::GraphNodeCurrent {
+        id: node_id.to_owned(),
+        implementation: None,
+        object_spec: None,
+        object_resolution: Some(ObjectResolutionCurrent {
+            status: ObjectResolutionStatusCurrent::Unresolved,
+            selected_spec: None,
+            candidates: Vec::new(),
+            diagnostics: Vec::new(),
+        }),
+        binding_ref: None,
+        params: Map::new(),
+        ports: Vec::new(),
+        port_groups: None,
     }
 }
 
@@ -569,6 +634,30 @@ pub(in crate::realtime) fn node_command_result(
         "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
         "droppedEdgeIds": dropped_edge_ids,
         "input": input,
+    })
+}
+
+fn empty_object_node_result(payload: &GraphCommandPayload, node_id: &str) -> Value {
+    json!({
+        "kind": payload.kind,
+        "nodeId": node_id,
+        "requestedNodeId": payload.requested_node_id,
+        "target": payload.target,
+        "objectSpec": Value::Null,
+        "implementation": Value::Null,
+        "objectResolution": {
+            "status": "unresolved",
+            "candidates": [],
+            "diagnostics": []
+        },
+        "params": {},
+        "ports": [],
+        "candidates": [],
+        "diagnostics": [],
+        "unresolvedPolicy": object_unresolved_policy(payload),
+        "interfaceIncidentEdgePolicy": payload.interface_incident_edge_policy,
+        "droppedEdgeIds": [],
+        "input": Value::Null,
     })
 }
 

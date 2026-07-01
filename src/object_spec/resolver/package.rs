@@ -1,5 +1,5 @@
 use super::super::{ObjectRegistryCandidate, ObjectSpecResolution, ParsedObjectSpec};
-use super::outcome::{failure_with_candidates, success};
+use super::outcome::{failure_for_selected_candidate, failure_with_candidates, success};
 
 pub(in crate::object_spec) fn construct_package_object(
     parsed: ParsedObjectSpec,
@@ -24,24 +24,24 @@ pub(in crate::object_spec) fn construct_package_object(
     }
 
     let Some(package) = candidate.package.as_ref() else {
-        return failure_with_candidates(
+        return failure_for_selected_candidate(
             &input,
             display_text,
             &class_symbol,
             creation_args,
-            vec![candidate.summary()],
+            candidate,
             "object-spec.provider-unavailable",
             "package object candidate is missing package metadata",
         );
     };
 
     let Some(_root_path) = package.root_path.as_ref() else {
-        return failure_with_candidates(
+        return failure_for_selected_candidate(
             &input,
             display_text,
             &class_symbol,
             creation_args,
-            vec![candidate.summary()],
+            candidate,
             "object-spec.provider-unavailable",
             format!(
                 "package object {} from {} has no local package root",
@@ -53,12 +53,12 @@ pub(in crate::object_spec) fn construct_package_object(
     let definition = match crate::object_spec::load_package_object_definition(candidate) {
         Some(definition) => definition,
         None => {
-            return failure_with_candidates(
+            return failure_for_selected_candidate(
                 &input,
                 display_text,
                 &class_symbol,
                 creation_args,
-                vec![candidate.summary()],
+                candidate,
                 "object-spec.provider-unavailable",
                 format!(
                     "package object definition {} is not readable",

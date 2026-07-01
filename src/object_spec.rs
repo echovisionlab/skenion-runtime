@@ -1,5 +1,4 @@
 use skenion_contracts::{
-    NodeCatalogDiagnosticNodeDefinitionReasonV01, NodeCatalogDiagnosticNodeDefinitionV01,
     NodeCatalogDisplayPaletteV01, NodeCatalogDisplayV01, NodeCatalogEntryV01,
     NodeCatalogSnapshotV01, PackageChecksumAlgorithmV01, PackageChecksumV01,
 };
@@ -122,11 +121,7 @@ impl ObjectRegistry {
             schema_version: CURRENT_KIND_VERSION.to_owned(),
             catalog_revision: zero_catalog_revision_checksum(),
             entries,
-            diagnostic_node_definitions: vec![NodeCatalogDiagnosticNodeDefinitionV01 {
-                diagnostic_id: "runtime.unresolved-object".to_owned(),
-                reason: NodeCatalogDiagnosticNodeDefinitionReasonV01::UnresolvedObject,
-                definition: unresolved_object_spec_node_definition_v01(),
-            }],
+            diagnostic_node_definitions: Vec::new(),
             diagnostics: None,
         };
         snapshot.catalog_revision = skenion_contracts::compute_node_catalog_revision_v01(&snapshot);
@@ -134,19 +129,11 @@ impl ObjectRegistry {
     }
 
     pub(crate) fn node_definition_projection(&self) -> Vec<NodeDefinitionCurrent> {
-        let snapshot = self.catalog_projection();
-        let mut definitions = snapshot
+        self.catalog_projection()
             .entries
             .into_iter()
             .map(|entry| entry.definition)
-            .collect::<Vec<_>>();
-        definitions.extend(
-            snapshot
-                .diagnostic_node_definitions
-                .into_iter()
-                .map(|definition| definition.definition),
-        );
-        definitions
+            .collect()
     }
 
     fn core_catalog_entry(
@@ -646,13 +633,9 @@ pub(crate) fn is_payload_identity_kind(kind: &str) -> bool {
 
 #[cfg(test)]
 use ports::input_port;
-#[cfg(test)]
 pub(crate) use projection::materialize_unresolved_object_spec_node_v01;
 use projection::object_spec_port_to_current;
-pub(crate) use projection::{
-    materialize_object_spec_node_v01, object_spec_node_definition_v01,
-    unresolved_object_spec_node_definition_v01,
-};
+pub(crate) use projection::{materialize_object_spec_node_v01, object_spec_node_definition_v01};
 use resolver::{
     ambiguous_resolution, construct_first_party_core, construct_package_object,
     construct_project_patch, explicit_project_patch_ref, failure, parse_object_spec_input_v01,

@@ -123,14 +123,7 @@ fn normalize_current_fixture_value(value: &mut Value) {
                     .map(str::to_owned);
                 let params = object.remove("params").unwrap_or_else(|| json!({}));
                 let ports = object.remove("ports").unwrap_or_else(|| json!([]));
-                *value = if kind == "object.core.unresolved" {
-                    let object_spec = params
-                        .get("objectSpec")
-                        .or_else(|| params.get("requestedKind"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("unresolved");
-                    current_unresolved_node_json(&id, object_spec)
-                } else if let Some(object_id) = kind.strip_prefix("object.core.") {
+                *value = if let Some(object_id) = kind.strip_prefix("object.core.") {
                     current_core_node_json(
                         &id,
                         object_id,
@@ -956,27 +949,42 @@ fn unresolved_object_loads_session_with_error_diagnostic() {
 #[test]
 fn replace_node_with_unresolved_object_applies_with_error_diagnostic() {
     let mut session = RuntimeSession::default();
-    let loaded = session.load_project_current(sample_project_current_with_unresolved_definition());
+    let loaded = session.load_project_current(sample_project_current());
     assert!(loaded.ok);
 
-    let response = session.apply_patch(graph_patch(json!({
-      "schema": "skenion.graph.patch",
-      "schemaVersion": "0.1.0",
-      "id": "replace-target-unresolved",
-      "baseRevision": "1",
-      "ops": [
-        {
-          "op": "replaceNode",
-          "nodeId": "target_1",
-          "node": unresolved_node_json("target_1", "user.manipulator"),
-          "edgePolicy": "removeInvalidEdges"
-        }
-      ]
-    })));
+    let target = skenion_contracts::GraphTargetRef {
+        path: skenion_contracts::PatchPath::Root,
+        base_revision: "1".to_owned(),
+        target_revision: None,
+    };
+    let unresolved_node = current_fixture(
+        unresolved_node_json("target_1", "user.manipulator"),
+        "unresolved replacement node should parse",
+    );
+    let (response, dropped_edge_ids) =
+        session.apply_object_node_replace_current(super::ApplyObjectNodeReplaceCurrentRequest {
+            target,
+            node: unresolved_node,
+            view: None,
+            definition: None,
+            interface_incident_edge_policy: Some(
+                skenion_contracts::InterfaceIncidentEdgePolicyV01::Drop,
+            ),
+            mutation: empty_runtime_mutation(),
+        });
 
-    assert_graph_patch_rejected(&response);
+    assert!(response.ok);
+    assert!(response.applied);
+    assert_eq!(dropped_edge_ids, vec!["edge_value_target".to_owned()]);
     assert!(response.snapshot.loaded());
-    assert_eq!(patch_graph(&response).revision, "1");
+    assert_eq!(patch_graph(&response).revision, "2");
+    let replaced = patch_graph(&response)
+        .nodes
+        .iter()
+        .find(|node| node.id == "target_1")
+        .expect("target node should remain present");
+    assert!(replaced.implementation.is_none());
+    assert_eq!(replaced.object_spec.as_deref(), Some("user.manipulator"));
 }
 
 #[test]
@@ -2382,28 +2390,13 @@ fn current_active_cutover_private_helpers_cover_defensive_paths() {
     .expect_err("package patch target should not be mutable");
     assert_eq!(paste_error.0[0].code, "paste.target.unsupported");
 
-    let unresolved = super::unresolved_object_diagnostics(&GraphDocument {
-        schema: "skenion.graph".to_owned(),
-        schema_version: "0.1.0".to_owned(),
-        id: "unresolved-defaults".to_owned(),
-        revision: "1".to_owned(),
-        nodes: vec![
-            serde_json::from_value(json!({
-              "id": "missing_object",
-              "kind": "object.core.unresolved",
-              "kindVersion": "0.1.0",
-              "params": {},
-              "ports": []
-            }))
-            .expect("node should parse"),
-        ],
-        edges: Vec::new(),
-    });
-    assert!(
-        unresolved[0]
-            .message
-            .contains("object spec could not be resolved")
-    );
+    let mut unresolved_graph = sample_project_current().graph;
+    unresolved_graph.nodes.push(current_fixture(
+        current_unresolved_node_json("missing_object", "missing.object"),
+        "unresolved current 0.1 node should parse",
+    ));
+    let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
+    assert!(unresolved[0].message.contains("missing.object"));
 }
 
 #[test]
@@ -3131,13 +3124,7 @@ fn collaboration_private_helpers_cover_patch_target_error_matrix() {
 
     let mut unresolved_graph = sample_project_current().graph;
     unresolved_graph.nodes.push(current_fixture(
-        json!({
-          "id": "unresolved_current",
-          "kind": "object.core.unresolved",
-          "kindVersion": "0.1.0",
-          "params": {},
-          "ports": []
-        }),
+        current_unresolved_node_json("unresolved_current", "user.manipulator"),
         "unresolved current 0.1 node should parse",
     ));
     let unresolved = super::unresolved_object_diagnostics_current(&unresolved_graph);
@@ -3999,25 +3986,12 @@ fn binding_project_current() -> ProjectRequestCurrent {
     )
 }
 
-fn sample_project_current_with_unresolved_definition() -> ProjectRequestCurrent {
-    let mut request = sample_project_current();
-    request.nodes.push(
-        serde_json::from_value(unresolved_definition_current_json())
-            .expect("unresolved current 0.1 definition should parse"),
-    );
-    request
-}
-
 fn unresolved_project_current() -> ProjectRequestCurrent {
     let mut request = sample_project_current();
     request.graph.nodes.push(current_fixture(
         unresolved_node_json("unresolved_1", "user.manipulator"),
         "unresolved current 0.1 node should parse",
     ));
-    request.nodes.push(
-        serde_json::from_value(unresolved_definition_current_json())
-            .expect("unresolved current 0.1 definition should parse"),
-    );
     request
 }
 
@@ -4126,31 +4100,5 @@ fn value_binding_ports_current_json() -> Value {
 }
 
 fn unresolved_node_json(id: &str, object_spec: &str) -> Value {
-    json!({
-      "id": id,
-      "kind": "object.core.unresolved",
-      "kindVersion": "0.1.0",
-      "params": {
-        "objectSpec": object_spec,
-        "diagnosticMessage": format!("{object_spec} is not available in the local runtime registry."),
-        "requestedKind": object_spec
-      },
-      "ports": []
-    })
-}
-
-fn unresolved_definition_current_json() -> Value {
-    json!({
-      "schema": "skenion.node.definition",
-      "schemaVersion": "0.1.0",
-      "id": "object.core.unresolved",
-      "version": "0.1.0",
-      "displayName": "Unresolved Object",
-      "category": "Diagnostics",
-      "ports": [],
-      "execution": { "model": "event" },
-      "state": { "persistent": false },
-      "permissions": [],
-      "capabilities": ["diagnostic.unresolved-object.v0.1"]
-    })
+    current_unresolved_node_json(id, object_spec)
 }

@@ -75,7 +75,6 @@ pub(super) fn failure_with_candidates(
 ) -> ObjectSpecResolution {
     let code = code.into();
     let message = message.into();
-    let status = resolution_status_for_code(&code);
     ObjectSpecResolution {
         input: input.to_owned(),
         display_text,
@@ -83,7 +82,7 @@ pub(super) fn failure_with_candidates(
         creation_args,
         implementation: None,
         object_resolution: ObjectResolutionV01 {
-            status,
+            status: ObjectResolutionStatusV01::Unresolved,
             selected_spec: None,
             candidates: candidates
                 .iter()
@@ -108,11 +107,44 @@ pub(super) fn failure_with_candidates(
     }
 }
 
-fn resolution_status_for_code(code: &str) -> ObjectResolutionStatusV01 {
-    match code {
-        "object-spec.ambiguous" => ObjectResolutionStatusV01::Ambiguous,
-        "object-spec.provider-unavailable" => ObjectResolutionStatusV01::Missing,
-        _ => ObjectResolutionStatusV01::Unresolved,
+pub(super) fn failure_for_selected_candidate(
+    input: &str,
+    display_text: String,
+    class_symbol: &str,
+    creation_args: Vec<ObjectSpecAtom>,
+    candidate: &ObjectRegistryCandidate,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> ObjectSpecResolution {
+    let code = code.into();
+    let message = message.into();
+    let summary = candidate.summary();
+    ObjectSpecResolution {
+        input: input.to_owned(),
+        display_text: display_text.clone(),
+        class_symbol: class_symbol.to_owned(),
+        creation_args,
+        implementation: Some(candidate.implementation.clone()),
+        object_resolution: ObjectResolutionV01 {
+            status: ObjectResolutionStatusV01::Error,
+            selected_spec: Some(display_text),
+            candidates: vec![ObjectResolutionCandidateV01 {
+                implementation: candidate.implementation.clone(),
+                object_spec: candidate.canonical_object_spec(),
+                display_name: Some(candidate.display_name.clone()),
+                reason: Some("selected".to_owned()),
+            }],
+            diagnostics: vec![ObjectResolutionDiagnosticV01 {
+                severity: PackageDiagnosticSeverityV01::Error,
+                code: object_resolution_diagnostic_code(&code),
+                message: message.clone(),
+                details: None,
+            }],
+        },
+        params: Map::new(),
+        instance_ports: Vec::new(),
+        candidates: vec![summary],
+        diagnostics: vec![ObjectSpecDiagnostic { code, message }],
     }
 }
 

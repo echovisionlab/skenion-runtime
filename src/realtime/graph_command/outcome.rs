@@ -8,7 +8,7 @@ use crate::{PasteGraphFragmentResponse, RuntimePatchResponse, RuntimeSession};
 #[derive(Debug)]
 pub(in crate::realtime) struct GraphCommandOutcome {
     pub(in crate::realtime) response: RuntimePatchResponse,
-    pub(super) node_result: Option<Value>,
+    pub(in crate::realtime) node_result: Option<Value>,
     pub(super) operation_result: Option<PasteGraphFragmentResponse>,
     pub(super) control_emission: Option<GraphControlEmission>,
     pub(super) catalog_snapshot: Option<NodeCatalogSnapshotV01>,

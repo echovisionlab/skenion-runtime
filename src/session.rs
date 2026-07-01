@@ -58,10 +58,7 @@ use paste::{
     paste_graph_fragment_into_project_current, remap_edge_current,
     runtime_diagnostic_to_operation_diagnostic,
 };
-use planning::{
-    build_session_execution_plan, unresolved_object_diagnostics,
-    unresolved_object_diagnostics_current,
-};
+use planning::{build_session_execution_plan, unresolved_object_diagnostics_current};
 pub(crate) use projection::{lower_edge_for_execution, lower_graph_node_for_execution};
 #[cfg(test)]
 use projection::{lower_execution_model_for_execution, lower_port_for_execution, remap_edge};
@@ -524,7 +521,7 @@ impl RuntimeSession {
                     return self.patch_response(false, false, false, diagnostics);
                 }
             };
-        let diagnostics = unresolved_object_diagnostics(&next_graph);
+        let diagnostics = Vec::new();
         let control_state = ControlState::from_graph(&next_graph);
         let mut inverse_mutation = RuntimeMutationRequest {
             graph_patch: None,

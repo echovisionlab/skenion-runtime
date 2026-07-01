@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::json;
 
@@ -178,19 +178,28 @@ fn build_audio_dsp_plan_from_execution_plan(
 }
 
 fn lower_graph_for_execution(graph: &crate::GraphDocumentCurrent) -> GraphDocument {
+    let nodes = graph
+        .nodes
+        .iter()
+        .filter_map(|node| crate::session::lower_graph_node_for_execution(node, &node.id))
+        .collect::<Vec<_>>();
+    let executable_node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
     GraphDocument {
         schema: "skenion.graph".to_owned(),
         schema_version: "0.1.0".to_owned(),
         id: graph.id.clone(),
         revision: graph.revision.clone(),
-        nodes: graph
-            .nodes
-            .iter()
-            .map(|node| crate::session::lower_graph_node_for_execution(node, &node.id))
-            .collect(),
+        nodes,
         edges: graph
             .edges
             .iter()
+            .filter(|edge| {
+                executable_node_ids.contains(&edge.source.node_id)
+                    && executable_node_ids.contains(&edge.target.node_id)
+            })
             .map(crate::session::lower_edge_for_execution)
             .collect(),
     }

@@ -5,31 +5,6 @@ use crate::{
     ObjectResolutionStatusCurrent, PlanError, RuntimeDiagnostic, build_execution_plan,
 };
 
-const UNRESOLVED_OBJECT_NODE_KIND: &str = "object.core.unresolved";
-
-pub(super) fn unresolved_object_diagnostics(graph: &GraphDocument) -> Vec<RuntimeDiagnostic> {
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.kind == UNRESOLVED_OBJECT_NODE_KIND)
-        .map(|node| {
-            let object_spec = node
-                .params
-                .get("objectSpec")
-                .and_then(|value| value.as_str())
-                .unwrap_or(node.id.as_str());
-            let diagnostic_message = node
-                .params
-                .get("diagnosticMessage")
-                .and_then(|value| value.as_str())
-                .unwrap_or("object spec could not be resolved");
-            RuntimeDiagnostic::error(format!(
-                "unresolved object {object_spec}: {diagnostic_message}"
-            ))
-        })
-        .collect()
-}
-
 pub(super) fn unresolved_object_diagnostics_current(
     graph: &GraphDocumentCurrent,
 ) -> Vec<RuntimeDiagnostic> {
@@ -61,11 +36,8 @@ pub(super) fn build_session_execution_plan(
     registry: &NodeRegistry,
     surface: &'static str,
 ) -> Result<ExecutionPlan, Vec<RuntimeDiagnostic>> {
-    build_execution_plan(graph, registry).map_err(|error| {
-        let mut diagnostics = plan_error_diagnostics(error, surface, graph);
-        diagnostics.extend(unresolved_object_diagnostics(graph));
-        diagnostics
-    })
+    build_execution_plan(graph, registry)
+        .map_err(|error| plan_error_diagnostics(error, surface, graph))
 }
 
 fn plan_error_diagnostics(

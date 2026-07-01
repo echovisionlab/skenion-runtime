@@ -35,17 +35,30 @@ pub(super) fn normalized_node_definitions_current(
 }
 
 pub(super) fn lower_graph_for_execution(graph: &GraphDocumentCurrent) -> GraphDocument {
+    let nodes = graph
+        .nodes
+        .iter()
+        .filter_map(|node| lower_graph_node_for_execution(node, &node.id))
+        .collect::<Vec<_>>();
+    let executable_node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
     GraphDocument {
         schema: "skenion.graph".to_owned(),
         schema_version: "0.1.0".to_owned(),
         id: graph.id.clone(),
         revision: graph.revision.clone(),
-        nodes: graph
-            .nodes
+        nodes,
+        edges: graph
+            .edges
             .iter()
-            .map(|node| lower_graph_node_for_execution(node, &node.id))
+            .filter(|edge| {
+                executable_node_ids.contains(&edge.source.node_id)
+                    && executable_node_ids.contains(&edge.target.node_id)
+            })
+            .map(lower_edge_for_execution)
             .collect(),
-        edges: graph.edges.iter().map(lower_edge_for_execution).collect(),
     }
 }
 
@@ -103,16 +116,15 @@ pub(super) fn lower_execution_model_for_execution(
 pub(crate) fn lower_graph_node_for_execution(
     node: &GraphNodeCurrent,
     pasted_id: &str,
-) -> GraphNode {
-    GraphNode {
+) -> Option<GraphNode> {
+    Some(GraphNode {
         id: pasted_id.to_owned(),
-        kind: graph_node_executable_kind(node)
-            .unwrap_or_else(|| "object.core.unresolved".to_owned()),
+        kind: graph_node_executable_kind(node)?,
         kind_version: graph_node_executable_kind_version(node)
             .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned()),
         params: node.params.clone(),
         ports: node.ports.iter().map(lower_port_for_execution).collect(),
-    }
+    })
 }
 
 pub(super) fn lower_port_for_execution(port: &PortSpecCurrent) -> Port {

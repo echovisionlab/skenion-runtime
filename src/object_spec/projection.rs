@@ -1,8 +1,6 @@
-#[cfg(test)]
 use serde_json::{Map, Value, json};
 use skenion_contracts::MessageKeyPolicyV01;
 
-#[cfg(test)]
 use super::ObjectSpecCandidateSummary;
 use super::ports::message_key_policy;
 use super::{
@@ -81,7 +79,6 @@ pub(crate) fn object_spec_node_definition_v01(
     })
 }
 
-#[cfg(test)]
 pub(crate) fn materialize_unresolved_object_spec_node_v01(
     resolution: &ObjectSpecResolution,
     node_id: impl Into<String>,
@@ -120,7 +117,7 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
 
     GraphNodeCurrent {
         id: node_id.into(),
-        implementation: None,
+        implementation: resolution.implementation.clone(),
         object_spec: Some(resolution.display_text.clone()),
         object_resolution: Some(resolution.object_resolution.clone()),
         binding_ref: None,
@@ -130,7 +127,6 @@ pub(crate) fn materialize_unresolved_object_spec_node_v01(
     }
 }
 
-#[cfg(test)]
 fn object_spec_candidate_json(candidate: &ObjectSpecCandidateSummary) -> Value {
     json!({
         "id": candidate.id,
@@ -139,29 +135,6 @@ fn object_spec_candidate_json(candidate: &ObjectSpecCandidateSummary) -> Value {
         "objectSpec": candidate.object_spec,
         "displayName": candidate.display_name,
     })
-}
-
-pub(crate) fn unresolved_object_spec_node_definition_v01() -> NodeDefinitionCurrent {
-    NodeDefinitionCurrent {
-        schema: "skenion.node.definition".to_owned(),
-        schema_version: CURRENT_KIND_VERSION.to_owned(),
-        id: "object.core.unresolved".to_owned(),
-        version: CURRENT_KIND_VERSION.to_owned(),
-        display_name: "Unresolved Object".to_owned(),
-        category: "Diagnostics".to_owned(),
-        script_api_version: None,
-        bundle_hash: None,
-        surface: None,
-        ports: Vec::new(),
-        port_groups: None,
-        execution: skenion_contracts::NodeExecutionV01 {
-            model: skenion_contracts::ExecutionModelV01::Event,
-            clock: None,
-        },
-        state: skenion_contracts::NodeStateV01 { persistent: false },
-        permissions: Vec::new(),
-        capabilities: vec!["diagnostic.unresolved-object.v0.1".to_owned()],
-    }
 }
 
 fn primary_resolution_diagnostic(resolution: &ObjectSpecResolution) -> ObjectSpecDiagnostic {

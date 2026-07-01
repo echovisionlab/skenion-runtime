@@ -1274,8 +1274,12 @@ pub fn build_execution_plan_current(
         let node = graph_nodes
             .get(node_id.as_str())
             .expect("current 0.1 planning order should only contain graph nodes");
-        let kind =
-            graph_node_executable_kind(node).unwrap_or_else(|| "object.core.unresolved".to_owned());
+        if node_has_non_resolved_object_resolution(node) {
+            continue;
+        }
+        let Some(kind) = graph_node_executable_kind(node) else {
+            continue;
+        };
         let kind_version = graph_node_executable_kind_version(node)
             .unwrap_or_else(|| CURRENT_OBJECT_VERSION.to_owned());
         let definition = registry
