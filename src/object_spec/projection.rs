@@ -2,7 +2,7 @@ use serde_json::{Map, Value, json};
 use skenion_contracts::MessageKeyPolicyV01;
 
 use super::ObjectSpecCandidateSummary;
-use super::ports::{message_key_policy, numeric_message_value_types};
+use super::ports::{message_key_policy, numeric_message_value_types, unique_strings};
 use super::{
     CURRENT_KIND_VERSION, ObjectSpecIssue, ObjectSpecPort, ObjectSpecPortActivation,
     ObjectSpecPortDirection, ObjectSpecPortRate, ObjectSpecResolution,
@@ -193,14 +193,13 @@ fn message_input_accepts(port: &ObjectSpecPort) -> Option<Vec<String>> {
     if matches!(&port.direction, ObjectSpecPortDirection::Input)
         && port.port_type == "value.core.message"
     {
-        return Some(
+        return Some(unique_strings(
             numeric_message_value_types()
                 .iter()
                 .copied()
                 .chain(std::iter::once("value.core.message"))
-                .map(str::to_owned)
-                .collect(),
-        );
+                .map(str::to_owned),
+        ));
     }
     None
 }

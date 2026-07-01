@@ -82,7 +82,18 @@ pub(super) fn message_key_policy(
 }
 
 fn string_list(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_owned()).collect()
+    unique_strings(values.iter().map(|value| (*value).to_owned()))
+}
+
+pub(super) fn unique_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut unique = Vec::new();
+    for value in values {
+        if unique.iter().any(|existing| existing == &value) {
+            continue;
+        }
+        unique.push(value);
+    }
+    unique
 }
 
 fn optional_string_list(values: &[&str]) -> Option<Vec<String>> {

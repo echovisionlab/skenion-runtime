@@ -845,6 +845,15 @@ fn object_spec_materialization_and_port_projection_cover_issue_edges() {
                 .as_ref()
                 .is_some_and(|values| values.iter().any(|value| value == "value.core.message"))
         );
+        let accepts = current.accepts.as_ref().expect("message input accepts");
+        for (index, value) in accepts.iter().enumerate() {
+            assert!(
+                !accepts[index + 1..]
+                    .iter()
+                    .any(|candidate| candidate == value),
+                "duplicate accepts entry {value}"
+            );
+        }
         assert!(
             current
                 .message_keys
