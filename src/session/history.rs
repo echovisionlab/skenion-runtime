@@ -423,6 +423,5 @@ pub(super) fn view_state_history_delta_current(
             }
         }
     }
-    next.canvas.viewport = None;
     next
 }

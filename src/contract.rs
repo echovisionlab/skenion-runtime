@@ -44,10 +44,9 @@ pub use skenion_contracts::{
 };
 pub use skenion_contracts::{
     CanvasNodeViewV01 as CanvasNodeView, CanvasViewStateV01 as CanvasViewState,
-    CanvasViewportV01 as CanvasViewport, CycleValidationV01 as CycleValidationCurrent,
-    EdgeEndpointV01 as EdgeEndpointCurrent, EdgeSpecV01 as EdgeSpecCurrent,
-    ExecutionModelV01 as ExecutionModelCurrent, ExtensionKindV01 as ExtensionKind,
-    ExtensionManifestV01 as ExtensionManifest,
+    CycleValidationV01 as CycleValidationCurrent, EdgeEndpointV01 as EdgeEndpointCurrent,
+    EdgeSpecV01 as EdgeSpecCurrent, ExecutionModelV01 as ExecutionModelCurrent,
+    ExtensionKindV01 as ExtensionKind, ExtensionManifestV01 as ExtensionManifest,
     ExtensionNativeArtifactV01 as ExtensionNativeArtifact,
     ExtensionNativeBindingV01 as ExtensionNativeBinding, ExtensionProvidesV01 as ExtensionProvides,
     FanOutPolicyV01 as FanOutPolicyCurrent, FeedbackBoundaryV01 as FeedbackBoundaryCurrent,

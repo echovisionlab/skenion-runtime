@@ -20,9 +20,6 @@ pub(super) fn reconcile_view_state_with_graph_current(
                 .insert(node.id.clone(), node_view.clone());
         }
     }
-    if view_state.canvas.viewport.is_some() {
-        reconciled.canvas.viewport = view_state.canvas.viewport;
-    }
 
     reconciled
 }
@@ -44,9 +41,6 @@ pub(super) fn reconcile_view_state_with_execution_graph(
                 .insert(node.id.clone(), node_view.clone());
         }
     }
-    if view_state.canvas.viewport.is_some() {
-        reconciled.canvas.viewport = view_state.canvas.viewport;
-    }
 
     reconciled
 }
@@ -62,7 +56,6 @@ fn default_view_state_for_graph_current(graph: &GraphDocumentCurrent) -> ViewSta
                 .enumerate()
                 .map(|(index, node)| (node.id.clone(), default_canvas_node_view_for_index(index)))
                 .collect(),
-            viewport: None,
         },
     }
 }
@@ -78,7 +71,6 @@ fn default_view_state_for_execution_graph(graph: &GraphDocument) -> ViewState {
                 .enumerate()
                 .map(|(index, node)| (node.id.clone(), default_canvas_node_view_for_index(index)))
                 .collect(),
-            viewport: None,
         },
     }
 }
@@ -93,8 +85,7 @@ fn default_canvas_node_view_for_index(index: usize) -> CanvasNodeView {
     }
 }
 
-pub(super) fn runtime_owned_view_state(mut view_state: ViewState) -> ViewState {
-    view_state.canvas.viewport = None;
+pub(super) fn runtime_owned_view_state(view_state: ViewState) -> ViewState {
     view_state
 }
 

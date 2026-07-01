@@ -1215,12 +1215,11 @@ fn view_state_patch_undo_redo_moves_once_from_start_to_end() {
     let mut session = RuntimeSession::default();
     let loaded = load_sample_project(&mut session);
     assert!(loaded.ok);
-    let mut start = loaded
+    let start = loaded
         .snapshot
         .view_state()
         .cloned()
         .expect("loaded view state");
-    start.canvas.viewport = None;
     let mut moved = start.clone();
     moved.canvas.nodes.get_mut("value_1").unwrap().x += 240.0;
     moved.canvas.nodes.get_mut("value_1").unwrap().y += 120.0;
