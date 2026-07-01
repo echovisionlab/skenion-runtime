@@ -1,22 +1,12 @@
 use serde_json::{Value, json};
 
 use crate::{
-    CURRENT_SCHEMA_VERSION, ProjectDocumentCurrent, ProjectRequestCurrent,
-    RunProjectRequestCurrent, RuntimeIssue, RuntimeSession, RuntimeSessionLoadModeCurrent,
+    CURRENT_SCHEMA_VERSION, RuntimeIssue, RuntimeSession, RuntimeSessionLoadModeCurrent,
     RuntimeSessionLoadRequestCurrent, RuntimeSessionSnapshot,
-    project_current::repair_project_load_edges_current, project_document_payload_schema_issues,
-    project_document_validation_issues_current, schema_version_issue,
+    project_current::{repair_project_load_edges_current, schema_version_issue},
 };
 
 const RUNTIME_SESSION_LOAD_REQUEST_SCHEMA: &str = "skenion.runtime.session-load-request";
-
-pub(crate) enum ProjectPayload {
-    Current(Box<ProjectRequestCurrent>),
-}
-
-pub(crate) enum RunProjectPayload {
-    Current(Box<RunProjectRequestCurrent>),
-}
 
 pub(crate) enum RuntimeSessionLoadPayload {
     Current {
@@ -134,32 +124,6 @@ pub(crate) fn validate_session_load_precondition(
     }
 }
 
-pub(crate) fn decode_project_payload(value: Value) -> Result<ProjectPayload, Vec<RuntimeIssue>> {
-    match project_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_project_payload_current(value)
-            .map(Box::new)
-            .map(ProjectPayload::Current),
-        received => Err(vec![
-            schema_version_issue(project_schema_surface(&value), received)
-                .expect("current schema version should have decoded as current 0.1"),
-        ]),
-    }
-}
-
-pub(crate) fn decode_run_project_payload(
-    value: Value,
-) -> Result<RunProjectPayload, Vec<RuntimeIssue>> {
-    match project_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_run_project_payload_current(value)
-            .map(Box::new)
-            .map(RunProjectPayload::Current),
-        received => Err(vec![
-            schema_version_issue(project_schema_surface(&value), received)
-                .expect("current schema version should have decoded as current 0.1"),
-        ]),
-    }
-}
-
 fn decode_runtime_session_load_request_current(
     mut value: Value,
 ) -> Result<(RuntimeSessionLoadRequestCurrent, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
@@ -171,11 +135,9 @@ fn decode_runtime_session_load_request_current(
 
     if let Some(project) = value.get("project") {
         reject_top_level_nodes_current(project)?;
-        let schema_issues = project_document_payload_schema_issues(project);
-        if !schema_issues.is_empty() {
-            return Err(schema_issues);
-        }
+        validate_project_load_schema_versions_current(project)?;
     }
+    canonicalize_runtime_session_load_request_current(&mut value);
     let mut request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
         .map_err(invalid_runtime_session_load_payload)?;
     repair_issues.extend(repair_project_load_edges_current(&mut request.project));
@@ -185,6 +147,30 @@ fn decode_runtime_session_load_request_current(
         ));
     }
     Ok((request, repair_issues))
+}
+
+fn validate_project_load_schema_versions_current(project: &Value) -> Result<(), Vec<RuntimeIssue>> {
+    if let Some(issue) = schema_version_issue(
+        "project",
+        project.get("schemaVersion").and_then(Value::as_str),
+    ) {
+        return Err(vec![issue]);
+    }
+    let graph = project.get("graph").unwrap_or(&Value::Null);
+    if let Some(issue) =
+        schema_version_issue("graph", graph.get("schemaVersion").and_then(Value::as_str))
+    {
+        return Err(vec![issue]);
+    }
+    if let Some(view_state) = project.get("viewState")
+        && let Some(issue) = schema_version_issue(
+            "view-state",
+            view_state.get("schemaVersion").and_then(Value::as_str),
+        )
+    {
+        return Err(vec![issue]);
+    }
+    Ok(())
 }
 
 fn drop_obsolete_object_implementation_versions_current(value: &mut Value) -> Vec<RuntimeIssue> {
@@ -208,6 +194,320 @@ fn drop_obsolete_object_implementation_versions_current(value: &mut Value) -> Ve
             )
         })
         .collect()
+}
+
+fn canonicalize_runtime_session_load_request_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &["schema", "schemaVersion", "project", "mode", "precondition"],
+    );
+    if let Some(project) = value.get_mut("project") {
+        canonicalize_project_document_current(project);
+    }
+    if let Some(precondition) = value.get_mut("precondition") {
+        retain_object_fields(
+            precondition,
+            &["documentId", "sessionRevision", "graphRevision"],
+        );
+    }
+}
+
+fn canonicalize_project_document_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "schema",
+            "schemaVersion",
+            "id",
+            "documentId",
+            "revision",
+            "metadata",
+            "graph",
+            "viewState",
+            "patchLibrary",
+            "packageDependencies",
+            "packageLock",
+            "resourceLock",
+            "objectBindings",
+            "tutorial",
+            "help",
+        ],
+    );
+    if let Some(graph) = value.get_mut("graph") {
+        canonicalize_graph_document_current(graph);
+    }
+    if let Some(view_state) = value.get_mut("viewState") {
+        canonicalize_view_state_current(view_state);
+    }
+    if let Some(patch_library) = value.get_mut("patchLibrary") {
+        canonicalize_array_items(patch_library, canonicalize_patch_definition_current);
+    }
+    if let Some(object_bindings) = value.get_mut("objectBindings") {
+        canonicalize_array_items(object_bindings, canonicalize_project_object_binding_current);
+    }
+}
+
+fn canonicalize_patch_definition_current(value: &mut Value) {
+    retain_object_fields(value, &["id", "revision", "metadata", "graph", "viewState"]);
+    if let Some(graph) = value.get_mut("graph") {
+        canonicalize_graph_document_current(graph);
+    }
+    if let Some(view_state) = value.get_mut("viewState") {
+        canonicalize_view_state_current(view_state);
+    }
+}
+
+fn canonicalize_graph_document_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "schema",
+            "schemaVersion",
+            "id",
+            "revision",
+            "nodes",
+            "edges",
+            "cableStyles",
+        ],
+    );
+    if let Some(nodes) = value.get_mut("nodes") {
+        canonicalize_array_items(nodes, canonicalize_graph_node_current);
+    }
+    if let Some(edges) = value.get_mut("edges") {
+        canonicalize_array_items(edges, canonicalize_edge_current);
+    }
+    if let Some(cable_styles) = value.get_mut("cableStyles")
+        && let Value::Object(styles) = cable_styles
+    {
+        for style in styles.values_mut() {
+            retain_object_fields(style, &["color", "pattern", "width", "marker"]);
+        }
+    }
+}
+
+fn canonicalize_graph_node_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "id",
+            "implementation",
+            "objectSpec",
+            "objectResolution",
+            "bindingRef",
+            "params",
+            "ports",
+            "portGroups",
+        ],
+    );
+    if let Some(implementation) = value.get_mut("implementation") {
+        canonicalize_object_implementation_current(implementation);
+    }
+    if let Some(object_resolution) = value.get_mut("objectResolution") {
+        canonicalize_object_resolution_current(object_resolution);
+    }
+    if let Some(ports) = value.get_mut("ports") {
+        canonicalize_array_items(ports, canonicalize_port_current);
+    }
+    if let Some(port_groups) = value.get_mut("portGroups") {
+        canonicalize_array_items(port_groups, canonicalize_port_group_current);
+    }
+}
+
+fn canonicalize_object_implementation_current(value: &mut Value) {
+    retain_object_fields(value, &["provider", "objectId", "interfaceDigest"]);
+    if let Some(provider) = value.get_mut("provider") {
+        canonicalize_object_provider_current(provider);
+    }
+}
+
+fn canonicalize_object_provider_current(value: &mut Value) {
+    let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+        return;
+    };
+    match kind {
+        "projectPatch" => retain_object_fields(
+            value,
+            &[
+                "kind",
+                "patchId",
+                "revision",
+                "interfaceRevision",
+                "interfaceDigest",
+            ],
+        ),
+        "package" => retain_object_fields(value, &["kind", "packageId", "lockEntryId", "version"]),
+        _ => retain_object_fields(value, &["kind"]),
+    }
+}
+
+fn canonicalize_object_resolution_current(value: &mut Value) {
+    retain_object_fields(value, &["status", "selectedSpec", "candidates", "issues"]);
+    if let Some(candidates) = value.get_mut("candidates") {
+        canonicalize_array_items(candidates, canonicalize_object_resolution_candidate_current);
+    }
+    if let Some(issues) = value.get_mut("issues") {
+        canonicalize_array_items(issues, canonicalize_object_resolution_issue_current);
+    }
+}
+
+fn canonicalize_object_resolution_candidate_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &["implementation", "objectSpec", "displayName", "reason"],
+    );
+    if let Some(implementation) = value.get_mut("implementation") {
+        canonicalize_object_implementation_current(implementation);
+    }
+}
+
+fn canonicalize_object_resolution_issue_current(value: &mut Value) {
+    retain_object_fields(value, &["severity", "code", "message", "details"]);
+}
+
+fn canonicalize_project_object_binding_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "id",
+            "objectSpec",
+            "status",
+            "implementation",
+            "candidates",
+            "issues",
+        ],
+    );
+    if let Some(implementation) = value.get_mut("implementation") {
+        canonicalize_object_implementation_current(implementation);
+    }
+    if let Some(candidates) = value.get_mut("candidates") {
+        canonicalize_array_items(candidates, canonicalize_object_resolution_candidate_current);
+    }
+    if let Some(issues) = value.get_mut("issues") {
+        canonicalize_array_items(issues, canonicalize_object_resolution_issue_current);
+    }
+}
+
+fn canonicalize_port_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "id",
+            "direction",
+            "type",
+            "label",
+            "rate",
+            "accepts",
+            "minConnections",
+            "maxConnections",
+            "mergePolicy",
+            "fanOutPolicy",
+            "triggerMode",
+            "messageKeys",
+            "defaultValue",
+            "latch",
+            "required",
+            "styleKey",
+            "group",
+            "description",
+        ],
+    );
+    if let Some(message_keys) = value.get_mut("messageKeys") {
+        retain_object_fields(
+            message_keys,
+            &["accepted", "silent", "trigger", "store", "emit"],
+        );
+    }
+}
+
+fn canonicalize_port_group_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "id",
+            "direction",
+            "type",
+            "minPorts",
+            "label",
+            "rate",
+            "maxPorts",
+            "ordered",
+            "portIdPattern",
+            "createLabel",
+            "defaultPortSpec",
+        ],
+    );
+    if let Some(default_port_spec) = value.get_mut("defaultPortSpec") {
+        canonicalize_port_current(default_port_spec);
+    }
+}
+
+fn canonicalize_edge_current(value: &mut Value) {
+    retain_object_fields(
+        value,
+        &[
+            "id",
+            "source",
+            "target",
+            "resolvedType",
+            "order",
+            "enabled",
+            "adapter",
+            "feedback",
+            "styleOverride",
+            "label",
+            "description",
+        ],
+    );
+    if let Some(source) = value.get_mut("source") {
+        retain_object_fields(source, &["nodeId", "portId"]);
+    }
+    if let Some(target) = value.get_mut("target") {
+        retain_object_fields(target, &["nodeId", "portId"]);
+    }
+    if let Some(feedback) = value.get_mut("feedback") {
+        retain_object_fields(
+            feedback,
+            &[
+                "enabled",
+                "boundary",
+                "initialValue",
+                "recursionLimit",
+                "maxEventsPerTick",
+                "maxIterationsPerFrame",
+                "bufferMode",
+                "intentional",
+                "label",
+            ],
+        );
+    }
+}
+
+fn canonicalize_view_state_current(value: &mut Value) {
+    retain_object_fields(value, &["schema", "schemaVersion", "canvas"]);
+    if let Some(canvas) = value.get_mut("canvas") {
+        retain_object_fields(canvas, &["nodes"]);
+        if let Some(nodes) = canvas.get_mut("nodes")
+            && let Value::Object(nodes) = nodes
+        {
+            for node_view in nodes.values_mut() {
+                retain_object_fields(node_view, &["x", "y", "width", "height", "collapsed"]);
+            }
+        }
+    }
+}
+
+fn canonicalize_array_items(value: &mut Value, canonicalize: fn(&mut Value)) {
+    if let Value::Array(items) = value {
+        for item in items {
+            canonicalize(item);
+        }
+    }
+}
+
+fn retain_object_fields(value: &mut Value, allowed: &[&str]) {
+    if let Value::Object(object) = value {
+        object.retain(|key, _| allowed.contains(&key.as_str()));
+    }
 }
 
 #[derive(Debug)]
@@ -410,68 +710,6 @@ fn runtime_session_load_mode_label(mode: &RuntimeSessionLoadModeCurrent) -> &'st
     }
 }
 
-fn decode_project_payload_current(
-    value: Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeIssue>> {
-    if is_project_document_current(&value) {
-        return decode_project_document_request_current(value);
-    }
-
-    serde_json::from_value(value).map_err(invalid_project_payload)
-}
-
-fn decode_run_project_payload_current(
-    value: Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeIssue>> {
-    if is_project_document_current(&value) {
-        return decode_run_project_document_request_current(value);
-    }
-
-    serde_json::from_value(value).map_err(invalid_project_payload)
-}
-
-fn decode_project_document_request_current(
-    mut value: Value,
-) -> Result<ProjectRequestCurrent, Vec<RuntimeIssue>> {
-    reject_top_level_nodes_current(&value)?;
-    let _ = take_frames_current(&mut value)?;
-    let document = decode_project_document_current(value)?;
-    Ok(ProjectRequestCurrent::from_project_document(
-        document,
-        Vec::new(),
-    ))
-}
-
-fn decode_run_project_document_request_current(
-    mut value: Value,
-) -> Result<RunProjectRequestCurrent, Vec<RuntimeIssue>> {
-    reject_top_level_nodes_current(&value)?;
-    let frames = take_frames_current(&mut value)?;
-    let document = decode_project_document_current(value)?;
-    Ok(RunProjectRequestCurrent::from_project_document(
-        document,
-        Vec::new(),
-        frames,
-    ))
-}
-
-fn decode_project_document_current(
-    value: Value,
-) -> Result<ProjectDocumentCurrent, Vec<RuntimeIssue>> {
-    let schema_issues = project_document_payload_schema_issues(&value);
-    if !schema_issues.is_empty() {
-        return Err(schema_issues);
-    }
-    let document =
-        serde_json::from_value::<ProjectDocumentCurrent>(value).map_err(invalid_project_payload)?;
-    if let Err(report) = skenion_contracts::validate_project_document_v01(&document) {
-        return Err(project_document_validation_issues_current(
-            &document, &report,
-        ));
-    }
-    Ok(document)
-}
-
 fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeIssue>> {
     if value.get("nodes").is_none() {
         return Ok(());
@@ -479,7 +717,7 @@ fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeIssue>
 
     Err(vec![RuntimeIssue::structured_error(
         "project.document.top-level-nodes-rejected",
-        "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources or an explicit legacy ProjectRequest wrapper",
+        "ProjectDocument payloads must not include top-level nodes; node definitions must come from Runtime registry/catalog sources.",
         json!({
             "surface": "project",
             "field": "nodes",
@@ -488,51 +726,307 @@ fn reject_top_level_nodes_current(value: &Value) -> Result<(), Vec<RuntimeIssue>
     )])
 }
 
-fn take_frames_current(value: &mut Value) -> Result<Option<usize>, Vec<RuntimeIssue>> {
-    let frames = value
-        .as_object_mut()
-        .and_then(|object| object.remove("frames"))
-        .unwrap_or(Value::Null);
-    serde_json::from_value(frames).map_err(invalid_project_payload)
-}
-
-fn project_schema_version(value: &Value) -> Option<String> {
-    if is_project_document(value) {
-        return value
-            .get("schemaVersion")
-            .and_then(|version| version.as_str())
-            .map(str::to_owned);
-    }
-
-    value
-        .get("graph")
-        .and_then(|graph| graph.get("schemaVersion"))
-        .and_then(|version| version.as_str())
-        .map(str::to_owned)
-}
-
-fn is_project_document_current(value: &Value) -> bool {
-    is_project_document(value)
-        && value
-            .get("schemaVersion")
-            .and_then(|version| version.as_str())
-            == Some(CURRENT_SCHEMA_VERSION)
-}
-
 fn is_project_document(value: &Value) -> bool {
     value.get("schema").and_then(|schema| schema.as_str()) == Some("skenion.project")
 }
 
-fn project_schema_surface(value: &Value) -> &'static str {
-    if is_project_document(value) {
-        "project"
-    } else {
-        "graph"
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn invalid_project_payload(error: serde_json::Error) -> Vec<RuntimeIssue> {
-    vec![RuntimeIssue::error(format!(
-        "invalid project request: {error}"
-    ))]
+    #[test]
+    fn canonicalize_load_request_drops_unknown_fields_across_project_shapes() {
+        let mut value = json!({
+          "schema": "skenion.runtime.session-load-request",
+          "schemaVersion": "0.1.0",
+          "mode": "forceReplace",
+          "ignored": true,
+          "precondition": {
+            "documentId": "10000000-0000-0000-0000-000000000001",
+            "ignored": true
+          },
+          "project": {
+            "schema": "skenion.project",
+            "schemaVersion": "0.1.0",
+            "id": "project",
+            "documentId": "10000000-0000-0000-0000-000000000001",
+            "revision": "1",
+            "ignored": true,
+            "metadata": { "title": "Project", "custom": true },
+            "graph": {
+              "schema": "skenion.graph",
+              "schemaVersion": "0.1.0",
+              "id": "root",
+              "revision": "1",
+              "ignored": true,
+              "cableStyles": {
+                "default": {
+                  "color": "#fff",
+                  "ignored": true
+                }
+              },
+              "nodes": [
+                {
+                  "id": "object_1",
+                  "implementation": {
+                    "provider": {
+                      "kind": "package",
+                      "packageId": "example/package",
+                      "lockEntryId": "lock",
+                      "version": "1.0.0",
+                      "ignored": true
+                    },
+                    "objectId": "adder",
+                    "interfaceDigest": {
+                      "algorithm": "sha256",
+                      "value": "abc"
+                    },
+                    "ignored": true
+                  },
+                  "objectSpec": "+ 1",
+                  "objectResolution": {
+                    "status": "resolved",
+                    "selectedSpec": "+ 1",
+                    "ignored": true,
+                    "candidates": [
+                      {
+                        "implementation": {
+                          "provider": {
+                            "kind": "projectPatch",
+                            "patchId": "voice",
+                            "revision": "1",
+                            "ignored": true
+                          },
+                          "objectId": "voice",
+                          "ignored": true
+                        },
+                        "objectSpec": "p voice",
+                        "displayName": "Voice",
+                        "reason": "exact",
+                        "ignored": true
+                      }
+                    ],
+                    "issues": [
+                      {
+                        "severity": "warning",
+                        "code": "interface-drift",
+                        "message": "drift",
+                        "details": { "free": true },
+                        "ignored": true
+                      }
+                    ]
+                  },
+                  "params": { "free": true },
+                  "ports": [
+                    {
+                      "id": "in",
+                      "direction": "input",
+                      "type": "value.core.message",
+                      "messageKeys": {
+                        "accepted": ["float"],
+                        "ignored": true
+                      },
+                      "ignored": true
+                    }
+                  ],
+                  "portGroups": [
+                    {
+                      "id": "args",
+                      "direction": "input",
+                      "type": "value.core.message",
+                      "minPorts": 0,
+                      "defaultPortSpec": {
+                        "id": "arg",
+                        "direction": "input",
+                        "type": "value.core.message",
+                        "ignored": true
+                      },
+                      "ignored": true
+                    }
+                  ],
+                  "ignored": true
+                }
+              ],
+              "edges": [
+                {
+                  "id": "edge_1",
+                  "source": { "nodeId": "a", "portId": "out", "ignored": true },
+                  "target": { "nodeId": "b", "portId": "in", "ignored": true },
+                  "feedback": {
+                    "enabled": true,
+                    "boundary": "tick",
+                    "ignored": true
+                  },
+                  "ignored": true
+                }
+              ]
+            },
+            "viewState": {
+              "schema": "skenion.view-state",
+              "schemaVersion": "0.1.0",
+              "ignored": true,
+              "canvas": {
+                "ignored": true,
+                "nodes": {
+                  "object_1": {
+                    "x": 1.0,
+                    "y": 2.0,
+                    "ignored": true
+                  }
+                }
+              }
+            },
+            "patchLibrary": [
+              {
+                "id": "voice",
+                "revision": "1",
+                "ignored": true,
+                "graph": {
+                  "schema": "skenion.graph",
+                  "schemaVersion": "0.1.0",
+                  "id": "voice",
+                  "revision": "1",
+                  "nodes": [],
+                  "edges": [],
+                  "ignored": true
+                },
+                "viewState": {
+                  "schema": "skenion.view-state",
+                  "schemaVersion": "0.1.0",
+                  "canvas": { "nodes": {} },
+                  "ignored": true
+                }
+              }
+            ],
+            "objectBindings": [
+              {
+                "id": "binding_1",
+                "objectSpec": "pkg.object",
+                "status": "resolved",
+                "implementation": {
+                  "provider": { "kind": "core", "ignored": true },
+                  "objectId": "float",
+                  "ignored": true
+                },
+                "candidates": [],
+                "issues": [],
+                "ignored": true
+              }
+            ],
+            "tutorial": { "free": true },
+            "help": { "free": true }
+          }
+        });
+
+        canonicalize_runtime_session_load_request_current(&mut value);
+
+        assert!(value.get("ignored").is_none());
+        assert!(value["precondition"].get("ignored").is_none());
+        assert!(value["project"].get("ignored").is_none());
+        assert!(value["project"]["graph"].get("ignored").is_none());
+        assert!(
+            value["project"]["graph"]["cableStyles"]["default"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["implementation"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["implementation"]["provider"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["objectResolution"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["objectResolution"]["candidates"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["objectResolution"]["issues"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["ports"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["ports"][0]["messageKeys"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["portGroups"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["nodes"][0]["portGroups"][0]["defaultPortSpec"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["edges"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["edges"][0]["source"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["graph"]["edges"][0]["feedback"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(value["project"]["viewState"].get("ignored").is_none());
+        assert!(
+            value["project"]["viewState"]["canvas"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["viewState"]["canvas"]["nodes"]["object_1"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(value["project"]["patchLibrary"][0].get("ignored").is_none());
+        assert!(
+            value["project"]["patchLibrary"][0]["graph"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["patchLibrary"][0]["viewState"]
+                .get("ignored")
+                .is_none()
+        );
+        assert!(
+            value["project"]["objectBindings"][0]
+                .get("ignored")
+                .is_none()
+        );
+        assert_eq!(value["project"]["metadata"]["custom"], true);
+        assert_eq!(value["project"]["tutorial"]["free"], true);
+        assert_eq!(value["project"]["help"]["free"], true);
+        assert_eq!(
+            value["project"]["graph"]["nodes"][0]["params"]["free"],
+            true
+        );
+    }
 }

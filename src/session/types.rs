@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CanvasNodeView, DummyExecutionReport, EndpointBindingValueFormat, ExecutionPlan, GraphPatch,
-    ProjectDocumentCurrent, RuntimeIssue, ViewState,
+    CanvasNodeView, EndpointBindingValueFormat, ExecutionPlan, GraphPatch, ProjectDocumentCurrent,
+    RuntimeIssue, ViewState,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +47,6 @@ pub struct RuntimeSessionResponse {
     pub ok: bool,
     pub snapshot: RuntimeSessionSnapshot,
     pub issues: Vec<RuntimeIssue>,
-    pub report: Option<DummyExecutionReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,12 +58,6 @@ pub struct RuntimePatchResponse {
     pub snapshot: RuntimeSessionSnapshot,
     pub history: RuntimeHistory,
     pub issues: Vec<RuntimeIssue>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionRunRequest {
-    pub frames: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

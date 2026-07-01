@@ -7,8 +7,8 @@ use serde_json::{Map, Value, json};
 use skenion_contracts::{InterfaceIncidentEdgePolicyV01, NodeCatalogSnapshotV01};
 
 use crate::{
-    CanvasNodeView, ControlState, DummyExecutionReport, EdgeSpecCurrent, ExecutionPlan,
-    GraphDocument, GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphTargetRef,
+    CanvasNodeView, ControlState, EdgeSpecCurrent, ExecutionPlan, GraphDocument,
+    GraphDocumentCurrent, GraphFragmentOutsideEndpointPolicyCurrent, GraphTargetRef,
     IdConflictPolicy, IdRemapResult, NodeDefinitionCurrent, PackageRegistryListResponseV01,
     PasteGraphFragmentRequest, PasteGraphFragmentResponse, PastePlacement, PatchPath,
     PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent, RuntimeCollaborationChange,
@@ -18,8 +18,7 @@ use crate::{
         is_payload_identity_node_kind_current, next_graph_revision_current,
         repair_project_load_edges_current,
     },
-    project_document_validation_issues_current, run_dummy_execution,
-    validate_project_request_current,
+    project_document_validation_issues_current, validate_project_request_current,
 };
 
 mod binding_formats;
@@ -69,7 +68,7 @@ use projection::{lower_port_for_execution, remap_edge};
 pub use types::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
     RuntimePatchResponse, RuntimeSessionResponse, RuntimeSessionSnapshot, RuntimeViewPatch,
-    RuntimeViewPatchOperation, SessionRunRequest,
+    RuntimeViewPatchOperation,
 };
 #[cfg(test)]
 use view_state::apply_view_patch_to_view_state;
@@ -219,12 +218,12 @@ impl RuntimeSession {
             if let Err(runtime_issues) = validate_project_request_current(&request) {
                 issues.extend(runtime_issues);
             }
-            return self.response(false, issues, None);
+            return self.response(false, issues);
         }
 
         let (plan, mut issues) = match build_execution_plan_request_current(&request) {
             Ok(result) => result,
-            Err(issues) => return self.response(false, issues, None),
+            Err(issues) => return self.response(false, issues),
         };
         issues.append(&mut load_repair_issues);
         issues.extend(unresolved_object_issues_current(&document.graph));
@@ -245,25 +244,7 @@ impl RuntimeSession {
         self.package_registry = package_registry;
         self.refresh_node_catalog_cache();
 
-        self.response(true, issues, None)
-    }
-
-    pub fn validate_current(&mut self) -> RuntimeSessionResponse {
-        let issues = match self.current_project_request_current() {
-            Some(request) => match crate::validate_project_request_current(&request) {
-                Ok((mut issues, _)) => {
-                    issues.extend(unresolved_object_issues_current(&request.graph));
-                    issues
-                }
-                Err(issues) => issues,
-            },
-            None => vec![RuntimeIssue::error("no project loaded in runtime session")],
-        };
-        let ok = issues
-            .iter()
-            .all(|issue| issue.severity != crate::IssueSeverity::Error);
-        self.issues = issues.clone();
-        self.response(ok, issues, None)
+        self.response(true, issues)
     }
 
     pub(crate) fn append_loaded_project_issues(
@@ -272,52 +253,6 @@ impl RuntimeSession {
     ) -> Vec<RuntimeIssue> {
         self.issues.append(&mut issues);
         self.issues.clone()
-    }
-
-    pub fn plan_current(&mut self) -> RuntimeSessionResponse {
-        let request = match self.current_project_request_current() {
-            Some(request) => request,
-            None => {
-                let issues = vec![RuntimeIssue::error("no project loaded in runtime session")];
-                self.issues = issues.clone();
-                return self.response(false, issues, None);
-            }
-        };
-
-        match build_execution_plan_request_current(&request) {
-            Ok((plan, mut issues)) => {
-                issues.extend(unresolved_object_issues_current(&request.graph));
-                self.plan = Some(plan);
-                self.issues = issues.clone();
-                self.response(true, issues, None)
-            }
-            Err(issues) => {
-                self.issues = issues.clone();
-                self.plan = None;
-                self.response(false, issues, None)
-            }
-        }
-    }
-
-    pub fn run_current(&mut self, frames: usize) -> RuntimeSessionResponse {
-        if self.project.is_none() {
-            let issues = vec![RuntimeIssue::error("no project loaded in runtime session")];
-            self.issues = issues.clone();
-            return self.response(false, issues, None);
-        }
-
-        if self.plan.is_none() {
-            let response = self.plan_current();
-            if !response.ok {
-                return response;
-            }
-        }
-
-        let report = self
-            .plan
-            .as_ref()
-            .map(|plan| run_dummy_execution(plan, frames));
-        self.response(true, self.issues.clone(), report)
     }
 
     pub fn apply_mutation(&mut self, mutation: RuntimeMutationRequest) -> RuntimePatchResponse {
@@ -357,21 +292,15 @@ impl RuntimeSession {
             issues: Vec::new(),
         };
         self.refresh_node_catalog_cache();
-        self.response(true, Vec::new(), None)
+        self.response(true, Vec::new())
     }
 
-    pub fn response(
-        &self,
-        ok: bool,
-        issues: Vec<RuntimeIssue>,
-        report: Option<DummyExecutionReport>,
-    ) -> RuntimeSessionResponse {
+    pub fn response(&self, ok: bool, issues: Vec<RuntimeIssue>) -> RuntimeSessionResponse {
         let snapshot = self.snapshot();
         RuntimeSessionResponse {
             ok,
             snapshot,
             issues,
-            report,
         }
     }
 
@@ -403,17 +332,6 @@ impl RuntimeSession {
 
     pub fn view_state(&self) -> Option<ViewState> {
         self.view_state.clone()
-    }
-
-    fn current_project_request_current(&self) -> Option<ProjectRequestCurrent> {
-        let project = self.project.as_ref()?;
-        Some(ProjectRequestCurrent {
-            document: self.project.clone(),
-            graph: project.graph.clone(),
-            nodes: self.nodes_current.clone(),
-            patch_library: project.patch_library.clone(),
-            view_state: self.view_state.clone(),
-        })
     }
 
     fn apply_mutation_with_history(

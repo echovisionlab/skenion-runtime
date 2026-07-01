@@ -202,13 +202,12 @@ pub use scheduler::{
 };
 pub use serve::{ServeRuntimeOptions, serve_runtime, serve_runtime_with_options};
 pub use server::{
-    DEFAULT_HOST, DEFAULT_PORT, RuntimeApiResponse, RuntimeServerState, runtime_router,
-    runtime_router_with_state,
+    DEFAULT_HOST, DEFAULT_PORT, RuntimeServerState, runtime_router, runtime_router_with_state,
 };
 pub use session::{
     RuntimeHistory, RuntimeHistoryEntry, RuntimeHistoryEntryKind, RuntimeMutationRequest,
     RuntimePatchResponse, RuntimeSession, RuntimeSessionResponse, RuntimeSessionSnapshot,
-    RuntimeViewPatch, RuntimeViewPatchOperation, SessionRunRequest,
+    RuntimeViewPatch, RuntimeViewPatchOperation,
 };
 pub use session_registry::{DEFAULT_SESSION_ID, RuntimeSessionRecord, RuntimeSessionRegistry};
 pub use sidecar::{

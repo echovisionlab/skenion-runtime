@@ -534,10 +534,11 @@ fn runtime_session_capabilities() -> RuntimeSessionCapabilitySet {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
+    use serde_json::json;
     use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     use super::*;
-    use crate::sidecar::RuntimeEndpointConfig;
+    use crate::{ProjectRequestCurrent, sidecar::RuntimeEndpointConfig};
 
     #[test]
     fn registry_creates_explicit_default_and_named_records() {
@@ -829,18 +830,49 @@ mod tests {
         let endpoint = RuntimeEndpointConfig::new("127.0.0.1".to_owned(), 3761);
         let profile = crate::sidecar::runtime_connection_profile(&endpoint, "unix-ms:1");
         let record = RuntimeSessionRegistry::dry_preview().default_record();
-        record
+        let load = record
             .session
             .write()
             .expect("runtime session lock should not be poisoned")
-            .validate_current();
+            .load_project_current(unresolved_project_request());
+        assert!(load.ok);
+        assert_eq!(load.issues.len(), 1);
 
         let response = record.info_response(profile);
 
         assert_eq!(response.issues.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&response.issues[0]).unwrap()["message"],
-            "no project loaded in runtime session"
-        );
+        assert!(response.issues[0].message.contains("user.manipulator"));
+    }
+
+    fn unresolved_project_request() -> ProjectRequestCurrent {
+        serde_json::from_value(json!({
+          "graph": {
+            "schema": "skenion.graph",
+            "schemaVersion": "0.1.0",
+            "id": "unresolved-info",
+            "revision": "1",
+            "nodes": [
+              {
+                "id": "unresolved_1",
+                "objectSpec": "user.manipulator",
+                "objectResolution": {
+                  "status": "unresolved",
+                  "candidates": [],
+                  "issues": [
+                    {
+                      "code": "resolution-unresolved",
+                      "severity": "error",
+                      "message": "user.manipulator is not available in the local runtime registry."
+                    }
+                  ]
+                },
+                "params": {},
+                "ports": []
+              }
+            ],
+            "edges": []
+          }
+        }))
+        .expect("unresolved project request should parse")
     }
 }

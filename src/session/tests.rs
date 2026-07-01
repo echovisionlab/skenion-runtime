@@ -328,21 +328,11 @@ fn package_registry_definitions_are_available_during_current_load() {
 }
 
 #[test]
-fn validate_and_plan_fail_without_loaded_project() {
-    let mut session = RuntimeSession::default();
-
-    let validation = session.validate_current();
-    let plan = session.plan_current();
+fn preview_control_is_absent_without_loaded_project() {
+    let session = RuntimeSession::default();
     let preview_control = session.preview_control_state_snapshot();
 
-    assert!(!validation.ok);
-    assert!(!plan.ok);
     assert!(preview_control.is_none());
-    assert!(
-        plan.issues[0]
-            .message
-            .contains("no project loaded in runtime session")
-    );
 }
 
 #[test]
@@ -398,20 +388,6 @@ fn session_snapshot_derives_endpoint_binding_value_formats() {
     let snapshot_json =
         serde_json::to_value(&response.snapshot).expect("snapshot should serialize");
     assert!(snapshot_json.get("bindingFormats").is_some());
-}
-
-#[test]
-fn run_current_rebuilds_missing_plan() {
-    let mut session = RuntimeSession::default();
-    let loaded = load_sample_project(&mut session);
-    assert!(loaded.ok, "{:?}", loaded.issues);
-    session.plan = None;
-
-    let response = session.run_current(2);
-
-    assert!(response.ok);
-    assert!(response.snapshot.plan.is_some());
-    assert_eq!(response.report.unwrap().frame_count, 2);
 }
 
 #[test]
@@ -840,10 +816,10 @@ fn unresolved_object_loads_session_with_error_issue() {
     );
     assert_eq!(session.snapshot().issues, response.issues);
 
-    let plan = session.plan_current();
-    assert!(plan.ok);
     assert!(
-        plan.issues
+        response
+            .snapshot
+            .issues
             .iter()
             .any(|issue| { issue.message.contains("unresolved object user.manipulator") })
     );
@@ -2328,22 +2304,14 @@ fn active_current_failure_paths_cover_registry_restore_and_history_rejection() {
     let mut invalid_request = sample_project_current();
     let mut invalid_document = super::project_document_from_request_current(&invalid_request);
     invalid_document.graph.nodes[0].implementation = Some(core_impl("missing.kind"));
-    invalid_request.document = Some(invalid_document.clone());
-    let mut invalid_session = RuntimeSession {
-        project: Some(invalid_document),
-        nodes_current: invalid_request.nodes,
-        revision: 1,
-        view_revision: 1,
-        ..RuntimeSession::default()
-    };
+    invalid_request.document = Some(invalid_document);
+    let mut invalid_session = RuntimeSession::default();
 
-    let validation = invalid_session.validate_current();
-    let plan = invalid_session.plan_current();
-    assert!(!validation.ok);
-    assert!(!plan.ok);
-    assert!(plan.snapshot.plan.is_none());
+    let response = invalid_session.load_project_current(invalid_request);
+    assert!(!response.ok);
+    assert!(response.snapshot.plan.is_none());
     assert_eq!(
-        plan.issues[0].code.as_deref(),
+        response.issues[0].code.as_deref(),
         Some("object-spec.implementation-mismatch")
     );
 

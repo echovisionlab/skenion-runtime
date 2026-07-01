@@ -902,299 +902,12 @@ async fn cors_rejects_unknown_origin() {
 }
 
 #[tokio::test]
-async fn project_endpoints_reject_missing_graph_schema_version() {
-    for path in ["/v0/validate", "/v0/plan", "/v0/run"] {
-        let response = post_json(path, json!({ "graph": 42, "nodes": [] })).await;
-
-        assert_eq!(response["ok"], false);
-        assert_eq!(
-            response["issues"][0]["code"],
-            "project.missing-schema-version"
-        );
-        assert_eq!(response["plan"], Value::Null);
-        assert_eq!(response["report"], Value::Null);
-    }
-}
-
-#[tokio::test]
-async fn current_project_endpoints_validate_plan_and_run_with_edge_metadata() {
-    let validation = post_json("/v0/validate", sample_project_current()).await;
-    assert_eq!(validation["ok"], true);
-    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
-    assert_eq!(validation["plan"], Value::Null);
-
-    let plan = post_json("/v0/plan", sample_project_current()).await;
-    assert_eq!(plan["ok"], true);
-    assert_eq!(plan["plan"]["graphId"], "render-output-current");
-    assert_eq!(plan["plan"]["graphRevision"], "1");
-    assert_eq!(
-        plan["plan"]["edges"][0]["metadata"]["resolvedType"],
-        "value.core.tensor"
-    );
-    assert_eq!(
-        plan["plan"]["edges"][0]["metadata"]["mergePolicy"],
-        "forbid"
-    );
-    assert_eq!(
-        plan["plan"]["edges"][0]["metadata"]["fanOutPolicy"],
-        "allow"
-    );
-    assert_eq!(
-        plan["plan"]["edges"][0]["metadata"]["cycleClassification"],
-        Value::Null
-    );
-    assert_eq!(plan["report"], Value::Null);
-
-    let mut run_request = sample_project_current();
-    run_request["frames"] = json!(3);
-    let run = post_json("/v0/run", run_request).await;
-    assert_eq!(run["ok"], true);
-    assert_eq!(run["report"]["frameCount"], 3);
-    assert_eq!(
-        run["report"]["frames"][0]["executedNodes"][0]["status"],
-        "simulated"
-    );
-}
-
-#[tokio::test]
-async fn current_project_document_payload_expands_patch_library_before_plan_and_run() {
-    let validation = post_json("/v0/validate", sample_subpatch_project_document_current()).await;
-    assert_eq!(validation["ok"], true);
-    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
-
-    let plan = post_json("/v0/plan", sample_subpatch_project_document_current()).await;
-    assert_eq!(plan["ok"], true);
-    assert_eq!(plan["plan"]["graphId"], "subpatch-project-root");
-    assert!(
-        plan["plan"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|node| node["nodeId"] == "fx::pass")
-    );
-    assert!(
-        plan["plan"]["edges"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|edge| {
-                edge["fromNode"] == "clear_color"
-                    && edge["toNode"] == "fx::pass"
-                    && edge["toPort"] == "in"
-            })
-    );
-
-    let mut run_request = sample_subpatch_project_document_current();
-    run_request["frames"] = json!(2);
-    let run = post_json("/v0/run", run_request).await;
-    assert_eq!(run["ok"], true);
-    assert_eq!(run["report"]["frameCount"], 2);
-}
-
-#[tokio::test]
-async fn current_project_document_payload_reports_decode_and_contract_errors() {
-    let malformed_project = json!({
-      "schema": "skenion.project",
-      "schemaVersion": "0.1.0"
-    });
-    let malformed_response = post_json("/v0/validate", malformed_project).await;
-    assert_eq!(malformed_response["ok"], false);
-    assert_eq!(
-        malformed_response["issues"][0]["code"],
-        "project.missing-schema-version"
-    );
-    assert_eq!(
-        malformed_response["issues"][0]["details"]["surface"],
-        "graph"
-    );
-
-    let mut duplicate_patch = sample_subpatch_project_document_current();
-    let patch = duplicate_patch["patchLibrary"][0].clone();
-    duplicate_patch["patchLibrary"]
-        .as_array_mut()
-        .unwrap()
-        .push(patch);
-
-    let response = post_json("/v0/plan", duplicate_patch).await;
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["issues"][0]["code"], json!("project.invalid-0.1"));
-    assert_eq!(
-        response["issues"][0]["details"]["projectId"],
-        json!("subpatch-project")
-    );
-}
-
-#[tokio::test]
-async fn current_project_endpoints_reject_ambiguous_algebraic_loop() {
-    let response = post_json("/v0/validate", sample_ambiguous_loop_project_current()).await;
-
-    assert_eq!(response["ok"], false);
-    assert!(
-        response["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
-    );
-
-    let plan = post_json("/v0/plan", sample_ambiguous_loop_project_current()).await;
-    assert_eq!(plan["ok"], false);
-    assert!(
-        plan["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
-    );
-
-    let run = post_json("/v0/run", sample_ambiguous_loop_project_current()).await;
-    assert_eq!(run["ok"], false);
-    assert!(
-        run["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|issue| issue["code"] == "graph.ambiguous-algebraic-loop")
-    );
-}
-
-#[tokio::test]
-async fn project_endpoints_reject_missing_and_unsupported_schema_versions() {
-    let mut missing = sample_project_current();
-    missing["graph"]
-        .as_object_mut()
-        .unwrap()
-        .remove("schemaVersion");
-    let missing_response = post_json("/v0/validate", missing).await;
-    assert_eq!(missing_response["ok"], false);
-    assert_eq!(
-        missing_response["issues"][0]["code"],
-        "project.missing-schema-version"
-    );
-    assert_eq!(missing_response["issues"][0]["details"]["surface"], "graph");
-    assert_eq!(
-        missing_response["issues"][0]["details"]["expectedSchemaVersion"],
-        "0.1.0"
-    );
-    assert_eq!(
-        missing_response["issues"][0]["details"]["receivedSchemaVersion"],
-        Value::Null
-    );
-
-    let mut unsupported = sample_project_current();
-    unsupported["graph"]["schemaVersion"] = json!("9.9.9");
-    let unsupported_response = post_json("/v0/plan", unsupported).await;
-    assert_eq!(unsupported_response["ok"], false);
-    assert_eq!(
-        unsupported_response["issues"][0]["code"],
-        "project.unsupported-schema-version"
-    );
-    assert_eq!(
-        unsupported_response["issues"][0]["details"]["surface"],
-        "graph"
-    );
-    assert_eq!(
-        unsupported_response["issues"][0]["details"]["expectedSchemaVersion"],
-        "0.1.0"
-    );
-    assert_eq!(
-        unsupported_response["issues"][0]["details"]["receivedSchemaVersion"],
-        "9.9.9"
-    );
-
-    let mut missing_run = sample_project_current();
-    missing_run["graph"]
-        .as_object_mut()
-        .unwrap()
-        .remove("schemaVersion");
-    let missing_run_response = post_json("/v0/run", missing_run).await;
-    assert_eq!(missing_run_response["ok"], false);
-    assert_eq!(
-        missing_run_response["issues"][0]["code"],
-        "project.missing-schema-version"
-    );
-
-    let mut unsupported_run = sample_project_current();
-    unsupported_run["graph"]["schemaVersion"] = json!("9.9.9");
-    let unsupported_run_response = post_json("/v0/run", unsupported_run).await;
-    assert_eq!(unsupported_run_response["ok"], false);
-    assert_eq!(
-        unsupported_run_response["issues"][0]["code"],
-        "project.unsupported-schema-version"
-    );
-
-    let mut unsupported_project = sample_project_document_current();
-    unsupported_project["schemaVersion"] = json!("9.9.9");
-    let unsupported_project_response = post_json("/v0/validate", unsupported_project).await;
-    assert_eq!(unsupported_project_response["ok"], false);
-    assert_eq!(
-        unsupported_project_response["issues"][0]["code"],
-        "project.unsupported-schema-version"
-    );
-    assert_eq!(
-        unsupported_project_response["issues"][0]["details"]["surface"],
-        "project"
-    );
-    assert_eq!(
-        unsupported_project_response["issues"][0]["details"]["expectedSchemaVersion"],
-        "0.1.0"
-    );
-    assert_eq!(
-        unsupported_project_response["issues"][0]["details"]["receivedSchemaVersion"],
-        "9.9.9"
-    );
-
-    let mut unsupported_project_graph = sample_project_document_current();
-    unsupported_project_graph["graph"]["schemaVersion"] = json!("9.9.9");
-    let unsupported_project_graph_response =
-        post_json("/v0/validate", unsupported_project_graph).await;
-    assert_eq!(unsupported_project_graph_response["ok"], false);
-    assert_eq!(
-        unsupported_project_graph_response["issues"][0]["code"],
-        "project.unsupported-schema-version"
-    );
-    assert_eq!(
-        unsupported_project_graph_response["issues"][0]["details"]["surface"],
-        "graph"
-    );
-    assert_eq!(
-        unsupported_project_graph_response["issues"][0]["details"]["expectedSchemaVersion"],
-        "0.1.0"
-    );
-    assert_eq!(
-        unsupported_project_graph_response["issues"][0]["details"]["receivedSchemaVersion"],
-        "9.9.9"
-    );
-}
-
-#[tokio::test]
-async fn project_endpoints_reject_malformed_payloads() {
-    let mut request = sample_project_current();
-    request["nodes"] = json!({});
-
-    let response = post_json("/v0/validate", request).await;
-
-    assert_eq!(response["ok"], false);
-    assert!(
-        response["issues"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("invalid project request")
-    );
-}
-
-#[tokio::test]
-async fn project_document_ingest_rejects_top_level_nodes() {
-    let mut project = sample_project_document_current();
-    project["nodes"] = json!([value_f32_node_definition_current_json()]);
+async fn project_operation_routes_are_not_runtime_http_surface() {
+    let app = runtime_router();
 
     for path in ["/v0/validate", "/v0/plan", "/v0/run"] {
-        let response = post_json(path, project.clone()).await;
-        assert_eq!(response["ok"], false, "{path}");
-        assert_eq!(
-            response["issues"][0]["code"], "project.document.top-level-nodes-rejected",
-            "{path}"
-        );
+        let status = post_status_with(app.clone(), path, json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
     }
 }
 
@@ -1227,7 +940,6 @@ async fn session_endpoint_returns_empty_state() {
     assert_eq!(response["snapshot"]["controlRevision"], 0);
     assert_eq!(response["issues"].as_array().unwrap().len(), 0);
     assert_eq!(response["snapshot"]["plan"], Value::Null);
-    assert_eq!(response["report"], Value::Null);
 }
 
 #[tokio::test]
@@ -1388,6 +1100,70 @@ async fn session_load_drops_obsolete_object_implementation_version_fields() {
         logs["events"][0]["details"]["obsoleteImplementationVersionPaths"],
         json!(obsolete_paths)
     );
+}
+
+#[tokio::test]
+async fn session_load_drops_unknown_project_fields_before_canonical_snapshot() {
+    let app = runtime_router();
+    let mut request = session_load_request(sample_project_document_current());
+    request["ignoredLoadField"] = json!("drop");
+    request["project"]["ignoredProjectField"] = json!(true);
+    request["project"]["graph"]["ignoredGraphField"] = json!(true);
+    request["project"]["graph"]["nodes"][0]["ignoredNodeField"] = json!(true);
+    request["project"]["graph"]["nodes"][0]["ports"][0]["ignoredPortField"] = json!(true);
+    request["project"]["graph"]["edges"][0]["ignoredEdgeField"] = json!(true);
+    request["project"]["graph"]["edges"][0]["source"]["ignoredEndpointField"] = json!(true);
+    request["project"]["viewState"]["canvas"]["ignoredCanvasField"] = json!(true);
+    request["project"]["viewState"]["canvas"]["nodes"]["value_1"]["ignoredViewField"] = json!(true);
+    if request["project"]["graph"]["nodes"][0]
+        .get("implementation")
+        .is_some()
+    {
+        request["project"]["graph"]["nodes"][0]["implementation"]["ignoredImplementationField"] =
+            json!(true);
+        request["project"]["graph"]["nodes"][0]["implementation"]["provider"]["ignoredProviderField"] =
+            json!(true);
+    }
+
+    let response = post_json_with(app.clone(), "/v0/sessions/default/load", request).await;
+
+    assert_eq!(response["ok"], true, "{response}");
+    let project = &response["snapshot"]["project"];
+    assert!(project.get("ignoredProjectField").is_none());
+    assert!(project["graph"].get("ignoredGraphField").is_none());
+    assert!(
+        project["graph"]["nodes"][0]
+            .get("ignoredNodeField")
+            .is_none()
+    );
+    assert!(
+        project["graph"]["nodes"][0]["ports"][0]
+            .get("ignoredPortField")
+            .is_none()
+    );
+    assert!(
+        project["graph"]["edges"][0]
+            .get("ignoredEdgeField")
+            .is_none()
+    );
+    assert!(
+        project["graph"]["edges"][0]["source"]
+            .get("ignoredEndpointField")
+            .is_none()
+    );
+    assert!(
+        project["viewState"]["canvas"]
+            .get("ignoredCanvasField")
+            .is_none()
+    );
+    assert!(
+        project["viewState"]["canvas"]["nodes"]["value_1"]
+            .get("ignoredViewField")
+            .is_none()
+    );
+
+    let logs = get_json_with(app, "/v0/runtime/logs").await;
+    assert_eq!(logs["events"], json!([]));
 }
 
 #[tokio::test]
@@ -1717,56 +1493,17 @@ async fn repairable_session_load_drops_invalid_edges_and_records_warning_log() {
 }
 
 #[tokio::test]
-async fn session_validate_plan_and_run_use_loaded_project_document_patch_library() {
+async fn session_project_operation_routes_are_not_runtime_http_surface() {
     let app = runtime_router();
-    post_json_with(
-        app.clone(),
-        "/v0/sessions/default/load",
-        session_load_request(sample_subpatch_project_document_current()),
-    )
-    .await;
 
-    let validation = post_empty_with(app.clone(), "/v0/sessions/default/validate").await;
-    assert_eq!(validation["ok"], true);
-    assert_eq!(validation["issues"].as_array().unwrap().len(), 0);
-
-    let plan = post_empty_with(app.clone(), "/v0/sessions/default/plan").await;
-    assert_eq!(plan["ok"], true);
-    assert_eq!(plan["snapshot"]["project"]["id"], "subpatch-project");
-    assert_eq!(
-        plan["snapshot"]["project"]["patchLibrary"][0]["id"],
-        "identity"
-    );
-    assert_eq!(plan["snapshot"]["plan"]["graphId"], "subpatch-project-root");
-    assert!(
-        plan["snapshot"]["plan"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|node| node["nodeId"] == "fx::pass")
-    );
-
-    let run = post_json_with(app, "/v0/sessions/default/run", json!({ "frames": 2 })).await;
-    assert_eq!(run["ok"], true);
-    assert_eq!(run["report"]["frameCount"], 2);
-    assert_eq!(
-        run["report"]["frames"][0]["executedNodes"][0]["status"],
-        "simulated"
-    );
-}
-
-#[tokio::test]
-async fn session_run_fails_without_loaded_project() {
-    let response = post_json("/v0/sessions/default/run", json!({ "frames": 2 })).await;
-
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["snapshot"]["project"], Value::Null);
-    assert!(
-        response["issues"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("no project loaded in runtime session")
-    );
+    for path in [
+        "/v0/sessions/default/validate",
+        "/v0/sessions/default/plan",
+        "/v0/sessions/default/run",
+    ] {
+        let status = post_status_with(app.clone(), path, json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -2072,10 +1809,6 @@ async fn status_with(app: Router, path: &str) -> StatusCode {
     .await
     .expect("router should respond")
     .status()
-}
-
-async fn post_json(path: &str, payload: Value) -> Value {
-    post_json_with(runtime_router(), path, payload).await
 }
 
 fn session_load_request(project: Value) -> Value {
@@ -2497,22 +2230,6 @@ fn sample_project_document_current() -> Value {
     }))
 }
 
-fn value_f32_node_definition_current_json() -> Value {
-    json!({
-      "schema": "skenion.node.definition",
-      "schemaVersion": "0.1.0",
-      "id": "object.core.float",
-      "version": "0.1.0",
-      "displayName": "Float",
-      "category": "Typed Controls",
-      "ports": value_f32_ports_current_json(),
-      "execution": { "model": "control" },
-      "state": { "persistent": false },
-      "permissions": [],
-      "capabilities": ["value.core.float32.v0.1"]
-    })
-}
-
 fn value_f32_ports_json() -> Value {
     json!([
       {
@@ -2630,99 +2347,6 @@ fn sample_shader_project_current() -> Value {
     }))
 }
 
-fn sample_project_current() -> Value {
-    current_fixture_value(json!({
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "render-output-current",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "clear_color",
-            "kind": "object.core.render.clear-color",
-            "kindVersion": "0.1.0",
-            "params": { "color": [0.12, 0.2, 0.34, 1] },
-            "ports": [
-              {
-                "id": "out",
-                "direction": "output",
-                "type": "value.core.tensor",
-                "rate": "render"
-              }
-            ]
-          },
-          {
-            "id": "output",
-            "kind": "object.core.render.output",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": [
-              {
-                "id": "in",
-                "direction": "input",
-                "type": "value.core.tensor",
-                "rate": "render",
-                "required": true
-              }
-            ]
-          }
-        ],
-        "edges": [
-          {
-            "id": "edge_clear_output",
-            "source": { "nodeId": "clear_color", "portId": "out" },
-            "target": { "nodeId": "output", "portId": "in" },
-            "resolvedType": "value.core.tensor"
-          }
-        ]
-      },
-      "nodes": [
-        {
-          "schema": "skenion.node.definition",
-          "schemaVersion": "0.1.0",
-          "id": "object.core.render.clear-color",
-          "version": "0.1.0",
-          "displayName": "Clear Color",
-          "category": "Render",
-          "ports": [
-            {
-              "id": "out",
-              "direction": "output",
-              "type": "value.core.tensor",
-              "rate": "render"
-            }
-          ],
-          "execution": { "model": "gpu_pass", "clock": "frame" },
-          "state": { "persistent": false },
-          "permissions": [],
-          "capabilities": ["value.core.tensor.v0.1"]
-        },
-        {
-          "schema": "skenion.node.definition",
-          "schemaVersion": "0.1.0",
-          "id": "object.core.render.output",
-          "version": "0.1.0",
-          "displayName": "Render Output",
-          "category": "Render",
-          "ports": [
-            {
-              "id": "in",
-              "direction": "input",
-              "type": "value.core.tensor",
-              "rate": "render",
-              "required": true
-            }
-          ],
-          "execution": { "model": "gpu_pass", "clock": "frame" },
-          "state": { "persistent": false },
-          "permissions": [],
-          "capabilities": ["object.core.render.output.v0.1"]
-        }
-      ]
-    }))
-}
-
 fn sample_subpatch_project_document_current() -> Value {
     current_fixture_value(json!({
       "schema": "skenion.project",
@@ -2833,69 +2457,6 @@ fn sample_subpatch_project_document_current() -> Value {
               }
             ]
           }
-        }
-      ]
-    }))
-}
-
-fn sample_ambiguous_loop_project_current() -> Value {
-    current_fixture_value(json!({
-      "graph": {
-        "schema": "skenion.graph",
-        "schemaVersion": "0.1.0",
-        "id": "ambiguous-algebraic-loop-current",
-        "revision": "1",
-        "nodes": [
-          {
-            "id": "a",
-            "kind": "object.core.float-transform",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": [
-              { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
-              { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
-            ]
-          },
-          {
-            "id": "b",
-            "kind": "object.core.float-transform",
-            "kindVersion": "0.1.0",
-            "params": {},
-            "ports": [
-              { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
-              { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
-            ]
-          }
-        ],
-        "edges": [
-          {
-            "id": "edge_a_b",
-            "source": { "nodeId": "a", "portId": "out" },
-            "target": { "nodeId": "b", "portId": "in" }
-          },
-          {
-            "id": "edge_b_a",
-            "source": { "nodeId": "b", "portId": "out" },
-            "target": { "nodeId": "a", "portId": "in" }
-          }
-        ]
-      },
-      "nodes": [
-        {
-          "schema": "skenion.node.definition",
-          "schemaVersion": "0.1.0",
-          "id": "object.core.float-transform",
-          "version": "0.1.0",
-          "displayName": "Value Transform",
-          "category": "Core",
-          "ports": [
-            { "id": "in", "direction": "input", "type": "value.core.float32", "rate": "control" },
-            { "id": "out", "direction": "output", "type": "value.core.float32", "rate": "control" }
-          ],
-          "execution": { "model": "control" },
-          "state": { "persistent": false },
-          "permissions": [],
-          "capabilities": ["value.core.float32.v0.1"]
         }
       ]
     }))

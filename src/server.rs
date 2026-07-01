@@ -19,37 +19,31 @@ use crate::{
     ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
     RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeIoDeviceListResponse,
     RuntimeIssue, RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
-    RuntimeSessionResponse, SessionRunRequest, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
+    RuntimeSessionResponse, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
     },
-    build_execution_plan_request_current, build_execution_plan_run_request_current,
     generated_shader_response_from_preview_document, http_live_disabled,
     realtime::{handle_runtime_realtime_socket, node_catalog_snapshot_for_record},
     request_payload::{
-        ProjectPayload, RunProjectPayload, RuntimeSessionLoadPayload, decode_project_payload,
-        decode_run_project_payload, decode_runtime_session_load_request_payload,
+        RuntimeSessionLoadPayload, decode_runtime_session_load_request_payload,
         validate_session_load_precondition,
     },
-    run_dummy_execution,
     runtime_info::{HealthResponse, RuntimeInfoResponse, health_response, runtime_info_response},
     session_registry::{RuntimeSessionRecord, publish_session_event},
     sidecar::{
         RuntimeSidecarHealthResponse, RuntimeSidecarShutdownResponse,
         RuntimeSidecarStartupResponse, runtime_connection_profile, sidecar_shutdown_response,
     },
-    validate_project_request_current,
 };
 
 mod logs;
 mod state;
 mod telemetry;
-mod types;
 
 use logs::{runtime_logs, runtime_logs_stream};
 pub use state::RuntimeServerState;
 use telemetry::{session_telemetry_by_id, session_telemetry_stream_by_id};
-pub use types::RuntimeApiResponse;
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3761;
@@ -71,9 +65,6 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
         .route("/v0/runtime/logs", get(runtime_logs))
         .route("/v0/runtime/logs/stream", get(runtime_logs_stream))
         .route("/v0/io/devices", get(io_devices))
-        .route("/v0/validate", post(validate_project_endpoint))
-        .route("/v0/plan", post(plan_project_endpoint))
-        .route("/v0/run", post(run_project_endpoint))
         .route(
             "/v0/sessions/{session_id}",
             get(realtime_session_by_id).delete(clear_session_by_id),
@@ -92,12 +83,6 @@ pub fn runtime_router_with_state(state: RuntimeServerState) -> Router {
             get(http_live_disabled::session_events_stream),
         )
         .route("/v0/sessions/{session_id}/load", post(load_session_by_id))
-        .route(
-            "/v0/sessions/{session_id}/validate",
-            post(validate_session_by_id),
-        )
-        .route("/v0/sessions/{session_id}/plan", post(plan_session_by_id))
-        .route("/v0/sessions/{session_id}/run", post(run_session_by_id))
         .route(
             "/v0/sessions/{session_id}/mutate",
             post(http_live_disabled::mutate),
@@ -224,13 +209,6 @@ async fn runtime_packages(
     Json(state.packages.response())
 }
 
-fn runtime_api_json(
-    _state: &RuntimeServerState,
-    response: RuntimeApiResponse,
-) -> Json<RuntimeApiResponse> {
-    Json(response)
-}
-
 fn session_json(
     _state: &RuntimeServerState,
     response: crate::RuntimeSessionResponse,
@@ -276,74 +254,6 @@ fn generated_shader_json(
 async fn io_devices(State(state): State<RuntimeServerState>) -> Json<RuntimeIoDeviceListResponse> {
     let response = state.io_devices.list_devices();
     Json(response)
-}
-
-async fn validate_project_endpoint(
-    State(state): State<RuntimeServerState>,
-    Json(value): Json<serde_json::Value>,
-) -> Json<RuntimeApiResponse> {
-    let response = match decode_project_payload(value) {
-        Ok(ProjectPayload::Current(request)) => match validate_project_request_current(&request) {
-            Ok((issues, _)) => RuntimeApiResponse {
-                ok: true,
-                issues,
-                plan: None,
-                report: None,
-            },
-            Err(issues) => RuntimeApiResponse::issues(issues),
-        },
-        Err(issues) => RuntimeApiResponse::issues(issues),
-    };
-    runtime_api_json(&state, response)
-}
-
-async fn plan_project_endpoint(
-    State(state): State<RuntimeServerState>,
-    Json(value): Json<serde_json::Value>,
-) -> Json<RuntimeApiResponse> {
-    match decode_project_payload(value) {
-        Ok(ProjectPayload::Current(request)) => {
-            match build_execution_plan_request_current(&request) {
-                Ok((plan, issues)) => runtime_api_json(
-                    &state,
-                    RuntimeApiResponse {
-                        ok: true,
-                        issues,
-                        plan: Some(plan),
-                        report: None,
-                    },
-                ),
-                Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
-            }
-        }
-        Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
-    }
-}
-
-async fn run_project_endpoint(
-    State(state): State<RuntimeServerState>,
-    Json(value): Json<serde_json::Value>,
-) -> Json<RuntimeApiResponse> {
-    match decode_run_project_payload(value) {
-        Ok(RunProjectPayload::Current(request)) => {
-            match build_execution_plan_run_request_current(&request) {
-                Ok((plan, issues)) => {
-                    let report = run_dummy_execution(&plan, request.frames.unwrap_or(1));
-                    runtime_api_json(
-                        &state,
-                        RuntimeApiResponse {
-                            ok: true,
-                            issues,
-                            plan: Some(plan),
-                            report: Some(report),
-                        },
-                    )
-                }
-                Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
-            }
-        }
-        Err(issues) => runtime_api_json(&state, RuntimeApiResponse::issues(issues)),
-    }
 }
 
 async fn realtime_session_by_id(
@@ -412,7 +322,7 @@ fn session_snapshot_for(
         .session
         .read()
         .expect("runtime session lock should not be poisoned");
-    session_json(state, session.response(true, Vec::new(), None))
+    session_json(state, session.response(true, Vec::new()))
 }
 
 async fn session_node_catalog_by_id(
@@ -462,12 +372,12 @@ fn load_session_for(
             repair_issues,
         }) => (request, repair_issues),
         Err(issues) => {
-            let response = session.response(false, issues, None);
+            let response = session.response(false, issues);
             return session_json(state, response);
         }
     };
     if let Err(issues) = validate_session_load_precondition(&session, &request) {
-        let response = session.response(false, issues, None);
+        let response = session.response(false, issues);
         return session_json(state, response);
     }
     let project_request =
@@ -561,65 +471,6 @@ fn record_session_load_repair_log(
             "sessionRevision": response.snapshot.session_revision,
         })),
     );
-}
-
-async fn validate_session_by_id(
-    State(state): State<RuntimeServerState>,
-    Path(session_id): Path<String>,
-) -> Json<crate::RuntimeSessionResponse> {
-    validate_session_for(&state, state.sessions.get_or_create(&session_id))
-}
-
-fn validate_session_for(
-    state: &RuntimeServerState,
-    record: RuntimeSessionRecord,
-) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = record
-        .session
-        .write()
-        .expect("runtime session lock should not be poisoned");
-    let response = session.validate_current();
-    session_json(state, response)
-}
-
-async fn plan_session_by_id(
-    State(state): State<RuntimeServerState>,
-    Path(session_id): Path<String>,
-) -> Json<crate::RuntimeSessionResponse> {
-    plan_session_for(&state, state.sessions.get_or_create(&session_id))
-}
-
-fn plan_session_for(
-    state: &RuntimeServerState,
-    record: RuntimeSessionRecord,
-) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = record
-        .session
-        .write()
-        .expect("runtime session lock should not be poisoned");
-    let response = session.plan_current();
-    session_json(state, response)
-}
-
-async fn run_session_by_id(
-    State(state): State<RuntimeServerState>,
-    Path(session_id): Path<String>,
-    Json(request): Json<SessionRunRequest>,
-) -> Json<crate::RuntimeSessionResponse> {
-    run_session_for(&state, state.sessions.get_or_create(&session_id), request)
-}
-
-fn run_session_for(
-    state: &RuntimeServerState,
-    record: RuntimeSessionRecord,
-    request: SessionRunRequest,
-) -> Json<crate::RuntimeSessionResponse> {
-    let mut session = record
-        .session
-        .write()
-        .expect("runtime session lock should not be poisoned");
-    let response = session.run_current(request.frames.unwrap_or(1));
-    session_json(state, response)
 }
 
 async fn session_history_by_id(
