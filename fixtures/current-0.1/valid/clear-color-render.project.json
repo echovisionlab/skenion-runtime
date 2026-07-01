@@ -11,8 +11,7 @@
           "provider": {
             "kind": "core"
           },
-          "objectId": "render.clear-color",
-          "version": "0.1.0"
+          "objectId": "render.clear-color"
         },
         "objectSpec": "render.clear-color",
         "objectResolution": {
@@ -38,8 +37,7 @@
           "provider": {
             "kind": "core"
           },
-          "objectId": "render.output",
-          "version": "0.1.0"
+          "objectId": "render.output"
         },
         "objectSpec": "render.output",
         "objectResolution": {
