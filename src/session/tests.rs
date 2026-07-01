@@ -927,6 +927,30 @@ fn unresolved_object_loads_session_with_error_issue() {
 }
 
 #[test]
+fn repairable_invalid_edge_loads_after_dropping_edge() {
+    let mut session = RuntimeSession::default();
+    let mut project = sample_project_current();
+    project.graph.edges[0].target.port_id = "value".to_owned();
+
+    let response = session.load_project_current(project);
+
+    assert!(response.ok);
+    assert!(response.snapshot.loaded());
+    assert_eq!(response.snapshot.graph_revision(), Some("2"));
+    let loaded_project = response
+        .snapshot
+        .project
+        .as_ref()
+        .expect("project should load after repair");
+    assert!(loaded_project.graph.edges.is_empty());
+    assert_eq!(loaded_project.revision, "2");
+    assert!(response.issues.iter().any(|issue| issue.code.as_deref()
+        == Some("project.load.edge-dropped")
+        && issue.severity == crate::IssueSeverity::Warning));
+    assert_eq!(session.snapshot().issues, response.issues);
+}
+
+#[test]
 fn replace_node_with_unresolved_object_applies_with_error_issue() {
     let mut session = RuntimeSession::default();
     let loaded = session.load_project_current(sample_project_current());

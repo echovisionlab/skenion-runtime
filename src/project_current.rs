@@ -953,6 +953,144 @@ pub fn validate_project_current(
     }
 }
 
+pub(crate) fn repair_project_load_edges_current(
+    document: &mut ProjectDocumentCurrent,
+) -> Vec<RuntimeIssue> {
+    let mut issues = Vec::new();
+    let original_project_revision = document.revision.clone();
+    let root_repaired = repair_graph_load_edges_current(&mut document.graph, None, &mut issues);
+    if root_repaired {
+        document.graph.revision = next_graph_revision_current(&document.graph.revision);
+        document.revision = document.graph.revision.clone();
+    }
+
+    let mut patch_repaired = false;
+    for patch in &mut document.patch_library {
+        let patch_id = patch.id.clone();
+        if repair_graph_load_edges_current(&mut patch.graph, Some(patch_id.as_str()), &mut issues) {
+            patch_repaired = true;
+            patch.graph.revision = next_graph_revision_current(&patch.graph.revision);
+            patch.revision = patch.graph.revision.clone();
+        }
+    }
+
+    if patch_repaired && !root_repaired {
+        document.revision = next_graph_revision_current(&original_project_revision);
+    }
+
+    issues
+}
+
+pub(crate) fn next_graph_revision_current(current: &str) -> String {
+    current
+        .parse::<u64>()
+        .map(|revision| (revision + 1).to_string())
+        .unwrap_or_else(|_| format!("{current}+1"))
+}
+
+fn repair_graph_load_edges_current(
+    graph: &mut GraphDocumentCurrent,
+    patch_id: Option<&str>,
+    issues: &mut Vec<RuntimeIssue>,
+) -> bool {
+    let repairs = graph
+        .edges
+        .iter()
+        .filter_map(|edge| load_edge_repair_issue_current(graph, edge, patch_id))
+        .collect::<Vec<_>>();
+    if repairs.is_empty() {
+        return false;
+    }
+
+    let dropped_edge_ids = repairs
+        .iter()
+        .map(|repair| repair.edge_id.as_str())
+        .collect::<HashSet<_>>();
+    graph
+        .edges
+        .retain(|edge| !dropped_edge_ids.contains(edge.id.as_str()));
+    issues.extend(repairs.into_iter().map(|repair| repair.issue));
+    true
+}
+
+struct LoadEdgeRepair {
+    edge_id: String,
+    issue: RuntimeIssue,
+}
+
+fn load_edge_repair_issue_current(
+    graph: &GraphDocumentCurrent,
+    edge: &EdgeSpecCurrent,
+    patch_id: Option<&str>,
+) -> Option<LoadEdgeRepair> {
+    let (reason, source_type, target_type) = match (
+        find_port(graph, &edge.source.node_id, &edge.source.port_id),
+        find_port(graph, &edge.target.node_id, &edge.target.port_id),
+    ) {
+        (None, _) => ("missing-source-port".to_owned(), None, None),
+        (_, None) => ("missing-target-port".to_owned(), None, None),
+        (Some(source), Some(target)) if source.direction != PortDirectionCurrent::Output => (
+            "invalid-source-direction".to_owned(),
+            Some(source.port_type.clone()),
+            Some(target.port_type.clone()),
+        ),
+        (Some(source), Some(target)) if target.direction != PortDirectionCurrent::Input => (
+            "invalid-target-direction".to_owned(),
+            Some(source.port_type.clone()),
+            Some(target.port_type.clone()),
+        ),
+        (Some(source), Some(target)) => {
+            let policy = port_connection_policy(source, target);
+            if policy.accepted {
+                return None;
+            }
+            (
+                format!("incompatible-type:{}", policy.reason),
+                Some(source.port_type.clone()),
+                Some(target.port_type.clone()),
+            )
+        }
+    };
+
+    let mut details = json!({
+        "surface": "project-load",
+        "repair": "drop-edge",
+        "graphId": graph.id,
+        "graphRevision": graph.revision,
+        "edgeId": edge.id,
+        "source": {
+            "nodeId": edge.source.node_id,
+            "portId": edge.source.port_id,
+            "type": source_type,
+        },
+        "target": {
+            "nodeId": edge.target.node_id,
+            "portId": edge.target.port_id,
+            "type": target_type,
+        },
+        "reason": reason,
+    });
+    if let Some(patch_id) = patch_id {
+        details["patchId"] = json!(patch_id);
+    }
+
+    Some(LoadEdgeRepair {
+        edge_id: edge.id.clone(),
+        issue: RuntimeIssue::structured_warning(
+            "project.load.edge-dropped",
+            format!(
+                "load dropped incompatible edge {} from {}:{} to {}:{}",
+                edge.id,
+                edge.source.node_id,
+                edge.source.port_id,
+                edge.target.node_id,
+                edge.target.port_id
+            ),
+            details,
+        ),
+    })
+}
+
 fn node_has_non_resolved_object_resolution(node: &GraphNodeCurrent) -> bool {
     node.object_resolution.as_ref().is_some_and(|resolution| {
         resolution.status != crate::ObjectResolutionStatusCurrent::Resolved

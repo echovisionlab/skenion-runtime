@@ -2285,9 +2285,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skenion-contracts"
-version = "0.56.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c578c00c6d781e4ad378c1454bd6e3aa11dd2b6dcdb80743ddd47e0fe99781"
+version = "0.57.0"
 dependencies = [
  "serde",
  "serde_json",

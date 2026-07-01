@@ -14,8 +14,12 @@ use crate::{
     PastePlacement, PatchPath, PreviewContext, ProjectDocumentCurrent, ProjectRequestCurrent,
     RuntimeCollaborationChange, RuntimeIssue, RuntimeOperationEnvelope, RuntimeOperationIssue,
     ViewState, build_execution_plan_request_current,
-    project_current::is_payload_identity_node_kind_current,
-    project_document_validation_issues_current, run_dummy_execution, server::registry_from_nodes,
+    project_current::{
+        is_payload_identity_node_kind_current, next_graph_revision_current,
+        repair_project_load_edges_current,
+    },
+    project_document_validation_issues_current, run_dummy_execution,
+    server::registry_from_nodes,
     validate_project_request_current,
 };
 
@@ -198,6 +202,7 @@ impl RuntimeSession {
         let mut document = project_document_from_request_current(&request);
         let nodes_current =
             normalized_node_definitions_current(&document, request.nodes, Some(&package_registry));
+        let mut load_repair_issues = repair_project_load_edges_current(&mut document);
         let view_state = runtime_owned_view_state(reconcile_view_state_with_graph_current(
             &document.graph,
             Some(document.view_state.clone()),
@@ -222,6 +227,7 @@ impl RuntimeSession {
             Ok(result) => result,
             Err(issues) => return self.response(false, issues, None),
         };
+        issues.append(&mut load_repair_issues);
         issues.extend(unresolved_object_issues_current(&document.graph));
 
         let graph = lower_graph_for_execution(&document.graph);
@@ -270,6 +276,14 @@ impl RuntimeSession {
             .all(|issue| issue.severity != crate::IssueSeverity::Error);
         self.issues = issues.clone();
         self.response(ok, issues, None)
+    }
+
+    pub(crate) fn append_loaded_project_issues(
+        &mut self,
+        mut issues: Vec<RuntimeIssue>,
+    ) -> Vec<RuntimeIssue> {
+        self.issues.append(&mut issues);
+        self.issues.clone()
     }
 
     pub fn plan_current(&mut self) -> RuntimeSessionResponse {
@@ -862,10 +876,7 @@ impl RuntimeSession {
 }
 
 fn next_graph_revision(current: &str) -> String {
-    current
-        .parse::<u64>()
-        .map(|revision| (revision + 1).to_string())
-        .unwrap_or_else(|_| format!("{current}+1"))
+    next_graph_revision_current(current)
 }
 
 fn project_document_from_request_current(

@@ -1608,12 +1608,7 @@ async fn invalid_session_load_returns_issues_and_keeps_runtime_healthy() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|issue| issue["message"]
-                .as_str()
-                .unwrap()
-                .contains(
-                    "edge edge_value_target cannot connect value_1:value value.core.float32 to target_1:cold value.core.bool",
-                ))
+            .any(|issue| issue["code"] == "node.port-snapshot.type-mismatch")
     );
 
     let health = get_json_with(app.clone(), "/health").await;
@@ -1626,6 +1621,36 @@ async fn invalid_session_load_returns_issues_and_keeps_runtime_healthy() {
 
     let logs = get_json_with(app, "/v0/runtime/logs").await;
     assert_eq!(logs["events"], json!([]));
+}
+
+#[tokio::test]
+async fn repairable_session_load_drops_invalid_edges_and_records_warning_log() {
+    let app = runtime_router();
+    let mut project = sample_project_document_current();
+    project["graph"]["edges"][0]["target"]["portId"] = json!("value");
+
+    let response = post_json_with(
+        app.clone(),
+        "/v0/sessions/default/load",
+        session_load_request(project),
+    )
+    .await;
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["snapshot"]["project"]["graph"]["revision"], "2");
+    assert_eq!(response["snapshot"]["project"]["graph"]["edges"], json!([]));
+    assert!(response["issues"].as_array().unwrap().iter().any(|issue| {
+        issue["code"] == "project.load.edge-dropped" && issue["severity"] == "warning"
+    }));
+
+    let logs = get_json_with(app, "/v0/runtime/logs").await;
+    assert_eq!(logs["events"].as_array().unwrap().len(), 1);
+    assert_eq!(logs["events"][0]["code"], "project.load.repaired");
+    assert_eq!(logs["events"][0]["level"], "warning");
+    assert_eq!(
+        logs["events"][0]["details"]["droppedEdgeIds"],
+        json!(["edge_value_target"])
+    );
 }
 
 #[tokio::test]

@@ -4,8 +4,8 @@ use crate::{
     CURRENT_SCHEMA_VERSION, ProjectDocumentCurrent, ProjectRequestCurrent,
     RunProjectRequestCurrent, RuntimeIssue, RuntimeSession, RuntimeSessionLoadModeCurrent,
     RuntimeSessionLoadRequestCurrent, RuntimeSessionSnapshot,
-    project_document_payload_schema_issues, project_document_validation_issues_current,
-    schema_version_issue,
+    project_current::repair_project_load_edges_current, project_document_payload_schema_issues,
+    project_document_validation_issues_current, schema_version_issue,
 };
 
 const RUNTIME_SESSION_LOAD_REQUEST_SCHEMA: &str = "skenion.runtime.session-load-request";
@@ -19,7 +19,10 @@ pub(crate) enum RunProjectPayload {
 }
 
 pub(crate) enum RuntimeSessionLoadPayload {
-    Current(Box<RuntimeSessionLoadRequestCurrent>),
+    Current {
+        request: Box<RuntimeSessionLoadRequestCurrent>,
+        repair_issues: Vec<RuntimeIssue>,
+    },
 }
 
 pub(crate) fn decode_runtime_session_load_request_payload(
@@ -41,9 +44,14 @@ pub(crate) fn decode_runtime_session_load_request_payload(
     }
 
     match runtime_session_load_request_schema_version(&value).as_deref() {
-        Some(CURRENT_SCHEMA_VERSION) => decode_runtime_session_load_request_current(value)
-            .map(Box::new)
-            .map(RuntimeSessionLoadPayload::Current),
+        Some(CURRENT_SCHEMA_VERSION) => {
+            decode_runtime_session_load_request_current(value).map(|(request, repair_issues)| {
+                RuntimeSessionLoadPayload::Current {
+                    request: Box::new(request),
+                    repair_issues,
+                }
+            })
+        }
         received => Err(vec![runtime_session_load_schema_version_issue(
             &value, received,
         )]),
@@ -154,7 +162,7 @@ pub(crate) fn decode_run_project_payload(
 
 fn decode_runtime_session_load_request_current(
     value: Value,
-) -> Result<RuntimeSessionLoadRequestCurrent, Vec<RuntimeIssue>> {
+) -> Result<(RuntimeSessionLoadRequestCurrent, Vec<RuntimeIssue>), Vec<RuntimeIssue>> {
     if let Some(project) = value.get("project") {
         reject_top_level_nodes_current(project)?;
         let schema_issues = project_document_payload_schema_issues(project);
@@ -162,14 +170,15 @@ fn decode_runtime_session_load_request_current(
             return Err(schema_issues);
         }
     }
-    let request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
+    let mut request = serde_json::from_value::<RuntimeSessionLoadRequestCurrent>(value)
         .map_err(invalid_runtime_session_load_payload)?;
+    let repair_issues = repair_project_load_edges_current(&mut request.project);
     if let Err(report) = skenion_contracts::validate_runtime_session_load_request_v01(&request) {
         return Err(runtime_session_load_validation_issues_current(
             &request, &report,
         ));
     }
-    Ok(request)
+    Ok((request, repair_issues))
 }
 
 fn runtime_session_load_request_schema_version(value: &Value) -> Option<String> {

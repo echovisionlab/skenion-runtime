@@ -15,11 +15,12 @@ use axum::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
-    GeneratedShaderResponse, NodeDefinition, NodeRegistry, PackageRegistryListResponseV01,
-    PreviewDocument, ProjectRequestCurrent, RuntimeControlReadRequest, RuntimeControlReadResponse,
-    RuntimeControlStateResponse, RuntimeExtensionListResponse, RuntimeIoDeviceListResponse,
-    RuntimeIssue, RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
-    SessionRunRequest, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
+    GeneratedShaderResponse, IssueSeverity, NodeDefinition, NodeRegistry,
+    PackageRegistryListResponseV01, PreviewDocument, ProjectRequestCurrent,
+    RuntimeControlReadRequest, RuntimeControlReadResponse, RuntimeControlStateResponse,
+    RuntimeExtensionListResponse, RuntimeIoDeviceListResponse, RuntimeIssue,
+    RuntimePreviewStartRequest, RuntimeSessionEventKind, RuntimeSessionInfoResponse,
+    RuntimeSessionResponse, SessionRunRequest, ShaderIssue, ShaderIssuePhase, ShaderIssueSource,
     asset_store::{
         RuntimeAssetGetResponse, RuntimeAssetImportResponse, RuntimeAssetListResponse, store_asset,
     },
@@ -456,8 +457,11 @@ fn load_session_for(
         .session
         .write()
         .expect("runtime session lock should not be poisoned");
-    let request = match decode_runtime_session_load_request_payload(value) {
-        Ok(RuntimeSessionLoadPayload::Current(request)) => request,
+    let (request, load_repair_issues) = match decode_runtime_session_load_request_payload(value) {
+        Ok(RuntimeSessionLoadPayload::Current {
+            request,
+            repair_issues,
+        }) => (request, repair_issues),
         Err(issues) => {
             let response = session.response(false, issues, None);
             return session_json(state, response);
@@ -469,11 +473,16 @@ fn load_session_for(
     }
     let project_request =
         ProjectRequestCurrent::from_project_document(request.project.clone(), Vec::new());
-    let response = session.load_project_current_with_package_registry(
+    let mut response = session.load_project_current_with_package_registry(
         project_request,
         Some(state.packages.revision()),
         Some(state.packages.response()),
     );
+    if response.ok && !load_repair_issues.is_empty() {
+        response.issues = session.append_loaded_project_issues(load_repair_issues);
+        response.snapshot.issues = response.issues.clone();
+    }
+    record_session_load_repair_log(state, &record, &response);
     if response.ok && response.snapshot.loaded() {
         publish_session_event(
             &record,
@@ -483,6 +492,49 @@ fn load_session_for(
         );
     }
     session_json(state, response)
+}
+
+fn record_session_load_repair_log(
+    state: &RuntimeServerState,
+    record: &RuntimeSessionRecord,
+    response: &RuntimeSessionResponse,
+) {
+    if !response.ok {
+        return;
+    }
+    let dropped_edge_ids = response
+        .issues
+        .iter()
+        .filter(|issue| issue.code.as_deref() == Some("project.load.edge-dropped"))
+        .filter_map(|issue| {
+            issue
+                .details
+                .as_ref()
+                .and_then(|details| details.get("edgeId"))
+                .and_then(|edge_id| edge_id.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    if dropped_edge_ids.is_empty() {
+        return;
+    }
+
+    state.logs.record_event(
+        IssueSeverity::Warning,
+        Some("project.load.repaired".to_owned()),
+        format!(
+            "Runtime loaded session {} after dropping {} incompatible edge(s).",
+            record.id,
+            dropped_edge_ids.len()
+        ),
+        Some(serde_json::json!({
+            "sessionId": record.id,
+            "droppedEdgeIds": dropped_edge_ids,
+            "graphId": response.snapshot.graph_id(),
+            "graphRevision": response.snapshot.graph_revision(),
+            "sessionRevision": response.snapshot.session_revision,
+        })),
+    );
 }
 
 async fn validate_session_by_id(
