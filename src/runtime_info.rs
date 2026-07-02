@@ -55,11 +55,6 @@ pub(crate) fn runtime_info_response() -> RuntimeInfoResponse {
 
 fn runtime_capabilities() -> Vec<&'static str> {
     vec![
-        "project.validate",
-        "project.validate.v0.1",
-        "project.plan",
-        "project.plan.v0.1",
-        "dummy.run",
         "session.load",
         "session.load.v0.1",
         "session.realtime.websocket",

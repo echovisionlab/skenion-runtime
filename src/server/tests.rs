@@ -150,11 +150,6 @@ async fn runtime_info_response() {
     );
     let capabilities = response["capabilities"].as_array().unwrap();
     for expected in [
-        "project.validate",
-        "project.validate.v0.1",
-        "project.plan",
-        "project.plan.v0.1",
-        "dummy.run",
         "session.load",
         "session.load.v0.1",
         "session.nodeCatalog.realtime.v0.1",
@@ -193,6 +188,11 @@ async fn runtime_info_response() {
         );
     }
     for removed in [
+        "project.validate",
+        "project.validate.v0.1",
+        "project.plan",
+        "project.plan.v0.1",
+        "dummy.run",
         "session.import.legacy.v0.1",
         "session.defaultAlias",
         "session.mutate",
