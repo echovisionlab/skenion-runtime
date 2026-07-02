@@ -2,7 +2,6 @@ use serde_json::Value;
 use skenion_contracts::{NodeCatalogSnapshotV01, PackageChecksumV01};
 
 use super::super::node_catalog::node_catalog_snapshot_for_session;
-use super::control::GraphControlEmission;
 use crate::{PasteGraphFragmentResponse, RuntimePatchResponse, RuntimeSession};
 
 #[derive(Debug)]
@@ -10,7 +9,6 @@ pub(in crate::realtime) struct GraphCommandOutcome {
     pub(in crate::realtime) response: RuntimePatchResponse,
     pub(in crate::realtime) node_result: Option<Value>,
     pub(super) operation_result: Option<PasteGraphFragmentResponse>,
-    pub(super) control_emission: Option<GraphControlEmission>,
     pub(super) catalog_snapshot: Option<NodeCatalogSnapshotV01>,
 }
 
@@ -20,7 +18,6 @@ impl GraphCommandOutcome {
             response,
             node_result: None,
             operation_result: None,
-            control_emission: None,
             catalog_snapshot: None,
         }
     }
@@ -33,7 +30,6 @@ impl GraphCommandOutcome {
             response,
             node_result: None,
             operation_result: Some(operation_result),
-            control_emission: None,
             catalog_snapshot: None,
         }
     }
@@ -43,21 +39,6 @@ impl GraphCommandOutcome {
             response,
             node_result: Some(node_result),
             operation_result: None,
-            control_emission: None,
-            catalog_snapshot: None,
-        }
-    }
-
-    pub(super) fn with_node_result_and_control_emission(
-        response: RuntimePatchResponse,
-        node_result: Value,
-        control_emission: Option<GraphControlEmission>,
-    ) -> Self {
-        Self {
-            response,
-            node_result: Some(node_result),
-            operation_result: None,
-            control_emission,
             catalog_snapshot: None,
         }
     }

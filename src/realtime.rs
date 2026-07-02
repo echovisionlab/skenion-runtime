@@ -10,8 +10,10 @@ use tokio::sync::broadcast;
 use crate::{EndpointBindingValueFormat, RuntimeIssue, ValueOccurrenceHeader};
 use crate::{RuntimeSessionRecord, RuntimeSessionSnapshot, runtime_time::created_at_now};
 
+mod control_input;
 mod graph_command;
 mod node_catalog;
+mod node_input;
 mod presence;
 mod protocol;
 mod state;
@@ -22,7 +24,8 @@ pub(crate) use node_catalog::node_catalog_snapshot_for_record;
 use node_catalog::{
     NodeCatalogHelloRequest, handle_node_catalog_request, hello_node_catalog_payload,
 };
-use presence::{handle_presence_update, handle_selection_update};
+use node_input::handle_node_input;
+use presence::handle_selection_update;
 use protocol::*;
 pub use protocol::{
     RUNTIME_REALTIME_REPLAY_LIMIT, RUNTIME_REALTIME_SCHEMA, RUNTIME_REALTIME_SCHEMA_VERSION,
@@ -33,6 +36,13 @@ use wire::{RuntimeRealtimeConnectionIdentity, RuntimeRealtimeSessionRevisions};
 pub use wire::{RuntimeRealtimeEnvelope, RuntimeRealtimeIssue, RuntimeRealtimeReplay};
 
 type RuntimeRealtimeSocketSender = futures_util::stream::SplitSink<WebSocket, Message>;
+
+#[derive(Debug)]
+pub(super) struct RealtimeCommandDispatch {
+    pub(super) ack: RuntimeRealtimeEnvelope,
+    pub(super) sender_events: Vec<RuntimeRealtimeEnvelope>,
+    pub(super) broadcast_events: Vec<RuntimeRealtimeEnvelope>,
+}
 
 pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket: WebSocket) {
     let mut receiver = record.realtime.subscribe();
@@ -53,7 +63,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                         let frame = match parsed {
                             Ok(frame) => frame,
                             Err(error) => {
-                                let issue = runtime_error(&record.id, None, None, "realtime.frame.invalid-json", format!("invalid realtime JSON frame: {error}"), None);
+                                let issue = runtime_issue(&record.id, None, None, "realtime.frame.invalid-json", format!("invalid realtime JSON frame: {error}"), None);
                                 if send_frame(&mut sender, &issue).await.is_err() {
                                     break;
                                 }
@@ -62,7 +72,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                         };
 
                         if frame.session_id != record.id {
-                            let issue = runtime_error(&record.id, None, Some(&frame), "realtime.session.mismatch", "frame sessionId does not match the WebSocket session", Some(json!({"expectedSessionId": record.id, "actualSessionId": frame.session_id})));
+                            let issue = runtime_issue(&record.id, None, Some(&frame), "realtime.session.mismatch", "frame sessionId does not match the WebSocket session", Some(json!({"expectedSessionId": record.id, "actualSessionId": frame.session_id})));
                             if send_frame(&mut sender, &issue).await.is_err() {
                                 break;
                             }
@@ -136,40 +146,6 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                 }
                                 identity = Some(issued_identity);
                             }
-                            FRAME_PRESENCE_UPDATE => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                match handle_presence_update(&record, identity, frame) {
-                                    Ok((ack, event)) => {
-                                        if send_frame(&mut sender, &ack).await.is_err() {
-                                            break;
-                                        }
-                                        if let Some(event) = event {
-                                            record.realtime.publish(event);
-                                        }
-                                    }
-                                    Err(issue) => {
-                                        if send_realtime_issue(
-                                            &record,
-                                            &mut sender,
-                                            identity,
-                                            issue,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
                             FRAME_SELECTION_UPDATE => {
                                 let Some(identity) = identity.as_ref() else {
                                     if send_not_attached(&record, &mut sender, &frame)
@@ -204,31 +180,6 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     }
                                 }
                             }
-                            FRAME_CONTROL_COMMAND => {
-                                let Some(identity) = identity.as_ref() else {
-                                    if send_not_attached(&record, &mut sender, &frame)
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                    continue;
-                                };
-                                let issue = runtime_error(
-                                    &record.id,
-                                    Some(identity),
-                                    Some(&frame),
-                                    "realtime.control-command.disabled",
-                                    "control.command is disabled; send live control input through graph.command kind node.input",
-                                    Some(json!({
-                                        "replacementType": FRAME_GRAPH_COMMAND,
-                                        "replacementKind": GRAPH_KIND_NODE_INPUT,
-                                    })),
-                                );
-                                if send_frame(&mut sender, &issue).await.is_err() {
-                                    break;
-                                }
-                            }
                             FRAME_GRAPH_COMMAND => {
                                 let Some(identity) = identity.as_ref() else {
                                     if send_not_attached(&record, &mut sender, &frame)
@@ -240,17 +191,55 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                     continue;
                                 };
                                 match handle_graph_command(&record, identity, frame) {
-                                    Ok((ack, events, local_events)) => {
-                                        if send_frame(&mut sender, &ack).await.is_err() {
+                                    Ok(dispatch) => {
+                                        if send_frame(&mut sender, &dispatch.ack).await.is_err() {
                                             break;
                                         }
-                                        for local_event in local_events {
-                                            if send_frame(&mut sender, &local_event).await.is_err()
-                                            {
+                                        for event in dispatch.sender_events {
+                                            if send_frame(&mut sender, &event).await.is_err() {
                                                 break 'socket_loop;
                                             }
                                         }
-                                        for event in events {
+                                        for event in dispatch.broadcast_events {
+                                            record.realtime.publish(event);
+                                        }
+                                    }
+                                    Err(issue) => {
+                                        if send_realtime_issue(
+                                            &record,
+                                            &mut sender,
+                                            identity,
+                                            issue,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            FRAME_NODE_INPUT => {
+                                let Some(identity) = identity.as_ref() else {
+                                    if send_not_attached(&record, &mut sender, &frame)
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                };
+                                match handle_node_input(&record, identity, frame) {
+                                    Ok(dispatch) => {
+                                        if send_frame(&mut sender, &dispatch.ack).await.is_err() {
+                                            break;
+                                        }
+                                        for event in dispatch.sender_events {
+                                            if send_frame(&mut sender, &event).await.is_err() {
+                                                break 'socket_loop;
+                                            }
+                                        }
+                                        for event in dispatch.broadcast_events {
                                             record.realtime.publish(event);
                                         }
                                     }
@@ -301,7 +290,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                                 }
                             }
                             _ => {
-                                let issue = runtime_error(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
+                                let issue = runtime_issue(&record.id, identity.as_ref(), Some(&frame), "realtime.frame.unsupported-type", "unsupported Runtime realtime frame type", Some(json!({"type": frame.message_type})));
                                 if send_frame(&mut sender, &issue).await.is_err() {
                                     break;
                                 }
@@ -316,7 +305,7 @@ pub async fn handle_runtime_realtime_socket(record: RuntimeSessionRecord, socket
                     }
                     Message::Pong(_) => {}
                     Message::Binary(_) => {
-                        let issue = runtime_error(&record.id, identity.as_ref(), None, "realtime.frame.binary-unsupported", "Runtime realtime frames must be JSON text", None);
+                        let issue = runtime_issue(&record.id, identity.as_ref(), None, "realtime.frame.binary-unsupported", "Runtime realtime frames must be JSON text", None);
                         if send_frame(&mut sender, &issue).await.is_err() {
                             break;
                         }
@@ -400,9 +389,13 @@ fn command_ack(
         cursor: Some(record.realtime.current_cursor()),
         created_at: Some(created_at_now()),
         payload: json!({
+            "status": "accepted",
             "accepted": true,
+            "applied": false,
+            "conflict": false,
             "cached": cached,
             "eventCursor": event_cursor,
+            "issues": [],
         }),
     }
 }
@@ -428,15 +421,6 @@ fn command_ack_with_payload(
     payload: Value,
 ) -> RuntimeRealtimeEnvelope {
     ack_with_payload(record, identity, frame, EVENT_COMMAND_ACK, payload)
-}
-
-fn graph_ack_with_payload(
-    record: &RuntimeSessionRecord,
-    identity: &RuntimeRealtimeConnectionIdentity,
-    frame: &RuntimeRealtimeEnvelope,
-    payload: Value,
-) -> RuntimeRealtimeEnvelope {
-    ack_with_payload(record, identity, frame, EVENT_GRAPH_ACK, payload)
 }
 
 fn ack_with_payload(
@@ -552,7 +536,7 @@ fn session_sync_required(
     }
 }
 
-fn runtime_error(
+fn runtime_issue(
     session_id: &str,
     identity: Option<&RuntimeRealtimeConnectionIdentity>,
     frame: Option<&RuntimeRealtimeEnvelope>,
@@ -560,15 +544,16 @@ fn runtime_error(
     message: impl Into<String>,
     details: Option<Value>,
 ) -> RuntimeRealtimeEnvelope {
-    let issue = RuntimeRealtimeIssue {
-        code: code.to_owned(),
-        message: message.into(),
-        details,
-    };
+    let issue = json!({
+        "severity": "error",
+        "code": code,
+        "message": message.into(),
+        "details": details,
+    });
     RuntimeRealtimeEnvelope {
         schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
         schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
-        message_type: "runtime.error".to_owned(),
+        message_type: EVENT_RUNTIME_ISSUE.to_owned(),
         message_id: format!(
             "{}_error_{}",
             session_id,
@@ -690,7 +675,7 @@ async fn send_not_attached(
     sender: &mut RuntimeRealtimeSocketSender,
     frame: &RuntimeRealtimeEnvelope,
 ) -> Result<(), axum::Error> {
-    let issue = runtime_error(
+    let issue = runtime_issue(
         &record.id,
         None,
         Some(frame),
@@ -707,7 +692,7 @@ async fn send_realtime_issue(
     identity: &RuntimeRealtimeConnectionIdentity,
     issue: RuntimeRealtimeIssue,
 ) -> Result<(), axum::Error> {
-    let issue = runtime_error(
+    let issue = runtime_issue(
         &record.id,
         Some(identity),
         None,

@@ -50,7 +50,7 @@ pub enum ControlValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlMessage {
-    pub selector: String,
+    pub key: String,
     #[serde(default)]
     pub atoms: Vec<ControlValue>,
 }
@@ -260,7 +260,7 @@ pub(crate) fn is_unsigned_int_representation(representation: &str) -> bool {
 impl ControlMessage {
     pub fn bang() -> Self {
         Self {
-            selector: "bang".to_owned(),
+            key: "bang".to_owned(),
             atoms: Vec::new(),
         }
     }
@@ -276,7 +276,7 @@ impl ControlMessage {
         }
         .to_owned();
         Self {
-            selector,
+            key: selector,
             atoms: vec![value],
         }
     }
@@ -285,7 +285,7 @@ impl ControlMessage {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Self {
-                selector: "symbol".to_owned(),
+                key: "symbol".to_owned(),
                 atoms: vec![ControlValue::string(String::new())],
             };
         }
@@ -296,7 +296,7 @@ impl ControlMessage {
         match selector {
             "bang" if rest.is_empty() => Self::bang(),
             "set" => Self {
-                selector: "set".to_owned(),
+                key: "set".to_owned(),
                 atoms: parse_message_atoms(rest),
             },
             "float" => typed_or_generic_message(selector, rest, parse_float_atom),
@@ -304,12 +304,12 @@ impl ControlMessage {
             "uint" => typed_or_generic_message(selector, rest, parse_uint_atom),
             "bool" => typed_or_generic_message(selector, rest, parse_bool_atom),
             "symbol" => Self {
-                selector: "symbol".to_owned(),
+                key: "symbol".to_owned(),
                 atoms: vec![ControlValue::string(rest.to_owned())],
             },
             "color" => typed_or_generic_message(selector, rest, parse_color_atom),
             "on" | "off" | "true" | "false" if rest.is_empty() => Self {
-                selector: selector.to_owned(),
+                key: selector.to_owned(),
                 atoms: Vec::new(),
             },
             _ if rest.is_empty() => {
@@ -317,13 +317,13 @@ impl ControlMessage {
                     Self::from_value(value)
                 } else {
                     Self {
-                        selector: "symbol".to_owned(),
+                        key: "symbol".to_owned(),
                         atoms: vec![ControlValue::string(trimmed.to_owned())],
                     }
                 }
             }
             _ => Self {
-                selector: selector.to_owned(),
+                key: selector.to_owned(),
                 atoms: parse_message_atoms(rest),
             },
         }
@@ -335,16 +335,16 @@ impl ControlMessage {
 
     pub fn to_text(&self) -> String {
         if self.atoms.is_empty() {
-            return self.selector.clone();
+            return self.key.clone();
         }
         if self.atoms.len() == 1
-            && let Some(payload) = typed_atom_payload_to_text(&self.selector, &self.atoms[0])
+            && let Some(payload) = typed_atom_payload_to_text(&self.key, &self.atoms[0])
         {
-            return format!("{} {}", self.selector, payload);
+            return format!("{} {}", self.key, payload);
         }
         format!(
             "{} {}",
-            self.selector,
+            self.key,
             self.atoms
                 .iter()
                 .map(atom_to_text)
@@ -399,7 +399,7 @@ fn typed_or_generic_message(
     parser(rest)
         .map(ControlMessage::from_value)
         .unwrap_or_else(|| ControlMessage {
-            selector: selector.to_owned(),
+            key: selector.to_owned(),
             atoms: parse_message_atoms(rest),
         })
 }
@@ -590,22 +590,22 @@ mod tests {
     }
 
     #[test]
-    fn serializes_control_messages_with_selector_and_atoms() {
+    fn serializes_control_messages_with_key_and_atoms() {
         assert_eq!(
             serde_json::to_value(ControlMessage::bang()).unwrap(),
-            json!({ "selector": "bang", "atoms": [] })
+            json!({ "key": "bang", "atoms": [] })
         );
         assert_eq!(
             serde_json::to_value(ControlMessage::from_value(ControlValue::float(0.5))).unwrap(),
             json!({
-                "selector": "float",
+                "key": "float",
                 "atoms": [{ "type": "float", "representation": "f32", "value": 0.5 }]
             })
         );
         assert_eq!(
             ControlMessage::parse_text("set on"),
             ControlMessage {
-                selector: "set".to_owned(),
+                key: "set".to_owned(),
                 atoms: vec![ControlValue::bool(true)]
             }
         );
@@ -616,14 +616,14 @@ mod tests {
         assert_eq!(
             ControlMessage::parse_text("   "),
             ControlMessage {
-                selector: "symbol".to_owned(),
+                key: "symbol".to_owned(),
                 atoms: vec![ControlValue::string(String::new())]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("route 1 on label"),
             ControlMessage {
-                selector: "route".to_owned(),
+                key: "route".to_owned(),
                 atoms: vec![
                     ControlValue::int(1),
                     ControlValue::bool(true),
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(
             ControlMessage::parse_text("set"),
             ControlMessage {
-                selector: "set".to_owned(),
+                key: "set".to_owned(),
                 atoms: Vec::new()
             }
         );
@@ -670,14 +670,14 @@ mod tests {
         assert_eq!(
             ControlMessage::parse_text("set color 1 0.5 0.25 1"),
             ControlMessage {
-                selector: "set".to_owned(),
+                key: "set".to_owned(),
                 atoms: vec![ControlValue::color([1.0, 0.5, 0.25, 1.0])]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("symbol hello world"),
             ControlMessage {
-                selector: "symbol".to_owned(),
+                key: "symbol".to_owned(),
                 atoms: vec![ControlValue::string("hello world".to_owned())]
             }
         );
@@ -700,35 +700,35 @@ mod tests {
         assert_eq!(
             ControlMessage::parse_text("float 1 2"),
             ControlMessage {
-                selector: "float".to_owned(),
+                key: "float".to_owned(),
                 atoms: vec![ControlValue::int(1), ControlValue::int(2)]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("int nope"),
             ControlMessage {
-                selector: "int".to_owned(),
+                key: "int".to_owned(),
                 atoms: vec![ControlValue::string("nope".to_owned())]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("uint -1"),
             ControlMessage {
-                selector: "uint".to_owned(),
+                key: "uint".to_owned(),
                 atoms: vec![ControlValue::int(-1)]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("bool maybe"),
             ControlMessage {
-                selector: "bool".to_owned(),
+                key: "bool".to_owned(),
                 atoms: vec![ControlValue::string("maybe".to_owned())]
             }
         );
         assert_eq!(
             ControlMessage::parse_text("color 1 2 3"),
             ControlMessage {
-                selector: "color".to_owned(),
+                key: "color".to_owned(),
                 atoms: vec![
                     ControlValue::int(1),
                     ControlValue::int(2),
@@ -738,7 +738,7 @@ mod tests {
         );
         assert_eq!(
             (ControlMessage {
-                selector: "list".to_owned(),
+                key: "list".to_owned(),
                 atoms: vec![
                     ControlValue::float(1.5),
                     ControlValue::uint(2),
@@ -858,7 +858,7 @@ mod tests {
             ControlValue::color([0.0, 0.0, 0.0, 1.0]).kind_label(),
             "value.core.color/rgba32f"
         );
-        assert_eq!(ControlMessage::bang().selector, "bang");
+        assert_eq!(ControlMessage::bang().key, "bang");
     }
 
     #[test]

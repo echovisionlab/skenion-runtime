@@ -24,7 +24,7 @@ fn set_value_request(
         node_id,
         port_id,
         ControlMessage {
-            selector: "set".to_owned(),
+            key: "set".to_owned(),
             atoms: vec![value],
         },
     )
@@ -1515,7 +1515,7 @@ fn control_state_response_serializes_values_and_channels() {
             },
             "channels": {
                 "value.core.float32:speed": {
-                    "selector": "float",
+                    "key": "float",
                     "atoms": [{ "type": "float", "representation": "f32", "value": 1.5 }]
                 }
             },
@@ -1565,7 +1565,7 @@ fn helper_fallbacks_and_read_responses_are_covered() {
         "color 1 0.5 0 1"
     );
     let selector_only = ControlMessage {
-        selector: "clear".to_owned(),
+        key: "clear".to_owned(),
         atoms: Vec::new(),
     };
     assert_eq!(
@@ -1581,7 +1581,7 @@ fn helper_fallbacks_and_read_responses_are_covered() {
     );
     assert_eq!(
         set_message_text(&ControlMessage {
-            selector: "set".to_owned(),
+            key: "set".to_owned(),
             atoms: vec![
                 ControlValue::float(1.5),
                 ControlValue::int(2),
@@ -1678,7 +1678,7 @@ fn helper_fallbacks_and_read_responses_are_covered() {
     assert_eq!(
         coerce_toggle_input(
             &ControlMessage {
-                selector: "0".to_owned(),
+                key: "0".to_owned(),
                 atoms: Vec::new()
             },
             true
@@ -1688,7 +1688,7 @@ fn helper_fallbacks_and_read_responses_are_covered() {
     assert_eq!(
         coerce_toggle_input(
             &ControlMessage {
-                selector: "1".to_owned(),
+                key: "1".to_owned(),
                 atoms: Vec::new()
             },
             false
@@ -1698,7 +1698,7 @@ fn helper_fallbacks_and_read_responses_are_covered() {
     assert_eq!(
         coerce_toggle_input(
             &ControlMessage {
-                selector: "pulse".to_owned(),
+                key: "pulse".to_owned(),
                 atoms: Vec::new()
             },
             false

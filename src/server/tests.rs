@@ -15,9 +15,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use skenion_contracts::{
-    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-};
+use skenion_contracts::CONTRACTS_PACKAGE_VERSION;
 use tower::ServiceExt;
 
 use crate::{
@@ -120,12 +118,8 @@ async fn health_response() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        response["supportedContractsLine"],
-        CONTRACTS_COMPATIBILITY_LINE
-    );
-    assert_eq!(
-        response["supportedContractsRange"],
-        CONTRACTS_COMPATIBILITY_RANGE
+        response["requiredContractsVersion"],
+        CONTRACTS_PACKAGE_VERSION
     );
 }
 
@@ -141,12 +135,8 @@ async fn runtime_info_response() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        response["supportedContractsLine"],
-        CONTRACTS_COMPATIBILITY_LINE
-    );
-    assert_eq!(
-        response["supportedContractsRange"],
-        CONTRACTS_COMPATIBILITY_RANGE
+        response["requiredContractsVersion"],
+        CONTRACTS_PACKAGE_VERSION
     );
     let capabilities = response["capabilities"].as_array().unwrap();
     for expected in [
@@ -246,7 +236,7 @@ async fn legacy_http_live_routes_return_gone_with_ws_replacements() {
         (
             Method::POST,
             "/v0/sessions/default/collaboration/presence",
-            "presence.update",
+            "selection.update",
         ),
         (
             Method::POST,
@@ -263,7 +253,7 @@ async fn legacy_http_live_routes_return_gone_with_ws_replacements() {
         (
             Method::POST,
             "/v0/sessions/default/control/event",
-            "graph.command",
+            "node.input",
         ),
     ] {
         let (status, body) =
@@ -311,12 +301,8 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        startup["runtime"]["supportedContractsLine"],
-        CONTRACTS_COMPATIBILITY_LINE
-    );
-    assert_eq!(
-        startup["runtime"]["supportedContractsRange"],
-        CONTRACTS_COMPATIBILITY_RANGE
+        startup["runtime"]["requiredContractsVersion"],
+        CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(startup["endpoint"]["protocol"], "http");
     assert_eq!(startup["profile"]["mode"], "local-managed");
@@ -340,12 +326,8 @@ async fn sidecar_startup_health_and_shutdown_are_machine_readable() {
         CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(
-        health["runtime"]["supportedContractsLine"],
-        CONTRACTS_COMPATIBILITY_LINE
-    );
-    assert_eq!(
-        health["runtime"]["supportedContractsRange"],
-        CONTRACTS_COMPATIBILITY_RANGE
+        health["runtime"]["requiredContractsVersion"],
+        CONTRACTS_PACKAGE_VERSION
     );
     assert_eq!(health["endpoint"]["protocol"], "http");
     assert_eq!(health["profile"]["mode"], "local-managed");
@@ -410,7 +392,10 @@ async fn runtime_packages_endpoint_returns_startup_snapshot_without_rescan() {
         "example/server-package"
     );
     assert_eq!(first_packages["packages"][0]["version"], "0.49.0");
-    assert_eq!(first_packages["packages"][0]["contracts"]["line"], "0.49");
+    assert_eq!(
+        first_packages["packages"][0]["contracts"]["version"],
+        CONTRACTS_PACKAGE_VERSION
+    );
     assert_eq!(
         first_packages["packages"][0]["provides"]["patches"][0]["id"],
         "example.server-package.main"
@@ -2084,6 +2069,7 @@ fn write_server_package_manifest(package_dir: &Path, body: &str) {
 
 fn write_server_valid_package_manifest(package_dir: &Path, package_id: &str) {
     let provided_id = package_id.replace('/', ".");
+    let contracts_version = CONTRACTS_PACKAGE_VERSION;
     write_server_package_manifest(
         package_dir,
         &format!(
@@ -2094,8 +2080,7 @@ fn write_server_valid_package_manifest(package_dir: &Path, package_id: &str) {
               "version": "0.49.0",
               "category": "patch",
               "contracts": {{
-                "line": "0.49",
-                "range": ">=0.49.0 <0.50.0"
+                "version": "{contracts_version}"
               }},
               "provides": {{
                 "patches": [

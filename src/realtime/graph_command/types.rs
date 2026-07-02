@@ -5,9 +5,8 @@ use skenion_contracts::InterfaceIncidentEdgePolicyV01;
 use super::super::protocol::GraphCommandKind;
 use super::super::wire::{RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope};
 use crate::{
-    CanvasNodeView, ControlMessage, GraphTargetRef, PasteGraphFragmentRequest,
-    PasteGraphFragmentResponse, RuntimeCollaborationChange, RuntimePatchResponse,
-    RuntimeSessionRecord, RuntimeViewPatch,
+    CanvasNodeView, GraphTargetRef, PasteGraphFragmentRequest, PasteGraphFragmentResponse,
+    RuntimeCollaborationChange, RuntimePatchResponse, RuntimeSessionRecord, RuntimeViewPatch,
 };
 
 #[derive(Clone, Copy)]
@@ -54,10 +53,6 @@ pub(in crate::realtime) struct GraphCommandPayload {
     pub(in crate::realtime) view: Option<CanvasNodeView>,
     #[serde(default)]
     pub(in crate::realtime) params: Option<Map<String, Value>>,
-    #[serde(default)]
-    pub(in crate::realtime) port_id: Option<String>,
-    #[serde(default)]
-    pub(in crate::realtime) message: Option<ControlMessage>,
     #[serde(default)]
     pub(in crate::realtime) request: Option<PasteGraphFragmentRequest>,
     #[serde(default)]

@@ -5,14 +5,7 @@ use crate::{
     RuntimeSessionRecord,
 };
 
-#[derive(Debug)]
-pub(super) struct GraphControlEmission {
-    pub(super) request: RuntimeControlEventRequest,
-    pub(super) response: RuntimeControlEventResponse,
-    pub(super) changed_values: BTreeMap<String, ControlValue>,
-}
-
-pub(super) fn apply_control_command(
+pub(super) fn apply_control_input(
     record: &RuntimeSessionRecord,
     request: RuntimeControlEventRequest,
 ) -> (

@@ -39,7 +39,10 @@ impl DisabledLiveChannel {
                 "type": "graph.command",
                 "kinds": ["graph.changeSet", "graph.pasteFragment", "history.undo", "history.redo"]
             }),
-            Self::CollaborationPresence => json!({ "type": "presence.update" }),
+            Self::CollaborationPresence => json!({
+                "type": "selection.update",
+                "details": "Runtime realtime presence frames are not part of the current public surface."
+            }),
             Self::CollaborationSelection => json!({ "type": "selection.update" }),
             Self::CollaborationEvents => json!({
                 "type": "session.hello",
@@ -54,8 +57,7 @@ impl DisabledLiveChannel {
                 "kind": "history.redo"
             }),
             Self::ControlEvent => json!({
-                "type": "graph.command",
-                "kind": "node.input"
+                "type": "node.input"
             }),
         }
     }

@@ -9,19 +9,17 @@ pub(super) const RUNTIME_REALTIME_RESUME_TOKEN_TTL: Duration = Duration::from_se
 pub(super) const RUNTIME_REALTIME_RESUME_TOKEN_BYTES: usize = 32;
 
 pub(super) const FRAME_SESSION_HELLO: &str = "session.hello";
-pub(super) const FRAME_PRESENCE_UPDATE: &str = "presence.update";
 pub(super) const FRAME_SELECTION_UPDATE: &str = "selection.update";
-pub(super) const FRAME_CONTROL_COMMAND: &str = "control.command";
 pub(super) const FRAME_GRAPH_COMMAND: &str = "graph.command";
+pub(super) const FRAME_NODE_INPUT: &str = "node.input";
 pub(super) const FRAME_NODE_CATALOG_REQUEST: &str = "nodeCatalog.request";
 
-pub(super) const EVENT_PRESENCE_UPDATED: &str = "presence.updated";
 pub(super) const EVENT_SELECTION_UPDATED: &str = "selection.updated";
 pub(super) const EVENT_CONTROL_EMITTED: &str = "control.emitted";
 pub(super) const EVENT_GRAPH_APPLIED: &str = "graph.applied";
 pub(super) const EVENT_NODE_CATALOG_CHANGED: &str = "nodeCatalog.changed";
-pub(super) const EVENT_GRAPH_ACK: &str = "graph.ack";
 pub(super) const EVENT_COMMAND_ACK: &str = "command.ack";
+pub(super) const EVENT_RUNTIME_ISSUE: &str = "runtime.issue";
 
 pub(super) const GRAPH_KIND_VIEW_PATCH: &str = "view.patch";
 pub(super) const GRAPH_KIND_CHANGE_SET: &str = "graph.changeSet";
@@ -31,7 +29,6 @@ pub(super) const GRAPH_KIND_NODE_CREATE: &str = "node.create";
 pub(super) const GRAPH_KIND_NODE_REPLACE: &str = "node.replace";
 pub(super) const GRAPH_KIND_NODE_DELETE: &str = "node.delete";
 pub(super) const GRAPH_KIND_NODE_UPDATE: &str = "node.update";
-pub(super) const GRAPH_KIND_NODE_INPUT: &str = "node.input";
 pub(super) const GRAPH_KIND_HISTORY_UNDO: &str = "history.undo";
 pub(super) const GRAPH_KIND_HISTORY_REDO: &str = "history.redo";
 
@@ -45,7 +42,6 @@ pub(super) enum GraphCommandKind {
     NodeReplace,
     NodeDelete,
     NodeUpdate,
-    NodeInput,
     HistoryUndo,
     HistoryRedo,
 }
@@ -61,7 +57,6 @@ impl GraphCommandKind {
             GRAPH_KIND_NODE_REPLACE => Some(Self::NodeReplace),
             GRAPH_KIND_NODE_DELETE => Some(Self::NodeDelete),
             GRAPH_KIND_NODE_UPDATE => Some(Self::NodeUpdate),
-            GRAPH_KIND_NODE_INPUT => Some(Self::NodeInput),
             GRAPH_KIND_HISTORY_UNDO => Some(Self::HistoryUndo),
             GRAPH_KIND_HISTORY_REDO => Some(Self::HistoryRedo),
             _ => None,
@@ -78,7 +73,6 @@ impl GraphCommandKind {
             Self::NodeReplace => GRAPH_KIND_NODE_REPLACE,
             Self::NodeDelete => GRAPH_KIND_NODE_DELETE,
             Self::NodeUpdate => GRAPH_KIND_NODE_UPDATE,
-            Self::NodeInput => GRAPH_KIND_NODE_INPUT,
             Self::HistoryUndo => GRAPH_KIND_HISTORY_UNDO,
             Self::HistoryRedo => GRAPH_KIND_HISTORY_REDO,
         }
@@ -94,7 +88,6 @@ const GRAPH_COMMAND_SUPPORTED_KINDS: &[GraphCommandKind] = &[
     GraphCommandKind::NodeReplace,
     GraphCommandKind::NodeDelete,
     GraphCommandKind::NodeUpdate,
-    GraphCommandKind::NodeInput,
     GraphCommandKind::HistoryUndo,
     GraphCommandKind::HistoryRedo,
 ];

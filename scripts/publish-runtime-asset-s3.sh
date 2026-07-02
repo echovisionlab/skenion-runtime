@@ -219,7 +219,6 @@ manifest_path="$(dirname "${asset_path}")/${manifest_name}"
 source_commit="${SOURCE_COMMIT:-${GITHUB_SHA:-unknown}}"
 release_tier="${RELEASE_TIER:-unknown}"
 contracts_version="${CONTRACTS_VERSION:-}"
-contracts_line="${CONTRACTS_LINE:-}"
 
 asset_sha="$(sha256_file "${asset_path}")"
 declared_asset_sha="$(awk '{print $1; exit}' "${checksum_path}")"
@@ -251,7 +250,6 @@ export RUNTIME_RELEASE_EXECUTABLE_NAME="${asset_name}"
 export RUNTIME_RELEASE_TIER="${release_tier}"
 export RUNTIME_RELEASE_SOURCE_COMMIT="${source_commit}"
 export RUNTIME_RELEASE_CONTRACTS_VERSION="${contracts_version}"
-export RUNTIME_RELEASE_CONTRACTS_LINE="${contracts_line}"
 export RUNTIME_RELEASE_BUCKET="${SKENION_RELEASE_S3_BUCKET}"
 export RUNTIME_RELEASE_ASSET_NAME="${asset_name}"
 export RUNTIME_RELEASE_ASSET_KEY="${asset_key}"
@@ -285,7 +283,6 @@ manifest = {
     "tier": os.environ["RUNTIME_RELEASE_TIER"],
     "contracts": {
         "version": os.environ.get("RUNTIME_RELEASE_CONTRACTS_VERSION") or None,
-        "line": os.environ.get("RUNTIME_RELEASE_CONTRACTS_LINE") or None,
     },
     "artifact": {
         "filename": os.environ["RUNTIME_RELEASE_ASSET_NAME"],

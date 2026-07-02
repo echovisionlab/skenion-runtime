@@ -1,19 +1,17 @@
-use std::{
-    collections::BTreeMap,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
 use super::graph_command::{
-    GraphCommandPayload, RealtimeEventPosition, apply_graph_command,
-    apply_node_delete_graph_command, apply_node_update_graph_command,
-    apply_object_create_graph_command, apply_object_replace_graph_command,
-    apply_object_resolve_graph_command, control_emitted_event, graph_ack_from_cached,
-    materialize_object_command_node, next_generated_node_id, node_command_result, node_id_slug,
-    node_input_result, object_spec_runtime_issues, validate_object_command_target,
+    GraphCommandPayload, apply_graph_command, apply_node_delete_graph_command,
+    apply_node_update_graph_command, apply_object_create_graph_command,
+    apply_object_replace_graph_command, apply_object_resolve_graph_command,
+    graph_command_ack_from_cached, materialize_object_command_node, next_generated_node_id,
+    node_command_result, node_id_slug, node_input_result, object_spec_runtime_issues,
+    validate_object_command_target,
 };
 use super::node_catalog::{NodeCatalogHelloMode, catalog_revision_matches};
+use super::node_input::handle_node_input;
 use super::state::{
     RememberAckInput, RuntimeRealtimeCachedCommandResult, RuntimeRealtimeIdempotencyScope,
     RuntimeRealtimeResumeIdentity,
@@ -88,8 +86,8 @@ fn realtime_event(session_id: &str, sequence: u64, cursor: &str) -> RuntimeRealt
     RuntimeRealtimeEnvelope {
         schema: RUNTIME_REALTIME_SCHEMA.to_owned(),
         schema_version: RUNTIME_REALTIME_SCHEMA_VERSION.to_owned(),
-        message_type: EVENT_PRESENCE_UPDATED.to_owned(),
-        message_id: format!("{session_id}_presence_{sequence:06}"),
+        message_type: EVENT_SELECTION_UPDATED.to_owned(),
+        message_id: format!("{session_id}_selection_{sequence:06}"),
         session_id: session_id.to_owned(),
         connection_id: None,
         client_id: None,
@@ -358,7 +356,7 @@ fn idempotency_results_follow_retained_event_window() {
         let idempotency_key = format!("key-{sequence}");
         state.remember_ack(RememberAckInput {
             identity: &identity,
-            message_type: "presence.update",
+            message_type: "selection.update",
             idempotency_key: &idempotency_key,
             event_cursor: &cursor,
             event_sequence: sequence,
@@ -377,7 +375,7 @@ fn idempotency_results_follow_retained_event_window() {
         !idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
             client_id: identity.client_id.clone(),
             window_id: identity.window_id.clone(),
-            message_type: "presence.update".to_owned(),
+            message_type: "selection.update".to_owned(),
             idempotency_key: "key-1".to_owned(),
         })
     );
@@ -385,7 +383,7 @@ fn idempotency_results_follow_retained_event_window() {
         idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
             client_id: identity.client_id.clone(),
             window_id: identity.window_id.clone(),
-            message_type: "presence.update".to_owned(),
+            message_type: "selection.update".to_owned(),
             idempotency_key: "key-2".to_owned(),
         })
     );
@@ -393,7 +391,7 @@ fn idempotency_results_follow_retained_event_window() {
         idempotency_results.contains_key(&RuntimeRealtimeIdempotencyScope {
             client_id: identity.client_id.clone(),
             window_id: identity.window_id.clone(),
-            message_type: "presence.update".to_owned(),
+            message_type: "selection.update".to_owned(),
             idempotency_key: "key-3".to_owned(),
         })
     );
@@ -572,7 +570,7 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
     assert_eq!(sync.payload["issue"]["code"], "realtime.cursor.test");
     assert_eq!(sync.payload["nodeCatalog"]["status"], "unchanged");
 
-    let error = runtime_error(
+    let error = runtime_issue(
         &record.id,
         Some(&identity),
         Some(&frame),
@@ -580,7 +578,7 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
         "test error",
         Some(json!({ "field": "payload" })),
     );
-    assert_eq!(error.message_type, "runtime.error");
+    assert_eq!(error.message_type, "runtime.issue");
     assert_eq!(
         error.connection_id.as_deref(),
         Some(identity.connection_id.as_str())
@@ -596,53 +594,47 @@ fn hello_catalog_and_error_envelopes_preserve_client_context() {
 }
 
 #[test]
-fn command_handlers_reject_invalid_payloads_and_clamp_presence_ttl() {
+fn command_handlers_reject_invalid_payloads() {
     let registry = crate::RuntimeSessionRegistry::dry_preview();
     let record = registry.default_record();
     let identity = record.realtime.issue_connection_identity(None);
 
-    let missing_presence_key = handle_presence_update(
+    let node_input_missing_key = handle_node_input(
         &record,
         &identity,
         client_frame(
             &record.id,
-            "presence.update",
-            "presence-missing-key",
-            json!({ "presence": { "tool": "select" } }),
+            "node.input",
+            "node-input-missing-key",
+            json!({
+                "inputs": [{
+                    "nodeId": "value_1",
+                    "portId": "in",
+                    "message": ControlMessage::bang()
+                }]
+            }),
         ),
     )
-    .expect_err("presence updates require idempotency keys");
+    .expect_err("node.input requires idempotency keys");
     assert_eq!(
-        missing_presence_key.code,
+        node_input_missing_key.code,
         "realtime.command.idempotency-key-required"
     );
 
-    let mut invalid_presence = client_frame(
+    let mut invalid_node_input = client_frame(
         &record.id,
-        "presence.update",
-        "presence-invalid",
-        Value::String("bad-presence".to_owned()),
+        "node.input",
+        "node-input-invalid",
+        Value::String("bad-node-input".to_owned()),
     );
-    invalid_presence.idempotency_key = Some("presence-invalid-key".to_owned());
-    let invalid_presence = handle_presence_update(&record, &identity, invalid_presence)
-        .expect_err("non-object presence payload should be rejected");
-    assert_eq!(invalid_presence.code, "realtime.presence.invalid-payload");
-
-    let mut valid_presence = client_frame(
-        &record.id,
-        "presence.update",
-        "presence-valid",
-        json!({ "presence": { "tool": "draw" }, "ttlMs": 1 }),
+    invalid_node_input.command_id = Some("node-input-invalid".to_owned());
+    invalid_node_input.idempotency_key = Some("node-input-invalid-key".to_owned());
+    let invalid_node_input = handle_node_input(&record, &identity, invalid_node_input)
+        .expect_err("non-object node.input payload should be rejected");
+    assert_eq!(
+        invalid_node_input.code,
+        "realtime.node-input.invalid-payload"
     );
-    valid_presence.idempotency_key = Some("presence-valid-key".to_owned());
-    let (ack, event) = handle_presence_update(&record, &identity, valid_presence)
-        .expect("valid presence update should ack and publish");
-    let event = event.expect("presence update should create a realtime event");
-    assert_eq!(ack.message_type, "command.ack");
-    assert_eq!(ack.payload["accepted"], true);
-    assert_eq!(event.message_type, "presence.updated");
-    assert_eq!(event.payload["presence"]["presence"]["tool"], "draw");
-    assert_eq!(event.payload["presence"]["ttlMs"], 1000);
 
     let graph_missing_key = handle_graph_command(
         &record,
@@ -1134,7 +1126,7 @@ fn graph_command_validation_covers_view_and_change_set_rejections() {
 }
 
 #[test]
-fn cached_ack_and_control_event_helpers_preserve_payload_flags() {
+fn cached_ack_helpers_preserve_payload_flags() {
     let registry = crate::RuntimeSessionRegistry::dry_preview();
     let record = registry.default_record();
     let identity = test_identity();
@@ -1146,59 +1138,12 @@ fn cached_ack_and_control_event_helpers_preserve_payload_flags() {
         ack_payload: json!({ "accepted": true, "cached": false }),
         emitted_results: Vec::new(),
     };
-    let graph_ack = graph_ack_from_cached(&record, &identity, &frame, cached.clone());
-    assert_eq!(graph_ack.message_type, "graph.ack");
+    let graph_ack = graph_command_ack_from_cached(&record, &identity, &frame, cached.clone());
+    assert_eq!(graph_ack.message_type, "command.ack");
     assert_eq!(graph_ack.payload["cached"], true);
     assert_eq!(graph_ack.payload["eventCursor"], "cursor-cached");
 
     let command_ack = command_ack_from_cached(&record, &identity, &frame, cached);
     assert_eq!(command_ack.message_type, "command.ack");
     assert_eq!(command_ack.payload["cached"], true);
-
-    let request = RuntimeControlEventRequest {
-        node_id: "value_1".to_owned(),
-        port_id: "value".to_owned(),
-        message: ControlMessage::bang(),
-    };
-    let mut response = RuntimeControlEventResponse {
-        ok: true,
-        changed: false,
-        control_revision: Some(1),
-        emitted: Vec::new(),
-        issues: Vec::new(),
-    };
-    assert!(
-        control_emitted_event(
-            &record,
-            &identity,
-            &frame,
-            &request,
-            &mut response,
-            BTreeMap::new(),
-            RealtimeEventPosition {
-                sequence: 3,
-                cursor: "cursor-3",
-            },
-        )
-        .is_none()
-    );
-
-    let mut changed_values = BTreeMap::new();
-    changed_values.insert("value_1".to_owned(), ControlValue::float(0.5));
-    let event = control_emitted_event(
-        &record,
-        &identity,
-        &frame,
-        &request,
-        &mut response,
-        changed_values,
-        RealtimeEventPosition {
-            sequence: 4,
-            cursor: "cursor-4",
-        },
-    )
-    .expect("changed control values should produce an event");
-    assert_eq!(event.message_type, "control.emitted");
-    assert_eq!(event.sequence, Some(4));
-    assert_eq!(event.payload["values"]["value_1"]["value"], 0.5);
 }

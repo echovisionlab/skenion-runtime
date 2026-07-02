@@ -13,9 +13,10 @@ use crate::object_spec::{
 use crate::session::{ApplyObjectNodeCreateCurrentRequest, ApplyObjectNodeReplaceCurrentRequest};
 use crate::{
     GraphTargetRef, ObjectResolutionCurrent, ObjectResolutionStatusCurrent, PatchPath,
-    RuntimeControlEventRequest, RuntimeControlEventResponse, RuntimeIssue, RuntimeMutationRequest,
-    RuntimePatchResponse,
+    RuntimeIssue, RuntimeMutationRequest, RuntimePatchResponse,
 };
+#[cfg(test)]
+use crate::{RuntimeControlEventRequest, RuntimeControlEventResponse};
 
 fn resolve_object_command_text(
     session: &crate::RuntimeSession,
@@ -661,6 +662,7 @@ fn empty_object_node_result(payload: &GraphCommandPayload, node_id: &str) -> Val
     })
 }
 
+#[cfg(test)]
 pub(in crate::realtime) fn node_input_result(
     request: &RuntimeControlEventRequest,
     response: &RuntimeControlEventResponse,

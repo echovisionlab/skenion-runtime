@@ -314,6 +314,7 @@ impl RuntimeRealtimeState {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn remember_presence(
         &self,
         identity: &RuntimeRealtimeConnectionIdentity,

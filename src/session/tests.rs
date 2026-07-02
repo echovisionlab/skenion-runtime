@@ -192,9 +192,8 @@ fn package_registry_with_definition(
             source: skenion_contracts::PackageSourceV01::Workspace,
             root: skenion_contracts::PackageRootKindV01::Package,
             trust: skenion_contracts::PackageTrustV01::Trusted,
-            contracts: skenion_contracts::PackageContractsSupportV01 {
-                line: "0.56".to_owned(),
-                range: ">=0.56.0 <0.57.0".to_owned(),
+            contracts: skenion_contracts::PackageContractsRequirementV01 {
+                version: skenion_contracts::CONTRACTS_PACKAGE_VERSION.to_owned(),
             },
             runtime_abi_range: None,
             targets: Vec::new(),
@@ -3544,7 +3543,7 @@ fn set_control_request(
         node_id: node_id.to_owned(),
         port_id: port_id.to_owned(),
         message: ControlMessage {
-            selector: "set".to_owned(),
+            key: "set".to_owned(),
             atoms: vec![value],
         },
     }

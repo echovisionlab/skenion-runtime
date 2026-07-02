@@ -6,21 +6,19 @@ use super::state::{RememberAckInput, sync_required_issue};
 use super::wire::{
     RuntimeRealtimeConnectionIdentity, RuntimeRealtimeEnvelope, RuntimeRealtimeIssue,
 };
-mod control;
 mod events;
 mod object_nodes;
 mod outcome;
 mod types;
 
+use super::RealtimeCommandDispatch;
 use crate::runtime_time::created_at_now;
 use crate::{
-    IssueSeverity, PatchPath, RuntimeControlEventRequest, RuntimeIssue, RuntimeMutationRequest,
-    RuntimeOperationAttribution, RuntimeOperationEnvelope, RuntimeOperationIssue,
-    RuntimePatchResponse, RuntimeSessionRecord,
+    IssueSeverity, PatchPath, RuntimeIssue, RuntimeMutationRequest, RuntimeOperationAttribution,
+    RuntimeOperationEnvelope, RuntimeOperationIssue, RuntimePatchResponse, RuntimeSessionRecord,
 };
-use control::{GraphControlEmission, apply_control_command};
-pub(super) use events::{control_emitted_event, graph_ack_from_cached};
-use events::{graph_ack, graph_applied_event};
+pub(super) use events::graph_command_ack_from_cached;
+use events::{graph_applied_event, graph_command_ack};
 pub(super) use outcome::GraphCommandOutcome;
 pub(super) use types::{
     GraphCommandPayload, GraphEventContext, HistoryCommandScope, ObjectUnresolvedPolicy,
@@ -31,14 +29,7 @@ pub(super) fn handle_graph_command(
     record: &RuntimeSessionRecord,
     identity: &RuntimeRealtimeConnectionIdentity,
     frame: RuntimeRealtimeEnvelope,
-) -> Result<
-    (
-        RuntimeRealtimeEnvelope,
-        Vec<RuntimeRealtimeEnvelope>,
-        Vec<RuntimeRealtimeEnvelope>,
-    ),
-    RuntimeRealtimeIssue,
-> {
+) -> Result<RealtimeCommandDispatch, RuntimeRealtimeIssue> {
     let idempotency_key = frame.idempotency_key.clone().ok_or_else(|| {
         sync_required_issue(
             "realtime.command.idempotency-key-required",
@@ -51,12 +42,11 @@ pub(super) fn handle_graph_command(
             .realtime
             .cached_command_result(identity, &frame.message_type, &idempotency_key)
     {
-        let emitted_results = cached.emitted_results.clone();
-        return Ok((
-            graph_ack_from_cached(record, identity, &frame, cached),
-            Vec::new(),
-            emitted_results,
-        ));
+        return Ok(RealtimeCommandDispatch {
+            ack: graph_command_ack_from_cached(record, identity, &frame, cached.clone()),
+            sender_events: cached.emitted_results,
+            broadcast_events: Vec::new(),
+        });
     }
 
     let payload =
@@ -74,7 +64,6 @@ pub(super) fn handle_graph_command(
         response,
         node_result,
         operation_result,
-        control_emission,
         catalog_snapshot,
     } = outcome;
     let position = RealtimeEventPosition {
@@ -91,23 +80,9 @@ pub(super) fn handle_graph_command(
         operation_result: operation_result.as_ref(),
         position,
     };
-    let ack = graph_ack(&graph_context, false);
+    let ack = graph_command_ack(&graph_context, false);
     let event = if response.applied {
         Some(graph_applied_event(&graph_context))
-    } else if let Some(mut control_emission) = control_emission {
-        if control_emission.response.ok {
-            control_emitted_event(
-                record,
-                identity,
-                &frame,
-                &control_emission.request,
-                &mut control_emission.response,
-                control_emission.changed_values,
-                position,
-            )
-        } else {
-            None
-        }
     } else {
         None
     };
@@ -134,7 +109,11 @@ pub(super) fn handle_graph_command(
         emitted_results: events.clone(),
     });
 
-    Ok((ack, events, Vec::new()))
+    Ok(RealtimeCommandDispatch {
+        ack,
+        sender_events: Vec::new(),
+        broadcast_events: events,
+    })
 }
 
 pub(super) fn apply_graph_command(
@@ -190,94 +169,6 @@ pub(super) fn apply_graph_command(
             ),
         ));
     };
-
-    if command_kind == GraphCommandKind::NodeInput {
-        let Some(node_id) = payload.node_id.clone() else {
-            return GraphCommandOutcome::with_node_result(
-                graph_command_rejected_response(
-                    &session,
-                    false,
-                    RuntimeIssue::structured_error(
-                        "graph.command.node-id-required",
-                        "graph.command kind node.input requires payload.nodeId",
-                        json!({ "commandKind": payload.kind }),
-                    ),
-                ),
-                node_command_result(payload, None, None, Vec::new(), None),
-            );
-        };
-        let Some(port_id) = payload.port_id.clone() else {
-            return GraphCommandOutcome::with_node_result(
-                graph_command_rejected_response(
-                    &session,
-                    false,
-                    RuntimeIssue::structured_error(
-                        "graph.command.port-id-required",
-                        "graph.command kind node.input requires payload.portId",
-                        json!({ "commandKind": payload.kind, "nodeId": node_id }),
-                    ),
-                ),
-                node_command_result(payload, None, Some(&node_id), Vec::new(), None),
-            );
-        };
-        let Some(message) = payload.message.clone() else {
-            return GraphCommandOutcome::with_node_result(
-                graph_command_rejected_response(
-                    &session,
-                    false,
-                    RuntimeIssue::structured_error(
-                        "graph.command.message-required",
-                        "graph.command kind node.input requires payload.message",
-                        json!({
-                            "commandKind": payload.kind,
-                            "nodeId": node_id,
-                            "portId": port_id,
-                        }),
-                    ),
-                ),
-                node_command_result(payload, None, Some(&node_id), Vec::new(), None),
-            );
-        };
-        drop(session);
-        let request = RuntimeControlEventRequest {
-            node_id,
-            port_id,
-            message,
-        };
-        let (response, changed_values, applied_request) = apply_control_command(record, request);
-        let (snapshot, history) = {
-            let session = record
-                .session
-                .read()
-                .expect("runtime session lock should not be poisoned");
-            (session.snapshot(), session.history())
-        };
-        let input = node_input_result(&applied_request, &response);
-        let patch_response = RuntimePatchResponse {
-            ok: response.ok,
-            applied: false,
-            conflict: false,
-            snapshot,
-            history,
-            issues: response.issues.clone(),
-        };
-        let control_emission = response.ok.then_some(GraphControlEmission {
-            request: applied_request.clone(),
-            response,
-            changed_values,
-        });
-        return GraphCommandOutcome::with_node_result_and_control_emission(
-            patch_response,
-            node_command_result(
-                payload,
-                None,
-                Some(&applied_request.node_id),
-                Vec::new(),
-                Some(input),
-            ),
-            control_emission,
-        );
-    }
 
     let response = match command_kind {
         GraphCommandKind::ViewPatch => {
@@ -466,9 +357,6 @@ pub(super) fn apply_graph_command(
             return apply_node_update_graph_command(&mut session, identity, frame, payload)
                 .with_catalog_change(before_catalog_revision, &session);
         }
-        GraphCommandKind::NodeInput => {
-            unreachable!("node.input is handled before graph mutation commands")
-        }
     };
     GraphCommandOutcome::from_response(response)
         .with_catalog_change(before_catalog_revision, &session)
@@ -583,12 +471,12 @@ fn operation_issues_to_runtime(issues: &[RuntimeOperationIssue]) -> Vec<RuntimeI
 pub(super) use object_nodes::{
     apply_node_delete_graph_command, apply_node_update_graph_command,
     apply_object_create_graph_command, apply_object_replace_graph_command,
-    apply_object_resolve_graph_command, node_command_result, node_input_result,
+    apply_object_resolve_graph_command,
 };
 #[cfg(test)]
 pub(super) use object_nodes::{
-    materialize_object_command_node, next_generated_node_id, node_id_slug,
-    object_spec_runtime_issues, validate_object_command_target,
+    materialize_object_command_node, next_generated_node_id, node_command_result, node_id_slug,
+    node_input_result, object_spec_runtime_issues, validate_object_command_target,
 };
 
 fn graph_command_rejected_response(

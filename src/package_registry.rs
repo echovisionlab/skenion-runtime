@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use skenion_contracts::{
-    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsSupportV01,
+    PackageChecksumAlgorithmV01, PackageChecksumV01, PackageContractsRequirementV01,
     PackageIssueSeverityV01, PackageIssueV01, PackageManifestV01, PackageObjectExportV01,
     PackageProvidedRefV01, PackageProvidesV01, PackageRootKindV01, PackageSourceV01,
     PackageTargetTripleV01, PackageTrustV01, SKENION_PACKAGE_MANIFEST_FILE_NAME,
@@ -33,7 +33,7 @@ pub struct PackageRegistryEntryV01 {
     pub source: PackageSourceV01,
     pub root: PackageRootKindV01,
     pub trust: PackageTrustV01,
-    pub contracts: PackageContractsSupportV01,
+    pub contracts: PackageContractsRequirementV01,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_abi_range: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -816,6 +816,7 @@ mod tests {
 
     fn valid_manifest(package_id: &str) -> String {
         let provided_id = package_id.replace('/', ".");
+        let contracts_version = skenion_contracts::CONTRACTS_PACKAGE_VERSION;
         format!(
             r#"{{
               "schema": "skenion.package.manifest",
@@ -823,7 +824,7 @@ mod tests {
               "id": "{package_id}",
               "version": "0.49.0",
               "category": "patch",
-              "contracts": {{ "line": "0.49", "range": ">=0.49.0 <0.50.0" }},
+              "contracts": {{ "version": "{contracts_version}" }},
               "provides": {{
                 "patches": [{{ "id": "{provided_id}.main", "path": "patches/main.skenion.json" }}]
               }},
@@ -910,8 +911,10 @@ mod tests {
         assert_eq!(response.packages.len(), 1);
         assert_eq!(response.packages[0].package_id, "example/package");
         assert_eq!(response.packages[0].version, "0.49.0");
-        assert_eq!(response.packages[0].contracts.line, "0.49");
-        assert_eq!(response.packages[0].contracts.range, ">=0.49.0 <0.50.0");
+        assert_eq!(
+            response.packages[0].contracts.version,
+            skenion_contracts::CONTRACTS_PACKAGE_VERSION
+        );
         assert_eq!(response.packages[0].source, PackageSourceV01::Workspace);
         assert_eq!(response.packages[0].root, PackageRootKindV01::Package);
         assert_eq!(response.packages[0].trust, PackageTrustV01::Trusted);
@@ -1007,8 +1010,11 @@ mod tests {
     fn contract_invalid_manifest_stays_in_registry_with_package_issue() {
         let package_dir = temp_dir("contract-invalid");
         let body = valid_manifest("bad id").replace(
-            r#""contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" }"#,
-            r#""contracts": { "line": "0.49", "range": "*" }"#,
+            &format!(
+                r#""contracts": {{ "version": "{}" }}"#,
+                skenion_contracts::CONTRACTS_PACKAGE_VERSION
+            ),
+            r#""contracts": { "version": "*" }"#,
         );
         write_package_manifest(&package_dir, &body);
         let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
@@ -1024,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_manifest_projection_fields_fail_closed_under_contracts_049() {
+    fn manifest_projection_fields_fail_closed() {
         let package_dir = temp_dir("legacy-projection-fields");
         let body = valid_manifest("example/legacy-fields").replace(
             "\"category\": \"patch\",",
@@ -1081,62 +1087,65 @@ mod tests {
     #[test]
     fn every_manifest_declared_path_surface_is_checked_and_public_paths_are_sanitized() {
         let package_dir = temp_dir("all-path-surfaces");
-        let body = r#"{
+        let contracts_version = skenion_contracts::CONTRACTS_PACKAGE_VERSION;
+        let body = format!(
+            r#"{{
           "schema": "skenion.package.manifest",
           "schemaVersion": "0.1.0",
           "id": "example/all-paths",
           "version": "0.49.0",
           "category": "mixed",
-          "contracts": { "line": "0.49", "range": ">=0.49.0 <0.50.0" },
+          "contracts": {{ "version": "{contracts_version}" }},
           "runtimeAbiRange": ">=0.1.0 <0.2.0",
           "targets": ["x86_64-unknown-linux-gnu"],
-          "provides": {
-            "patches": [{ "id": "example.all.patch", "path": "/absolute/patch.skenion.json" }],
-            "nodes": [{ "id": "example.all.node", "path": "../nodes/node.json" }],
-            "resources": [{ "id": "example.all.resource", "path": "" }],
-            "help": [{ "id": "example.all.help", "path": "../help/help.skenion.json" }]
-          },
-          "paths": {
+          "provides": {{
+            "patches": [{{ "id": "example.all.patch", "path": "/absolute/patch.skenion.json" }}],
+            "nodes": [{{ "id": "example.all.node", "path": "../nodes/node.json" }}],
+            "resources": [{{ "id": "example.all.resource", "path": "" }}],
+            "help": [{{ "id": "example.all.help", "path": "../help/help.skenion.json" }}]
+          }},
+          "paths": {{
             "patches": ["../patches"],
             "resources": ["/absolute/resources"],
             "docs": [""],
             "tests": ["../tests"]
-          },
+          }},
           "checksums": [
-            {
+            {{
               "id": "manifest",
               "path": "/absolute/checksum.sha256",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-              }
-            }
+              }}
+            }}
           ],
           "evidence": [
-            {
+            {{
               "id": "sbom",
               "kind": "sbom",
               "path": "../evidence/sbom.json",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-              }
-            }
+              }}
+            }}
           ],
           "nativeArtifacts": [
-            {
+            {{
               "target": "x86_64-unknown-linux-gnu",
               "path": "/absolute/libexample.so",
               "entrypoint": "skenion_extension_init",
-              "checksum": {
+              "checksum": {{
                 "algorithm": "sha256",
                 "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-              },
+              }},
               "evidenceRefs": ["sbom"]
-            }
+            }}
           ]
-        }"#;
-        write_package_manifest(&package_dir, body);
+        }}"#
+        );
+        write_package_manifest(&package_dir, &body);
         let manager = RuntimePackageManager::with_package_dirs(vec![package_dir.clone()]);
 
         let response = manager.list_packages();
@@ -1279,9 +1288,8 @@ mod tests {
                 source: PackageSourceV01::Workspace,
                 root: PackageRootKindV01::Package,
                 trust: PackageTrustV01::Trusted,
-                contracts: PackageContractsSupportV01 {
-                    line: "0.49".to_owned(),
-                    range: ">=0.49.0 <0.50.0".to_owned(),
+                contracts: PackageContractsRequirementV01 {
+                    version: skenion_contracts::CONTRACTS_PACKAGE_VERSION.to_owned(),
                 },
                 runtime_abi_range: None,
                 targets: Vec::new(),

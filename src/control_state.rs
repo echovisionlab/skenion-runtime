@@ -230,7 +230,7 @@ impl ControlState {
                         message: ControlMessage::from_value(stored),
                     }]);
                 }
-                let silent = message.selector == "set";
+                let silent = message.key == "set";
                 let Some(next) = value_from_message(&message, &stored) else {
                     return RuntimeControlEventResponse::error(type_error_from_message(
                         &message, &stored, &node.id,
@@ -257,7 +257,7 @@ impl ControlState {
                         node.id
                     ));
                 }
-                if message.selector == "set" {
+                if message.key == "set" {
                     return RuntimeControlEventResponse::error(format!(
                         "control input {}.cold expects a typed control payload",
                         node.id
@@ -421,7 +421,7 @@ impl ControlState {
                     }]);
                 }
 
-                let silent = message.selector == "set";
+                let silent = message.key == "set";
                 let Some(input) = numeric_message_value(&message) else {
                     return RuntimeControlEventResponse::error(format!(
                         "control operator {} expects a numeric message",
@@ -457,7 +457,7 @@ impl ControlState {
                         node.id
                     ));
                 }
-                if message.selector == "set" {
+                if message.key == "set" {
                     return RuntimeControlEventResponse::error(format!(
                         "control operator {}.right expects a typed numeric payload",
                         node.id
@@ -691,7 +691,7 @@ fn is_numeric_data_kind(data_kind: &'static str) -> bool {
 }
 
 fn is_bang_message(message: &ControlMessage) -> bool {
-    message.selector == "bang" && message.atoms.is_empty()
+    message.key == "bang" && message.atoms.is_empty()
 }
 
 fn value_from_message(message: &ControlMessage, stored: &ControlValue) -> Option<ControlValue> {
@@ -705,10 +705,10 @@ fn value_from_message(message: &ControlMessage, stored: &ControlValue) -> Option
         }
         ControlValue::Bool { .. } => coerce_toggle_input(message, false).map(ControlValue::bool),
         ControlValue::String { .. } => {
-            if message.selector == "set" {
+            if message.key == "set" {
                 return Some(ControlValue::string(set_message_text(message)));
             }
-            if message.selector == "symbol"
+            if message.key == "symbol"
                 && let Some(ControlValue::String { value }) = atom
             {
                 return Some(ControlValue::string(value.clone()));
@@ -724,9 +724,9 @@ fn type_error_from_message(
     node_id: &str,
 ) -> String {
     format!(
-        "control input {node_id} expects {}, got message selector {}",
+        "control input {node_id} expects {}, got message key {}",
         stored.kind_label(),
-        message.selector
+        message.key
     )
 }
 
@@ -738,7 +738,7 @@ fn message_from_message_node_state(stored: &ControlValue) -> ControlMessage {
 }
 
 fn set_message_text(message: &ControlMessage) -> String {
-    if message.selector == "set" {
+    if message.key == "set" {
         return message
             .atoms
             .iter()
@@ -746,7 +746,7 @@ fn set_message_text(message: &ControlMessage) -> String {
             .collect::<Vec<_>>()
             .join(" ");
     }
-    if message.selector == "symbol"
+    if message.key == "symbol"
         && let Some(ControlValue::String { value }) = message.first_atom()
     {
         return value.clone();
@@ -755,7 +755,7 @@ fn set_message_text(message: &ControlMessage) -> String {
 }
 
 fn silent_set_message(message: &ControlMessage) -> Option<String> {
-    (message.selector == "set").then(|| set_message_text(message))
+    (message.key == "set").then(|| set_message_text(message))
 }
 
 fn control_atom_to_text(value: &ControlValue) -> String {
@@ -778,7 +778,7 @@ fn control_atom_to_text(value: &ControlValue) -> String {
 }
 
 fn coerce_toggle_input(message: &ControlMessage, current: bool) -> Option<bool> {
-    match message.selector.as_str() {
+    match message.key.as_str() {
         "bang" if message.atoms.is_empty() => Some(!current),
         "on" | "true" => Some(true),
         "off" | "false" => Some(false),

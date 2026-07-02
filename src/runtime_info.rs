@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
-use skenion_contracts::{
-    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-};
+use skenion_contracts::CONTRACTS_PACKAGE_VERSION;
 
 pub const RUNTIME_API_VERSION: &str = "0.1.0";
 
@@ -13,8 +11,7 @@ pub struct HealthResponse {
     pub version: &'static str,
     pub api_version: &'static str,
     pub contracts_built_against_version: &'static str,
-    pub supported_contracts_line: &'static str,
-    pub supported_contracts_range: &'static str,
+    pub required_contracts_version: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,8 +21,7 @@ pub struct RuntimeInfoResponse {
     pub version: &'static str,
     pub api_version: &'static str,
     pub contracts_built_against_version: &'static str,
-    pub supported_contracts_line: &'static str,
-    pub supported_contracts_range: &'static str,
+    pub required_contracts_version: &'static str,
     pub capabilities: Vec<&'static str>,
 }
 
@@ -36,8 +32,7 @@ pub(crate) fn health_response() -> HealthResponse {
         version: env!("CARGO_PKG_VERSION"),
         api_version: RUNTIME_API_VERSION,
         contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
-        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
-        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
+        required_contracts_version: CONTRACTS_PACKAGE_VERSION,
     }
 }
 
@@ -47,8 +42,7 @@ pub(crate) fn runtime_info_response() -> RuntimeInfoResponse {
         version: env!("CARGO_PKG_VERSION"),
         api_version: RUNTIME_API_VERSION,
         contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
-        supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
-        supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
+        required_contracts_version: CONTRACTS_PACKAGE_VERSION,
         capabilities: runtime_capabilities(),
     }
 }

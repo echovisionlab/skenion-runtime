@@ -199,14 +199,13 @@ def read_toml(path: Path, label: str) -> dict:
     return read_minimal_manifest(path)
 
 
-def parse_v0_line(version: str, label: str) -> str:
+def validate_exact_v0_version(version: str, label: str) -> None:
     match = SEMVER.fullmatch(version)
     if not match:
         fail(f"{label} must be exact SemVer x.y.z; got {version!r}.")
-    major, minor, _patch = (int(part) for part in version.split("."))
+    major, _minor, _patch = (int(part) for part in version.split("."))
     if major != 0:
-        fail(f"{label} must stay on the v0 Contracts line; got {version!r}.")
-    return f"0.{minor}"
+        fail(f"{label} must be a v0 Contracts package version; got {version!r}.")
 
 
 def runtime_contracts_dependency(manifest: dict) -> str:
@@ -247,7 +246,7 @@ output_path = Path(sys.argv[3])
 
 runtime = read_toml(runtime_manifest, "Runtime Cargo.toml")
 expected_version = runtime_contracts_dependency(runtime)
-expected_line = parse_v0_line(expected_version, "Runtime skenion-contracts dependency")
+validate_exact_v0_version(expected_version, "Runtime skenion-contracts dependency")
 
 contracts_manifest = read_toml(contracts_path / "Cargo.toml", "Contracts Cargo.toml")
 package = contracts_manifest.get("package", {})
@@ -258,17 +257,11 @@ if package.get("name") != "skenion-contracts":
     )
 
 actual_version = str(package.get("version", "")).strip()
-actual_line = parse_v0_line(actual_version, "local skenion-contracts package version")
+validate_exact_v0_version(actual_version, "local skenion-contracts package version")
 if actual_version != expected_version:
     fail(
         "local skenion-contracts version mismatch: Runtime requires "
-        f"{expected_version} (line {expected_line}), but {contracts_path} "
-        f"declares {actual_version} (line {actual_line})."
-    )
-if actual_line != expected_line:
-    fail(
-        "local skenion-contracts line mismatch: Runtime requires "
-        f"{expected_line}, but {contracts_path} declares {actual_line}."
+        f"{expected_version}, but {contracts_path} declares {actual_version}."
     )
 
 commit = subprocess.run(
@@ -298,15 +291,12 @@ validation = {
     "runtime_manifest": str(runtime_manifest),
     "contracts_path": str(contracts_path),
     "expected_version": expected_version,
-    "expected_line": expected_line,
-    "expected_range": f">={expected_line}.0 <0.{int(expected_line.split('.')[1]) + 1}.0",
     "git_evidence": git_evidence,
 }
 output_path.write_text(json.dumps(validation, indent=2) + "\n", encoding="utf-8")
 
 print(
-    "Runtime requires skenion-contracts "
-    f"{expected_version} on Contracts line {expected_line}.",
+    f"Runtime requires skenion-contracts {expected_version}.",
     file=sys.stderr,
 )
 print(

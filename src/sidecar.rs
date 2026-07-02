@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
-use skenion_contracts::{
-    CONTRACTS_COMPATIBILITY_LINE, CONTRACTS_COMPATIBILITY_RANGE, CONTRACTS_PACKAGE_VERSION,
-};
+use skenion_contracts::CONTRACTS_PACKAGE_VERSION;
 
 use crate::{
     IssueSeverity, RUNTIME_API_VERSION, RuntimeConnectionProfile, RuntimeConnectionProfileMode,
@@ -47,8 +45,7 @@ pub struct RuntimeSidecarRuntimeInfo {
     pub version: &'static str,
     pub api_version: &'static str,
     pub contracts_built_against_version: &'static str,
-    pub supported_contracts_line: &'static str,
-    pub supported_contracts_range: &'static str,
+    pub required_contracts_version: &'static str,
 }
 
 impl RuntimeSidecarRuntimeInfo {
@@ -58,8 +55,7 @@ impl RuntimeSidecarRuntimeInfo {
             version: env!("CARGO_PKG_VERSION"),
             api_version: RUNTIME_API_VERSION,
             contracts_built_against_version: CONTRACTS_PACKAGE_VERSION,
-            supported_contracts_line: CONTRACTS_COMPATIBILITY_LINE,
-            supported_contracts_range: CONTRACTS_COMPATIBILITY_RANGE,
+            required_contracts_version: CONTRACTS_PACKAGE_VERSION,
         }
     }
 }
